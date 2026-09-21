@@ -205,7 +205,7 @@ EOF
 	# ---- 断言 3/3：进包的文本文件与 git 源码逐字节一致
 	pairs=""
 	for rel in $(cd "${repo_dir}/htdocs" && find . -type f | sed 's|^\./||' | LC_ALL=C sort); do
-		pairs="${pairs}htdocs/luci-static/resources/${rel}|www/luci-static/resources/${rel}
+		pairs="${pairs}htdocs/${rel}|www/${rel}
 "
 	done
 	pairs="${pairs}root/usr/share/luci/menu.d/${pkg_name}.json|usr/share/luci/menu.d/${pkg_name}.json
