@@ -105,6 +105,8 @@ luci-app-fm350/
 ├── Makefile                       打包定义（含 Rust 交叉编译钩子）
 ├── README.md
 ├── CHANGELOG.md
+├── .gitignore                     排除 rust/target（约 258 MB）与 *.apk / *.ipk 等
+├── .gitattributes                 强制文本文件使用 LF（见下方「仓库约定」）
 ├── htdocs/luci-static/resources/
 │   ├── fm350/api.js               统一后端调用层（rpc.declare 声明全部方法）
 │   ├── fm350/css/fm350.css        独立样式表（页面不使用内联样式）
@@ -125,6 +127,7 @@ luci-app-fm350/
 │           └── ucode/fm350.uc                rpcd ucode 代理（ubus → fm350d）
 └── rust/                          Rust 后端
     ├── Cargo.toml
+    ├── Cargo.lock                 锁定依赖版本，保证可复现构建
     ├── .cargo/config.toml         交叉链接器配置
     └── src/
         ├── at.rs                  AT 串口独占访问层 + 端口枚举
@@ -136,6 +139,11 @@ luci-app-fm350/
         ├── api.rs                 本地 JSON API（仅 127.0.0.1）
         └── main.rs                CLI 与 daemon
 ```
+
+> **仓库约定**：文本文件在仓库内统一使用 LF（由 `.gitattributes` 的
+> `* text=auto eol=lf` 保证）。这不是风格偏好 —— `/etc/init.d/fm350d` 若带 CRLF，
+> procd 会报 `can't open /etc/rc.common`；ucode 与 LuCI JS 也可能解析异常。
+> 构建产物 `rust/target/`（约 258 MB）与 `*.apk` / `*.ipk` 已在 `.gitignore` 中排除。
 
 ---
 
