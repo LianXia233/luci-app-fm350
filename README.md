@@ -112,19 +112,19 @@
 > 派生指标**仅用于前端可视化呈现**，**绝对不参与任何内核链路判断与路由决策**。
 
 1. **RSRQ 质量等级**：
-   * **优**：$\ge -10\text{ dB}$
-   * **良**：$\ge -15\text{ dB}$
-   * **中**：$\ge -19.5\text{ dB}$
-   * **差**：$< -19.5\text{ dB}$
+   * **优**： $\ge -10\text{ dB}$
+   * **良**： $\ge -15\text{ dB}$
+   * **中**： $\ge -19.5\text{ dB}$
+   * **差**： $\lt -19.5\text{ dB}$
 
 2. **信号质量等级**：
-   * 首选评估 SINR：$\ge 20\text{ dB}$（优）/ $\ge 13\text{ dB}$（良）/ $\ge 0\text{ dB}$（中）/ $< 0\text{ dB}$（差）。
-   * 若当前制式无 SINR 上报，退回判定 RSRP：$\ge -80\text{ dBm}$（优）/ $\ge -90\text{ dBm}$（良）/ $\ge -100\text{ dBm}$（中）/ $< -100\text{ dBm}$（差）。
+   * 首选评估 SINR： $\ge 20\text{ dB}$（优）/ $\ge 13\text{ dB}$（良）/ $\ge 0\text{ dB}$（中）/ $\lt 0\text{ dB}$（差）。
+   * 若当前制式无 SINR 上报，退回判定 RSRP： $\ge -80\text{ dBm}$（优）/ $\ge -90\text{ dBm}$（良）/ $\ge -100\text{ dBm}$（中）/ $\lt -100\text{ dBm}$（差）。
 
 3. **综合信号评分（SIGNAL 合成公式）**：
    将三个关键指标分别做线性归一化（映射至 $0 \sim 100$），并按以下权重加权计算：
 
-   $$\text{SIGNAL} = 0.40 \times \text{SINR}_{\text{norm}} + 0.35 \times \text{RSRP}_{\text{norm}} + 0.25 \times \text{RSRQ}_{\text{norm}}$$
+$$\text{SIGNAL} = 0.40 \times \text{SINR}_{\text{norm}} + 0.35 \times \text{RSRP}_{\text{norm}} + 0.25 \times \text{RSRQ}_{\text{norm}}$$
 
    | 指标项 | 标称物理量区间 $[V_{\min}, V_{\max}]$ | 归一化公式 |
    | :--- | :--- | :--- |
@@ -132,7 +132,17 @@
    | **RSRQ** | $-19.5 \sim -3\text{ dB}$ | $\text{RSRQ}_{\text{norm}} = \frac{v - (-19.5)}{-3 - (-19.5)} \times 100 = \frac{v + 19.5}{16.5} \times 100$ |
    | **SINR** | $-23 \sim 30\text{ dB}$ | $\text{SINR}_{\text{norm}} = \frac{v - (-23)}{30 - (-23)} \times 100 = \frac{v + 23}{53} \times 100$ |
 
-   * **边界保护**：超出标称区间自动截断（Clamp）至 $0$ 或 $100$。得分对应信号条格数：$\ge 80 \rightarrow 5$ 格、$\ge 60 \rightarrow 4$ 格、$\ge 40 \rightarrow 3$ 格、$\ge 20 \rightarrow 2$ 格、$> 0 \rightarrow 1$ 格、$0 \rightarrow 0$ 格。
+   * **边界保护**：超出标称区间自动截断（Clamp）至 0 或 100。
+   * **信号条格数映射**：综合得分越高，点亮的信号条格数越多。
+
+   | 综合得分 | 信号条格数 |
+   | :--- | :--- |
+   | $\ge 80$ | 5 格 |
+   | $\ge 60$ | 4 格 |
+   | $\ge 40$ | 3 格 |
+   | $\ge 20$ | 2 格 |
+   | $\gt 0$ | 1 格 |
+   | $= 0$ | 0 格 |
    * **缺失指标智能重归一化**：当 LTE 模式下缺少 SINR 时，**缺失指标自动剔除，剩余指标按权重比例重新归一化计算**（避免因缺项直接归零导致整体得分被系统性拉低）。后端回传 `overall_used` 字段标明参算指标。
 
 ---
@@ -480,7 +490,7 @@ rm -rf /tmp/luci-modulecache/
 
 * `AT+GTTHERMAL?` 返回的 `+GTTHERMAL: 1` 仅是**温控健康标志**（1 表示未发生降频限流），误将其作为温度会使读数固定为恒定的 `1 ℃`。
 * `AT+GTSENRDTEMP?` 查询形式不被模组支持，会直接报错 `+CME ERROR: phone failure`。
-* **正确做法**：必须下发带参数的执行指令 `AT+GTSENRDTEMP=0`，模组将逐行返回 23 路传感器的原始千分位读数（单位：$0.001\text{ ℃}$，实际读数需除以 1000）。常用传感器：`1` = soc_max，`10` = md_5g，`14` = ltepa_ntc，`15` = nrpa_ntc，`16` = rf_ntc。
+* **正确做法**：必须下发带参数的执行指令 `AT+GTSENRDTEMP=0`，模组将逐行返回 23 路传感器的原始千分位读数（单位： $0.001\text{ ℃}$，实际读数需除以 1000）。常用传感器：`1` = soc_max，`10` = md_5g，`14` = ltepa_ntc，`15` = nrpa_ntc，`16` = rf_ntc。
 </details>
 
 <details>
