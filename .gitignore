@@ -7,6 +7,12 @@
 *.o
 *.so
 
+# 发布流水线产物（scripts/build-release.sh 的输出目录）
+/dist-release/
+
+# 本地 SDK 工作目录（若把 FM350_WORK_DIR 指向仓库内）
+/.sdk-cache/
+
 # 编辑器与系统
 .DS_Store
 Thumbs.db

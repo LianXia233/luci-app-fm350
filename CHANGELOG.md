@@ -2,6 +2,44 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.0-r11
+
+新增持续集成与发布流水线。本版不含设备侧行为改动，包内容与 r10 相同
+（仅版本号字符串不同）。
+
+### 新增
+
+- **持续集成（`.github/workflows/ci.yml`）**：推送与 PR 触发两组检查。
+  - 静态门禁：行尾必须 LF；JSON 元数据可解析；LuCI 前端 JS 语法；
+    init 脚本语法与可执行位；`PKG_RELEASE` 与 CHANGELOG 顶部版本一致；
+    仓库内不得出现外部项目名；IMEI 安全不变式（只读路径存在、写入受 UCI
+    开关控制、开关默认关闭）。每一条都对应一类"包能装、页面能开、就是不对"
+    的静默故障。
+  - Rust 单测（44 项）与 release 档本机构建。
+- **发布（`.github/workflows/release.yml` + `scripts/build-release.sh`）**：
+  推 `v*` 标签或手动触发时，下载 ImmortalWrt SNAPSHOT 的 filogic SDK
+  （按 `sha256sums` 校验）交叉编译出 `aarch64_cortex-a53` 的 `.apk`，
+  附 `SHA256SUMS` 与 SDK 公钥后发布到 Release。发布前强制校验 tag 版本
+  与 `PKG_VERSION` 一致、CHANGELOG 存在对应段落。
+
+### 修复
+
+- `root/etc/init.d/fm350d` 补上仓库内的可执行位（原为 100644）。打包时
+  Makefile 的 `INSTALL_BIN` 本来就会置为 0755，设备侧一直正常；但仓库里
+  没有执行位时，手工拷贝部署或在设备上直接调用该脚本会失败，且几乎没有
+  可用的报错线索。
+- `scripts/build-release.sh` 内置三条断言：产物文件名必须与 Makefile 的
+  版本号匹配；进包的 `fm350d` 必须是 aarch64 可执行文件且非空；进包的文本
+  文件必须与 git 源码逐字节一致。
+
+### 说明
+
+- 本版无设备侧代码改动，r10 的实机验证结论（`PASS=24 / FAIL=0`、
+  浏览器 `PASS=50 / FAIL=0`）继续成立。
+- 未纳入 `cargo fmt --check`：当前代码未按 rustfmt 全量格式化，纳入后
+  需一次性改写约 600 行且无功能收益，并会使"已在实机上验证过的构建"
+  失去字节对应关系。若要纳入，应作为独立一次提交并重跑实机验证。
+
 ## 1.0.0-r10
 
 同步「服务设置」页的用户可见文案与实测事实（r9 漏改的最后一处）。

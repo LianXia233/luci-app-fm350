@@ -105,8 +105,13 @@ luci-app-fm350/
 ├── Makefile                       打包定义（含 Rust 交叉编译钩子）
 ├── README.md
 ├── CHANGELOG.md
-├── .gitignore                     排除 rust/target（约 258 MB）与 *.apk / *.ipk 等
+├── .github/workflows/
+│   ├── ci.yml                     静态门禁 + Rust 单测（推送 / PR 触发）
+│   └── release.yml                发布流水线（v* 标签或手动触发）
+├── .gitignore                     排除 rust/target（约 258 MB）、*.apk / *.ipk、dist-release/
 ├── .gitattributes                 强制文本文件使用 LF（见下方「仓库约定」）
+├── scripts/
+│   └── build-release.sh           用 ImmortalWrt SDK 构建发布产物（Linux）
 ├── htdocs/luci-static/resources/
 │   ├── fm350/api.js               统一后端调用层（rpc.declare 声明全部方法）
 │   ├── fm350/css/fm350.css        独立样式表（页面不使用内联样式）
@@ -143,7 +148,13 @@ luci-app-fm350/
 > **仓库约定**：文本文件在仓库内统一使用 LF（由 `.gitattributes` 的
 > `* text=auto eol=lf` 保证）。这不是风格偏好 —— `/etc/init.d/fm350d` 若带 CRLF，
 > procd 会报 `can't open /etc/rc.common`；ucode 与 LuCI JS 也可能解析异常。
-> 构建产物 `rust/target/`（约 258 MB）与 `*.apk` / `*.ipk` 已在 `.gitignore` 中排除。
+> 构建产物 `rust/target/`（约 258 MB）、`*.apk` / `*.ipk` 与发布产物
+> `dist-release/` 已在 `.gitignore` 中排除。
+>
+> 随包脚本（`root/etc/init.d/`、`scripts/`）在仓库内必须带可执行位（`100755`）。
+> Makefile 的 `INSTALL_BIN` 会在打包时纠正权限，所以设备侧不受影响；但仓库里
+> 没有执行位时，手工拷贝部署或在设备上直接调用会失败且几乎没有报错线索，
+> CI 会把这类文件直接拦下。
 
 ---
 
@@ -339,6 +350,58 @@ bin/packages/aarch64_cortex-a53/base/luci-app-fm350-<版本>.apk
 若需要英文界面，做法是把 JS / JSON 中的源字符串换成英文，
 再补一份 `po/zh_Hans/*.po`（英文 → 中文）并用 `po2lmo` 生成
 `/usr/lib/lua/luci/i18n/fm350.zh-cn.lmo` 随包安装。
+
+### 5.5 CI 与发布（GitHub Actions）
+
+仓库自带两条流水线，不依赖本地环境即可验证提交与产出安装包。
+
+**`.github/workflows/ci.yml`** —— 推送与 PR 触发。静态门禁逐条对应一类
+"包能装、页面能开、就是不对"的静默故障：
+
+| 检查 | 拦住的故障 |
+| --- | --- |
+| 行尾必须 LF | CRLF 让 `/etc/init.d/fm350d` 的 shebang 带上 `\r`，设备上报的错误与真因无关 |
+| JSON 可解析 | 菜单或 ACL 少一个逗号 → 菜单不显示或授权被拒，无任何日志 |
+| 前端 JS 语法 | 视图语法错误只在浏览器控制台可见 |
+| init 脚本语法 + 可执行位 | 缺执行位时 procd 起不来进程，日志里什么都没有 |
+| `PKG_RELEASE` 与 CHANGELOG 顶部一致 | 改了代码不记文档 |
+| 无外部来源词 | 仓库内混入其他项目名 |
+| IMEI 安全不变式 | 只读路径被删、写入开关失效或默认被打开 |
+| Rust 单测（44 项）+ release 档构建 | AT 状态机与 IMEI 校验的回归 |
+
+前端 JS 用 `vm.compileFunction` 编译检查而不用 `node --check`：LuCI 模块允许
+顶层 `return`，node 的脚本模式会把合法的模块判成语法错误。
+
+**`.github/workflows/release.yml`** —— 推 `v*` 标签或手动触发：
+
+1. 校验 tag 与 `PKG_VERSION` 一致、CHANGELOG 存在对应段落，任一不满足即停；
+2. `scripts/build-release.sh` 从镜像站读 `sha256sums` 解析 SDK 包名并校验，
+   下载 filogic SDK（约 450 MB，解压后约 3 GB）后交叉编译出
+   `aarch64_cortex-a53` 的 `.apk`；
+3. 发布到 Release，附 `SHA256SUMS` 与 SDK 公钥 `openwrt-sdk-build.pem`。
+
+发布脚本的三条断言都在 `make` 的 `.pkgdir` 暂存目录上做，不去解最终的 `.apk`：
+
+- 产物文件名必须等于 `luci-app-fm350-<PKG_VERSION>-r<PKG_RELEASE>.apk`；
+- 进包的 `/usr/sbin/fm350d` 必须是 aarch64 可执行文件且非空；
+- 进包的每个文本文件必须与 git 源码**逐字节一致**（`cmp`）。
+
+最后一条同时覆盖三种事故：构建期被加了压缩步骤、行尾被转成 CRLF、某个文件
+根本没被打进包。之所以比对 `.pkgdir` 而不是解 `.apk`：OpenWrt 25.x 起 apk-tools 3
+的容器格式是 `ADB.pckg`（魔数 `ADBd`），既不是 tar 也不是 gzip 流，每段独立压缩、
+偏移由索引表记录，手工解析会跟着 apk-tools 版本漂移；而 `.pkgdir` 是 `make`
+自己的中间产物，与打包器格式无关。
+
+本地复现发布构建（仅 Linux）：
+
+```sh
+./scripts/build-release.sh                    # 产物落在 dist-release/
+FM350_WORK_DIR=/tmp/fm350-sdk ./scripts/build-release.sh    # 指定工作目录
+```
+
+**未纳入 `cargo fmt --check`**：当前代码未按 rustfmt 全量格式化，纳入后需一次性
+改写约 600 行且无功能收益，并会使"已在实机上验证过的构建"失去字节对应关系。
+若要纳入，应作为独立一次提交并重跑实机验证。
 
 ---
 
