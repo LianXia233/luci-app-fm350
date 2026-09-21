@@ -125,6 +125,8 @@ luci-app-fm350/
 ├── root/
 │   ├── etc/config/fm350           默认 UCI 配置
 │   ├── etc/init.d/fm350d          procd 守护脚本
+│   └── etc/uci-defaults/
+│       └── 99-fm350-network       首次安装预置接口骨架（含 auto=1）
 │   └── usr/share/
 │       ├── luci/menu.d/luci-app-fm350.json   菜单注册
 │       └── rpcd/
@@ -483,6 +485,8 @@ fm350d ports | tr -d '\n' | grep -o '"stats":{[^}]*}'
 | AT 口独占 | 后端 `/proc/<pid>/fd` 中**始终**存在 ttyUSB 项；`fm350d ports` 的 `stats.open` 为 `true`、`held_secs` 随时间递增、`releases` 为 `0`；`settings` 页「AT 口当前状态」显示已持续独占的秒数与「独占有效」；人为在另一进程打开该节点后，`stats.other_pids` 能列出该 pid |
 | 配置改完即生效 | 在「服务设置」改 `at_port` 后**不重启服务**，下一次 `fm350d status` 即走新端口；改回后同样立即恢复 |
 | 服务 | `logread -e fm350d` 无崩溃循环 |
+| 接口默认启用 | `uci -q get network.fm350.auto` 与 `network.fm350v6.auto` 均为 `1`；LuCI「接口」页不显示「开机时未启动」 |
+| 加载体感 | 打开插件先出骨架再填数据，不再白屏；`/api/status` 端到端约 1 s |
 
 ### 已知注意事项
 
@@ -702,3 +706,5 @@ fm350d set <键> <值>              写入配置项
 | 与 LuCI 通信 | rpcd ucode 薄代理 | 避免前端直接 exec；参数单引号转义防注入 |
 | 样式 | 独立 CSS，无内联样式 | 便于主题适配（浅色 / 深色）与统一维护 |
 | i18n | 源文案即中文，不发 `.lmo` | 避免同值条目被 po2lmo 丢弃后产生空翻译文件与无效依赖 |
+| AT 命令节奏 | 最小间隔 30 ms 硬下限 | AT 通道半双工、无校验和也无 ACK，过密下发会让模组解析器失响应；排空缓冲改用 1 ms 非阻塞轮询后必须补回这个下限 |
+| 接口自启 | 安装落盘 + 每轮补齐 | netifd 对缺省 `auto` 的接口不开机自启；光靠守护在拨号时写入，稳态下就再也没有补齐的机会 |

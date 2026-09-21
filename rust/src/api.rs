@@ -173,8 +173,16 @@ pub fn dispatch(
 
             match crate::modem::dial(at, &c2) {
                 Ok(pdp_state) => {
-                    let net = crate::net::apply_after_dial(&c2, &pdp_state.ipv4, &pdp_state.dns);
-                    ok(serde_json::json!({ "pdp": pdp_state, "net": net.ok() }))
+                    // 不再用 .ok() 吞掉错误：网络配置失败必须让调用方看见原因，
+                    // 否则前端只能看到 net:null 而完全无从排查（实测踩过）。
+                    match crate::net::apply_after_dial(&c2, &pdp_state.ipv4, &pdp_state.dns) {
+                        Ok(n) => ok(serde_json::json!({ "pdp": pdp_state, "net": n })),
+                        Err(e) => ok(serde_json::json!({
+                            "pdp": pdp_state,
+                            "net": serde_json::Value::Null,
+                            "net_error": e,
+                        })),
+                    }
                 }
                 Err(e) => err(&e),
             }
