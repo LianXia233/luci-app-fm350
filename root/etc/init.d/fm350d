@@ -1,0 +1,52 @@
+#!/bin/sh /etc/rc.common
+# fm350d —— luci-app-fm350 的 Rust 后端守护
+#
+# 注意：本文件必须以 LF 行尾部署。CRLF 会让 shebang 变成
+# "#!/bin/sh /etc/rc.common\r"，导致 procd 报 "can't open /etc/rc.common"。
+
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/usr/sbin/fm350d
+PIDFILE=/var/run/fm350d.pid
+
+start_service() {
+	config_load fm350
+	local enabled
+	config_get_bool enabled main enabled 1
+	[ "$enabled" = "1" ] || {
+		logger -t fm350d "服务已在配置中禁用"
+		return 0
+	}
+
+	procd_open_instance
+	procd_set_param command "$PROG" daemon
+	procd_set_param respawn 3600 5 20
+	procd_set_param pidfile "$PIDFILE"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# 停止前尝试去激活 PDP 并拆除接口，避免残留路由
+	"$PROG" hangup >/dev/null 2>&1
+	rm -f "$PIDFILE"
+}
+
+reload_service() {
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger fm350
+}
+
+service_running() {
+	# procd 未必写 pidfile，回落到进程名匹配
+	if [ -f "$PIDFILE" ]; then
+		kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null && return 0
+	fi
+	pgrep -f "$PROG daemon" >/dev/null 2>&1
+}

@@ -1,0 +1,10 @@
+[target.aarch64-unknown-linux-musl]
+# 交叉编译到 ImmortalWrt / OpenWrt 的 aarch64 musl 目标。
+# linker 默认取 PATH 中的 OpenWrt SDK 交叉编译器，可用环境变量覆盖：
+#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=/path/to/aarch64-openwrt-linux-gcc
+# 全静态链接，避免目标机 libc 版本不匹配。
+linker = "aarch64-openwrt-linux-gcc"
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-s"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-openwrt-linux-gcc"

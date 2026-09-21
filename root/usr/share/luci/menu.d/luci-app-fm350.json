@@ -1,0 +1,74 @@
+{
+	"admin/modem": {
+		"title": "Mobile Network",
+		"order": 25,
+		"action": {
+			"type": "firstchild"
+		}
+	},
+
+	"admin/modem/fm350": {
+		"title": "FM350-GL",
+		"order": 10,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-fm350" ]
+		}
+	},
+
+	"admin/modem/fm350/status": {
+		"title": "状态",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "fm350/status"
+		}
+	},
+
+	"admin/modem/fm350/dial": {
+		"title": "拨号与 APN",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "fm350/dial"
+		}
+	},
+
+	"admin/modem/fm350/network": {
+		"title": "网络与锁频",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "fm350/network"
+		}
+	},
+
+	"admin/modem/fm350/sms": {
+		"title": "短信",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "fm350/sms"
+		}
+	},
+
+	"admin/modem/fm350/at": {
+		"title": "AT 终端",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "fm350/at"
+		}
+	},
+
+	"admin/modem/fm350/settings": {
+		"title": "服务设置",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "fm350/settings"
+		}
+	}
+}

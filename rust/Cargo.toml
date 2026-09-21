@@ -1,0 +1,22 @@
+[package]
+name = "fm350d"
+version = "0.1.0"
+edition = "2021"
+description = "Fibocom FM350 modem daemon / CLI for luci-app-fm350"
+license = "MIT"
+
+[[bin]]
+name = "fm350d"
+path = "src/main.rs"
+
+[dependencies]
+serialport = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+strip = true
