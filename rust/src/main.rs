@@ -187,10 +187,26 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                     Err(e) => eprintln!("fm350d: 拨号失败: {}", e),
                 }
             } else if !st.ipv4.is_empty() {
-                // 地址变化或接口缺失时重新应用
+                // 地址变化或接口缺失时重新应用。
+                // 这里必须打日志：原先 `let _ =` 把错误吞掉，出现过
+                // 「模组 PDP 正常、主机侧却一直没有 IP」的静默故障。
+                // 成功时只在确有偏差的那一轮打印，不会每 30 s 刷屏。
                 let ns = net::status(&cfg);
                 if !ns.ipv4.contains(&st.ipv4) {
-                    let _ = net::apply_after_dial(&cfg, &st.ipv4, &st.dns);
+                    match net::apply_after_dial(&cfg, &st.ipv4, &st.dns) {
+                        Ok(n) => eprintln!(
+                            "fm350d: 接口缺失或地址变化，已重新应用网络配置 {:?}",
+                            n.ipv4
+                        ),
+                        Err(e) => eprintln!("fm350d: 重新应用网络配置失败: {}", e),
+                    }
+                }
+                // 开机自启补齐：上面只在「地址有偏差」时才重写配置，稳态下
+                // auto 一旦不是 1 就永远补不回来（LuCI 显示「开机时未启动」）。
+                // 这里每轮无条件校验一次，成本 2~4 次 uci get；仅在确有修正时打日志。
+                let fixed = net::ensure_autostart(&cfg);
+                if !fixed.is_empty() {
+                    eprintln!("fm350d: 已把接口 {:?} 恢复为开机自启", fixed);
                 }
             }
         }

@@ -19,7 +19,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-fm350
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=11
+PKG_RELEASE:=12
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_MAINTAINER:=LianXia233
 PKG_BUILD_PARALLEL:=1
@@ -107,6 +107,9 @@ define Package/$(PKG_NAME)/install
 	$(CP) $(CURDIR)/htdocs/luci-static/resources/* $(1)$(LUCI_HTDOCSDIR)/
 
 	# 配置文件、init 脚本、rpcd ucode 插件与 ACL
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) $(CURDIR)/root/etc/uci-defaults/99-fm350-network \
+		$(1)/etc/uci-defaults/99-fm350-network
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/root/etc/config/fm350 $(1)/etc/config/fm350
 	$(INSTALL_DIR) $(1)/etc/init.d

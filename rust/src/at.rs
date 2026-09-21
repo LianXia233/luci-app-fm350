@@ -162,16 +162,34 @@ fn friendly_open_err(path: &str, e: &str) -> String {
     }
 }
 
+/// 相邻两条 AT 命令之间的**最小间隔**（发令时刻之差的下限）。
+///
+/// 为什么需要它：模组的 AT 解析器需要喘息时间，短时间连续下发会把 AT 打挂。
+/// 原先这个喘息是被「drain 的 200 ms 空等」顺带提供的（26 条命令 ≈ 5.7 s，
+/// 平均间隔约 220 ms）。优化去掉了空等之后，命令间隔会骤降到几十毫秒，
+/// 因此必须把「最小间隔」显式补回来，否则提速的代价就是把模组 AT 打死。
+///
+/// 取值 30 ms：115200 下一条短命令往返约 20~40 ms，此值通常不成为瓶颈；
+/// 但一旦上层连续发起命令（如 status 一次 26 条），它就把密度硬性钳住。
+const MIN_CMD_GAP: Duration = Duration::from_millis(30);
+
 /// 独占持有的 AT 端口。
 pub struct AtPort {
     port: Box<dyn SerialPort>,
     path: String,
     timeout: Duration,
+    /// 上一条命令的发出时刻，用于落实 MIN_CMD_GAP
+    last_cmd_at: Option<Instant>,
 }
 
 impl AtPort {
     pub fn open(path: &str, baudrate: u32, timeout_secs: u64) -> AtResult<Self> {
-        let builder = serialport::new(path, baudrate).timeout(Duration::from_millis(200));
+        // 端口 read 超时直接决定「空缓冲时 read 阻塞多久」，必须保持很小：
+        // drain()/command() 都以 read 超时作为轮询节拍，默认 200 ms 会让每条
+        // AT 命令白等 200 ms（一次 status 串起 20+ 条命令即数秒级空等）。
+        // 真正的命令超时由 `timeout` 字段（at_timeout，默认 10 s）在 command()
+        // 的 deadline 循环里控制，与本值无关。
+        let builder = serialport::new(path, baudrate).timeout(Duration::from_millis(20));
         // `exclusive()` 是 unix 专有 API（Windows 上无此开关）。
         // posix 侧据此执行 ioctl(TIOCEXCL) + 排他 flock：
         //   - flock 挡住同样申请锁的程序（端口探测、第二实例）；
@@ -187,6 +205,7 @@ impl AtPort {
             port,
             path: path.to_string(),
             timeout: Duration::from_secs(timeout_secs),
+            last_cmd_at: None,
         };
         p.handshake();
         Ok(p)
@@ -205,7 +224,17 @@ impl AtPort {
         &self.path
     }
 
+    /// 排空接收缓冲。
+    ///
+    /// 性能要点（实机实测，插件加载慢的根因所在）：本函数在每条 AT 命令前
+    /// 都会被调用一次；串口在缓冲区为空时 read 会一直阻塞到端口超时才返回，
+    /// 若沿用默认的 200 ms 端口超时，则**每条命令都要白等 200 ms**。
+    /// 实测 26 条命令的 status 接口因此耗时 5.7 s，其中约 5.2 s 就是这个等待。
+    /// 故这里临时把超时压到 1 ms 做非阻塞排空，读完立即恢复原超时值
+    /// （不改构造时的超时配置，避免影响 command() 的轮询节拍）。
     fn drain(&mut self) -> AtResult<()> {
+        let orig = self.port.timeout();
+        let _ = self.port.set_timeout(Duration::from_millis(1));
         let mut buf = [0u8; 512];
         loop {
             match self.port.read(&mut buf) {
@@ -213,11 +242,23 @@ impl AtPort {
                 Ok(_) => continue,
             }
         }
+        let _ = self.port.set_timeout(orig);
         Ok(())
     }
 
     /// 发送一条 AT 命令并返回规范化响应（自动补 \r，剥离回显与 URC 干扰）。
     pub fn command(&mut self, cmd: &str) -> AtResult<String> {
+        // 限速：保证与上一条命令的发出时刻至少相隔 MIN_CMD_GAP。
+        // 注意这里等的是「发令时刻」之差，模组应答本身更慢时自然满足，
+        // 因此不会把原本就慢的命令拖得更慢，只在命令排得很密时才生效。
+        if let Some(prev) = self.last_cmd_at {
+            let gap = prev.elapsed();
+            if gap < MIN_CMD_GAP {
+                std::thread::sleep(MIN_CMD_GAP - gap);
+            }
+        }
+        self.last_cmd_at = Some(Instant::now());
+
         let line = if cmd.ends_with('\r') {
             cmd.to_string()
         } else {
@@ -235,7 +276,7 @@ impl AtPort {
         while Instant::now() < deadline {
             match self.port.read(&mut buf) {
                 Ok(0) => {
-                    std::thread::sleep(Duration::from_millis(20));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Ok(n) => {
                     raw.push_str(&String::from_utf8_lossy(&buf[..n]));
@@ -244,7 +285,7 @@ impl AtPort {
                     }
                 }
                 Err(_) => {
-                    std::thread::sleep(Duration::from_millis(20));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }
@@ -266,14 +307,14 @@ impl AtPort {
         let mut buf = [0u8; 256];
         while Instant::now() < deadline {
             match self.port.read(&mut buf) {
-                Ok(0) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(0) => std::thread::sleep(Duration::from_millis(10)),
                 Ok(n) => {
                     raw.push_str(&String::from_utf8_lossy(&buf[..n]));
                     if raw.contains(needle) {
                         return Ok(raw);
                     }
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
         Err(format!("等待 '{}' 超时", needle))

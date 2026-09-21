@@ -1,0 +1,61 @@
+#!/bin/sh
+# luci-app-fm350 —— 首次安装时预置蜂窝网络接口骨架
+#
+# 为什么需要它：接口过去完全由守护在拨号成功后创建，而创建的两个触发条件
+# （PDP 未激活 / 地址有偏差）在稳态下都不成立，auto 选项因此长期停在 0，
+# LuCI 接口页显示「开机时未启动」（netifd 对缺省 auto 的接口不开机自启）。
+# 这里在安装阶段就把接口骨架与 auto=1 落盘：开机即自启，不再依赖守护时机。
+#
+# 约定：uci-defaults 脚本以 exit 0 结束时会被系统自动删除，只执行一次。
+# 已存在同名接口时不覆盖用户手工改过的选项，只补 auto。
+
+. /lib/functions.sh
+
+config_load fm350 2>/dev/null
+
+get_opt() {
+	local v
+	config_get v main "$1" 2>/dev/null
+	[ -n "$v" ] && echo "$v"
+}
+
+IFACE="$(get_opt iface)"
+[ -n "$IFACE" ] || IFACE=fm350
+IFACE_V6="$(get_opt iface_v6)"
+[ -n "$IFACE_V6" ] || IFACE_V6=fm350v6
+IPV6="$(get_opt ipv6)"
+[ -n "$IPV6" ] || IPV6=1
+METRIC="$(get_opt metric)"
+[ -n "$METRIC" ] || METRIC=30
+DATA_DEV="$(get_opt data_dev)"
+
+# 主接口骨架（IPv4 静态 /32；地址与网卡由守护在拨号后填入）
+if [ "$(uci -q get network."$IFACE")" != "interface" ]; then
+	uci -q set network."$IFACE"=interface
+	uci -q set network."$IFACE".proto=static
+	uci -q set network."$IFACE".peerdns=0
+	uci -q set network."$IFACE".metric="$METRIC"
+	uci -q set network."$IFACE".defaultroute=1
+	# data_dev 显式指定时一并落盘，auto 则留给守护探测后填写
+	if [ -n "$DATA_DEV" ] && [ "$DATA_DEV" != "auto" ]; then
+		uci -q set network."$IFACE".device="$DATA_DEV"
+	fi
+fi
+uci -q set network."$IFACE".auto=1
+
+# IPv6 子接口（dhcpv6，附着在主接口上）
+if [ "$IPV6" = "1" ] && [ -n "$IFACE_V6" ]; then
+	if [ "$(uci -q get network."$IFACE_V6")" != "interface" ]; then
+		uci -q set network."$IFACE_V6"=interface
+		uci -q set network."$IFACE_V6".proto=dhcpv6
+		uci -q set network."$IFACE_V6".device="@$IFACE"
+		uci -q set network."$IFACE_V6".reqaddress=try
+		uci -q set network."$IFACE_V6".reqprefix=auto
+		uci -q set network."$IFACE_V6".peerdns=1
+	fi
+	uci -q set network."$IFACE_V6".auto=1
+fi
+
+uci -q commit network
+
+exit 0
