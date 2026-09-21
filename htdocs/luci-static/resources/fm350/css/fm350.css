@@ -1,0 +1,260 @@
+/*
+ * luci-app-fm350 —— 独立样式表
+ * 所有样式集中在此，页面 JS 不使用内联 style 属性。
+ */
+
+.fm350-wrap {
+	padding: 0 0 1em 0;
+}
+
+/* ---------- 状态卡片网格 ---------- */
+.fm350-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+	gap: 12px;
+	margin: 14px 0;
+}
+
+.fm350-card {
+	border: 1px solid #d8dde3;
+	border-radius: 6px;
+	background: #fbfcfd;
+	padding: 12px 14px;
+	min-height: 84px;
+}
+
+/* 网络概览行：单卡更宽，避免长值（运营商名 + 频段）折行 */
+.fm350-grid.fm350-grid-wide {
+	grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+/* ---------- 状态标签（信号等级等） ---------- */
+.fm350-tag {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 1px 8px;
+	border-radius: 10px;
+	font-size: 12px;
+	font-weight: 600;
+	vertical-align: middle;
+	background: #e5e7eb;
+	color: #374151;
+}
+
+.fm350-tag-good {
+	background: #dcfce7;
+	color: #166534;
+}
+
+.fm350-tag-ok {
+	background: #dbeafe;
+	color: #1e40af;
+}
+
+.fm350-tag-mid {
+	background: #fef3c7;
+	color: #92400e;
+}
+
+.fm350-tag-bad {
+	background: #fee2e2;
+	color: #991b1b;
+}
+
+.fm350-card h4 {
+	margin: 0 0 8px 0;
+	font-size: 13px;
+	font-weight: 600;
+	color: #4a5568;
+	letter-spacing: .3px;
+}
+
+.fm350-card .fm350-value {
+	font-size: 15px;
+	font-weight: 600;
+	color: #1f2937;
+	word-break: break-all;
+	line-height: 1.45;
+}
+
+.fm350-card .fm350-sub {
+	margin-top: 5px;
+	font-size: 12px;
+	color: #6b7280;
+	word-break: break-all;
+}
+
+/* ---------- 状态灯 ---------- */
+.fm350-dot {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	margin-right: 7px;
+	vertical-align: middle;
+	background: #9ca3af;
+}
+
+.fm350-dot-up {
+	background: #16a34a;
+}
+
+.fm350-dot-down {
+	background: #dc2626;
+}
+
+.fm350-dot-warn {
+	background: #f59e0b;
+}
+
+/* ---------- 信号条 ---------- */
+.fm350-bars {
+	display: inline-flex;
+	align-items: flex-end;
+	gap: 3px;
+	height: 22px;
+	vertical-align: middle;
+	margin-right: 8px;
+}
+
+.fm350-bar {
+	width: 6px;
+	background: #d1d5db;
+	border-radius: 1px;
+}
+
+/* 五格阶梯高度由样式表给出，模板内不写内联样式 */
+.fm350-bars .fm350-bar:nth-child(1) { height: 6px; }
+.fm350-bars .fm350-bar:nth-child(2) { height: 10px; }
+.fm350-bars .fm350-bar:nth-child(3) { height: 14px; }
+.fm350-bars .fm350-bar:nth-child(4) { height: 18px; }
+.fm350-bars .fm350-bar:nth-child(5) { height: 22px; }
+
+.fm350-bar-on {
+	background: #16a34a;
+}
+
+/* ---------- 表格 ---------- */
+.fm350-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 10px;
+	font-size: 13px;
+}
+
+.fm350-table th,
+.fm350-table td {
+	border: 1px solid #e5e7eb;
+	padding: 7px 9px;
+	text-align: left;
+	vertical-align: top;
+	word-break: break-all;
+}
+
+.fm350-table th {
+	background: #f3f4f6;
+	font-weight: 600;
+	color: #374151;
+	white-space: nowrap;
+}
+
+.fm350-table tr:nth-child(even) td {
+	background: #fafbfc;
+}
+
+/* 标识列固定宽度，避免在模板里写内联样式 */
+.fm350-table th.fm350-col-key {
+	width: 150px;
+}
+
+/* 温度传感器表中最高温的一行，需覆盖 :nth-child(even) 的斑马纹 */
+.fm350-table tr.fm350-temp-hot th,
+.fm350-table tr.fm350-temp-hot td {
+	background: #fff7ed;
+	font-weight: 600;
+	color: #9a3412;
+}
+
+/* ---------- 终端输出 ---------- */
+.fm350-term {
+	background: #111827;
+	color: #d1fae5;
+	font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+	font-size: 12.5px;
+	line-height: 1.55;
+	padding: 12px 14px;
+	border-radius: 6px;
+	white-space: pre-wrap;
+	word-break: break-all;
+	max-height: 420px;
+	overflow: auto;
+	margin-top: 10px;
+}
+
+.fm350-term .fm350-echo {
+	color: #93c5fd;
+}
+
+.fm350-term .fm350-err {
+	color: #fca5a5;
+}
+
+/* ---------- 提示条 ---------- */
+.fm350-notice {
+	border-left: 4px solid #3b82f6;
+	background: #eff6ff;
+	padding: 10px 14px;
+	margin: 12px 0;
+	border-radius: 4px;
+	font-size: 13px;
+	color: #1e40af;
+}
+
+.fm350-notice-danger {
+	border-left-color: #dc2626;
+	background: #fef2f2;
+	color: #991b1b;
+}
+
+.fm350-notice-ok {
+	border-left-color: #16a34a;
+	background: #f0fdf4;
+	color: #166534;
+}
+
+/* ---------- 工具栏 ---------- */
+.fm350-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin: 12px 0;
+}
+
+.fm350-toolbar .btn + .btn {
+	margin-left: 0;
+}
+
+.fm350-spacer {
+	flex: 1 1 auto;
+}
+
+.fm350-muted {
+	color: #6b7280;
+	font-size: 12px;
+}
+
+/* ---------- 表单控件尺寸（避免在页面里写内联样式） ---------- */
+.fm350-input {
+	width: 100%;
+	max-width: 560px;
+}
+
+.fm350-input-num {
+	width: 220px;
+}
+
+.fm350-input-msg {
+	width: 100%;
+	max-width: 520px;
+}

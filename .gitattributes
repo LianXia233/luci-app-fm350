@@ -1,0 +1,14 @@
+# 行尾策略：本插件的 init.d 脚本、ucode、LuCI JS 一旦带 CRLF 就会失效
+# （procd 报 can't open /etc/rc.common；ucode/JS 可能解析异常）。
+# 因此所有文本文件在仓库内与检出后一律使用 LF。
+* text=auto eol=lf
+
+# 二进制文件明确标注，避免被当作文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.apk binary
+*.ipk binary
+*.gz binary
+*.zip binary

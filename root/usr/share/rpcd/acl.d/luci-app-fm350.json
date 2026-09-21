@@ -1,0 +1,55 @@
+{
+	"luci-app-fm350": {
+		"description": "FM350 5G 模组管理（Rust 后端 fm350d）",
+		"read": {
+			"ubus": {
+				"luci.fm350": [
+					"status",
+					"info",
+					"signal",
+					"pdp",
+					"net",
+					"cell",
+					"lock",
+					"config",
+					"ports",
+					"imei_read",
+					"imei_backup"
+				],
+				"luci.fm350.sms": [
+					"list",
+					"storage"
+				]
+			},
+			"uci": [ "fm350" ],
+			"file": {
+				"/usr/sbin/fm350d": [ "exec" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.fm350": [
+					"dial",
+					"hangup",
+					"at",
+					"lock_band",
+					"lock_cell",
+					"rat",
+					"sim",
+					"cfun",
+					"usbmode",
+					"reboot",
+					"config",
+					"set",
+					"imei_write"
+				],
+				"luci.fm350.sms": [
+					"send",
+					"delete",
+					"storage"
+				]
+			},
+			"uci": [ "fm350" ]
+		}
+	}
+}

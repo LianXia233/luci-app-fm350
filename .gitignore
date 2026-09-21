@@ -1,0 +1,18 @@
+# Rust 构建产物（本机 target 约 258 MB，绝不入库）
+/rust/target/
+
+# OpenWrt 打包产物
+*.apk
+*.ipk
+*.o
+*.so
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# 本地临时文件
+/tmp/
+*.log
