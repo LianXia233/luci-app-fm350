@@ -34,10 +34,6 @@ fn f(resp: &str, prefix: &str) -> Vec<String> {
     at::fields(resp, prefix)
 }
 
-fn one(resp: &str, prefix: &str) -> Option<String> {
-    f(resp, prefix).into_iter().next()
-}
-
 // ---------------------------------------------------------------- 信息
 
 #[derive(Debug, serde::Serialize)]
@@ -1012,6 +1008,8 @@ pub struct Temperature {
 }
 
 /// 传感器编号 → 名称（手册 18.3 表；未列出的编号返回空串）。
+/// 当前仅测试引用；保留供后续前端 API 扩展使用。
+#[allow(dead_code)]
 pub fn sensor_name(id: u32) -> &'static str {
     match id {
         1 => "soc_max",

@@ -22,7 +22,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    # 双 SDK（SNAPSHOT→apk + 24.10.3→ipk）下载与编译耗时更长，超时放宽到 300 分钟
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
