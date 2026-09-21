@@ -26,6 +26,8 @@
   - [首屏 8 张核心卡片](#首屏-8-张核心卡片)
   - [派生指标计算模型](#派生指标计算模型)
 - [🧭 菜单路由与目录规范](#-菜单路由与目录规范)
+  - [菜单入口映射](#菜单入口映射)
+  - [仓库目录结构](#仓库目录结构)
 - [🏗️ 系统架构与数据流](#️-系统架构与数据流)
   - [通信拓扑结构](#通信拓扑结构)
   - [AT 串口独占与主动可观测机制](#at-串口独占与主动可观测机制)
@@ -80,10 +82,10 @@
 
 「状态 $\rightarrow$ FM350-GL」首屏前置呈现高频网络指标卡片：
 
-```
+```text
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
 │   综合信号评价   │  │    运营商信息    │  │    网络制式      │  │  信号强度 (RSRP) │
-│   63.1 / 100 [良]│  │  中国移动(46000) │  │   5G NR (n41)    │  │     -81 dBm      │
+│   63.1 / 100 [良]│  │  中国移动 (46000)│  │   5G NR (n41)    │  │     -81 dBm      │
 └──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
 │  信号质量 (RSRQ) │  │   信噪比 (SINR)  │  │     当前小区     │  │     模组温度     │
@@ -139,7 +141,7 @@
 
 ### 菜单入口映射
 
-```
+```text
 网络 (Network) ──► 移动网络 (Mobile Network) ──► FM350-GL
 ```
 
@@ -156,7 +158,7 @@
 
 ### 仓库目录结构
 
-```
+```text
 luci-app-fm350/
 ├── Makefile                                 # 打包与 Rust 交叉编译集成配方
 ├── README.md                                # 项目规范文档
@@ -179,10 +181,11 @@ luci-app-fm350/
 │       ├── at.js                            # AT 指令终端
 │       └── settings.js                      # 系统与端口设置
 ├── root/
-│   ├── etc/config/fm350                     # 默认 UCI 配置文件
-│   ├── etc/init.d/fm350d                    # procd 系统自启管理脚本
-│   └── etc/uci-defaults/
-│       └── 99-fm350-network                 # 首次固件启动初始化脚本（注入网口骨架）
+│   ├── etc/
+│   │   ├── config/fm350                     # 默认 UCI 配置文件
+│   │   ├── init.d/fm350d                    # procd 系统自启管理脚本
+│   │   └── uci-defaults/
+│   │       └── 99-fm350-network             # 首次固件启动初始化脚本（注入网口骨架）
 │   └── usr/share/
 │       ├── luci/menu.d/luci-app-fm350.json  # 菜单节点注册
 │       └── rpcd/
@@ -213,7 +216,7 @@ luci-app-fm350/
 
 ### 通信拓扑结构
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                      Web 浏览器 (LuCI)                      │
 │            resources/fm350/api.js (统一 RPC 调度)           │
@@ -266,7 +269,7 @@ luci-app-fm350/
 
 为杜绝误触与非法覆盖，系统内置三重防护：
 
-```
+```text
                     [ 发起 IMEI 写入请求 ]
                                │
                                ▼
@@ -300,7 +303,7 @@ luci-app-fm350/
 | :--- | :--- | :--- |
 | **读取** | 始终可用（`AT+EGMREXT=0,7`） | `fm350d imei read` |
 | **备份** | 始终可用，写入 `/etc/fm350/imei.backup` | `fm350d imei backup` |
-| **写入** | 需 `imei_write=1` + `confirm=1` + 15 位 Luhn 校验 | `fm350d imei write <15位> --confirm` |
+| **写入** | 需 `imei_write=1` + `confirm=1` + 15 位 Luhn 校验 | `fm350d imei write <15 位> --confirm` |
 
 > 透传 AT 终端中的写入指令同样被强制拦截（`AT+EGMREXT=1,*`、`AT+EGMR=1,*`、`AT+SIMEI=`、`AT+CGSN=` 一律拒绝）。
 
@@ -364,7 +367,7 @@ fm350d sms delete <id>     # 删除指定序号短信
 # 5. IMEI 安全维护
 fm350d imei read           # 安全读取当前串号
 fm350d imei backup         # 备份当前 IMEI 镜像至本地
-fm350d imei write <15位数字> --confirm # 写入新串号（需 imei_write=1）
+fm350d imei write <15 位数字> --confirm # 写入新串号（需 imei_write=1）
 
 # 6. 模组与系统控制
 fm350d reboot              # 软重启蜂窝模组
@@ -447,7 +450,7 @@ rm -rf /tmp/luci-modulecache/
 - [ ] **串口独占正常**：运行 `ls -l /proc/$(pgrep -f 'fm350d daemon')/fd | grep ttyUSB`，确认句柄常驻；`fm350d ports` 中 `stats.other_pids` 为空。
 - [ ] **仪表盘卡片正常**：首屏「网络概览」8 张卡片数据完整，综合评分形如 `63.1 / 100`。
 - [ ] **温度与传感器正常**：首屏显示基带实测温度（如 `45.5 ℃`），传感器明细表完整展开 23 路，不包含 `[object Object]` 或单一异常的 `1`。
-- [ ] **拨号网络连通**：点击拨号后，IPv4 地址成功呈现，路由表生成 `default dev <dev> metric 30 onlink`，通过 `ping -I <蜂窝IP> 223.5.5.5` 测试连通正常。
+- [ ] **拨号网络连通**：点击拨号后，IPv4 地址成功呈现，路由表生成 `default dev <dev> metric 30 onlink`，通过 `ping -I <蜂窝 IP> 223.5.5.5` 测试连通正常。
 
 ---
 
@@ -457,7 +460,7 @@ rm -rf /tmp/luci-modulecache/
 <summary><b>🛠️ 点击展开：AT 响应异构与信号解析避坑（CESQ、CSQ、GTCCINFO）</b></summary>
 
 1. **CSQ 盲区与 CESQ 索引换算**：
-   * FM350-GL 的 `AT+CSQ` 固定返回 `99,99`（3GPP 定义为“不可用”）。
+   * FM350-GL 的 `AT+CSQ` 固定返回 `99,99`（3GPP 定义为「不可用」）。
    * 信号必须采用 `AT+CESQ` 获取，返回序列格式为：`<rxlev>,<ber>,<rscp>,<ecno>,<rsrq>,<rsrp>,<ss_rsrq>,<ss_rsrp>,<ss_sinr>`。
    * **返回值为 3GPP 阶梯索引**，必须按区间下界换算：
      * **5G NR**：取索引 7（SS-RSRP，范围 $-156 \sim -31\text{ dBm}$，步长 1）、索引 6（SS-RSRQ，范围 $-43 \sim 20\text{ dB}$，步长 0.5）、索引 8（SS-SINR，范围 $-23 \sim 40\text{ dB}$，步长 0.5）。
