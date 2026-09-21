@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支上的连续推送取消旧运行，避免排队等待被已经过期的提交占满。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 静态门禁：不编译，只检查"提交里的事实"。每条断言都对应一类已经踩过的
+  # 静默故障——它们共同的特点是"包能装、页面能开、就是不对"，靠肉眼测试
+  # 发现不了，只能靠确定性断言拦住。
+  static-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 行尾必须是 LF
+        # 本仓库所有文本文件要求 LF。最典型的事故：Windows 上编辑过的
+        # init 脚本带 CR 后，shebang 变成 "#!/bin/sh /etc/rc.common\r"，
+        # 设备上 procd 报的错误与真正原因毫无关系。
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r f; do
+            case "${f}" in
+              *.apk|*.ipk|*.png|*.jpg|*.ico|*.gz|*.zst) continue ;;
+            esac
+            n="$(tr -cd '\r' <"${f}" | wc -c)"
+            if [ "${n}" != "0" ]; then
+              echo "::error file=${f}::包含 ${n} 个 CR（CRLF 行尾）"
+              bad=1
+            fi
+          done < <(git ls-files)
+          if [ "${bad}" != "0" ]; then exit 1; fi
+          echo "已检查 $(git ls-files | wc -l) 个文件，CR 计数为 0"
+
+      - name: JSON 元数据可解析
+        # 菜单注册与 ACL 都是 JSON，写错一个逗号 LuCI 会静默不显示菜单或拒绝
+        # 授权。这里同时断言"匹配到的文件数不为 0"——否则文件被改名或移走后
+        # 这条检查会变成永远通过的摆设。
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+
+          files = subprocess.run(
+              ["git", "ls-files", "root"], capture_output=True, text=True, check=True
+          ).stdout.split()
+          jsons = [f for f in files if f.endswith(".json")]
+          if not jsons:
+              sys.exit("::error::未匹配到任何 JSON 文件，检查范围已失效")
+          for f in jsons:
+              with open(f, encoding="utf-8") as fh:
+                  json.load(fh)
+              print("OK", f)
+          PY
+
+      - name: LuCI 前端 JS 语法
+        # 用 vm.compileFunction 而不是 node --check：LuCI 模块允许顶层
+        # return，node 的脚本模式会把合法的模块判成语法错误。
+        run: |
+          set -euo pipefail
+          files="$(git ls-files htdocs | grep -E '\.js$' || true)"
+          [ -n "${files}" ] || { echo "::error::未匹配到前端 JS 文件"; exit 1; }
+          node -e '
+            const fs = require("fs"), vm = require("vm");
+            let bad = 0;
+            for (const f of process.argv.slice(1)) {
+              try {
+                vm.compileFunction(fs.readFileSync(f, "utf8"), [], { filename: f });
+                console.log("OK", f);
+              } catch (e) {
+                console.error("::error file=" + f + "::" + e.message);
+                bad = 1;
+              }
+            }
+            process.exit(bad);
+          ' ${files}
+
+      - name: 随包脚本语法与可执行位
+        # 可执行位是"最安静的失败"：init 脚本没有执行位时 rc.d 照样建链接，
+        # procd 却起不来进程，日志里什么都没有。Makefile 用 INSTALL_BIN 会在
+        # 打包时纠正权限，但手工拷贝部署、或在设备上直接调用时就会失败。
+        run: |
+          set -euo pipefail
+          sh -n root/etc/init.d/fm350d
+          sh -n scripts/build-release.sh
+          bad="$(git ls-files -s root/etc/init.d scripts | awk '$1 != "100755" { print $1, $4 }')"
+          if [ -n "${bad}" ]; then
+            echo "::error::以下随包脚本缺少可执行位（应为 100755）"
+            echo "${bad}"
+            exit 1
+          fi
+          echo "脚本语法与可执行位检查通过"
+
+      - name: 版本号与 CHANGELOG 一致
+        # 约定：每次推送同步更新文档。这条断言把约定变成硬门禁——改了代码
+        # 不写 CHANGELOG，或 CHANGELOG 顶部版本落后于 Makefile，都在这里拦下。
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^PKG_VERSION:=//p' Makefile)"
+          rel="$(sed -n 's/^PKG_RELEASE:=//p' Makefile)"
+          [ -n "${ver}" ] && [ -n "${rel}" ] || { echo "::error::Makefile 缺少 PKG_VERSION/PKG_RELEASE"; exit 1; }
+          grep -qF "## ${ver}-r${rel}" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md 缺少 ${ver}-r${rel} 段落"; exit 1; }
+          newest="$(grep -oE "^## ${ver}-r[0-9]+" CHANGELOG.md | head -n 1 | sed 's/.*-r//')"
+          [ "${newest}" = "${rel}" ] \
+            || { echo "::error::CHANGELOG 顶部为 r${newest}，Makefile 为 r${rel}"; exit 1; }
+          echo "版本一致：${ver}-r${rel}"
+
+      - name: 无外部来源词
+        # 本插件为全新自编实现，与任何既有实现无关；仓库里不得出现其他项目名。
+        run: |
+          set -euo pipefail
+          bad=0
+          for w in 上游 fm350_webui qmodem ubus-at-daemon h5000m mt5700; do
+            if git grep -nI -- "${w}" -- README.md CHANGELOG.md htdocs root rust/src; then
+              echo "::error::出现禁用词「${w}」"
+              bad=1
+            fi
+          done
+          if [ "${bad}" != "0" ]; then exit 1; fi
+          echo "已扫描 README/CHANGELOG/前端/后端：禁用词计数为 0"
+
+      - name: IMEI 安全不变式
+        # IMEI 写入是不可逆的高风险操作。这条断言锁住三件事：只读路径存在、
+        # 写入受 UCI 开关控制、开关默认关闭。任何一处被改掉都在这里红。
+        run: |
+          set -euo pipefail
+          grep -qF 'AT+EGMREXT=0,7' rust/src/imei.rs \
+            || { echo "::error::rust/src/imei.rs 丢失只读路径 AT+EGMREXT=0,7"; exit 1; }
+          grep -qF 'if !cfg.imei_write' rust/src/imei.rs \
+            || { echo "::error::rust/src/imei.rs 丢失 imei_write 门禁"; exit 1; }
+          grep -qF 'pub fn is_imei_write' rust/src/at.rs \
+            || { echo "::error::rust/src/at.rs 丢失 is_imei_write 拦截器"; exit 1; }
+          grep -qF "option imei_write '0'" root/etc/config/fm350 \
+            || { echo "::error::默认配置里 imei_write 不是 0（写入开关必须默认关闭）"; exit 1; }
+          echo "IMEI 不变式检查通过（只读可用 / 写入受开关控制 / 默认关闭）"
+
+  # 后端单元测试。改动集中在 at.rs 的状态机与 IMEI 校验上，这些分支在设备上
+  # 几乎无法复现（需要拔插模组、制造端口占用、构造合法校验位），只能靠单测钉住。
+  rust-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+          cache-workspaces: rust
+
+      - name: 单元测试
+        run: cargo test --locked --manifest-path rust/Cargo.toml
+
+      - name: 发布档构建（本机目标，验证 release profile 可编译）
+        # 交叉编译到 aarch64-musl 需要 SDK 的 musl 工具链，放在发布流水线里做；
+        # 这里只验证 release profile 本身能过（不同 profile 的 lint 与
+        # 优化相关编译错误只在 -O 下出现）。
+        run: cargo build --locked --release --manifest-path rust/Cargo.toml

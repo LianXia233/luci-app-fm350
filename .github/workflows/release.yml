@@ -1,0 +1,98 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号，例如 1.0.0。会创建 tag v<version>；留空则取 Makefile 里的 PKG_VERSION。"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+# 发布不能被打断：中途取消会留下半个 Release。同一 workflow 串行执行。
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析发布版本
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION}" ]; then
+            VERSION="${INPUT_VERSION}"
+          elif [ "${GITHUB_REF}" = "refs/tags/"* ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(sed -n 's/^PKG_VERSION:=//p' Makefile)"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >>"$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >>"$GITHUB_OUTPUT"
+          echo "解析结果：版本 ${VERSION} / 标签 v${VERSION}"
+
+      - name: 校验版本与文档
+        # 发布前两道闸：tag 必须与 Makefile 的 PKG_VERSION 一致；CHANGELOG
+        # 必须有对应段落。约定是"发布即同步文档"，这里把它变成硬门禁，
+        # 避免出现"Release 有包、CHANGELOG 里查不到这一版"的情况。
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^PKG_VERSION:=//p' Makefile)"
+          release="$(sed -n 's/^PKG_RELEASE:=//p' Makefile)"
+          test "${{ steps.ver.outputs.version }}" = "${version}" \
+            || { echo "::error::tag 版本 ${{ steps.ver.outputs.version }} 与 PKG_VERSION ${version} 不一致"; exit 1; }
+          grep -qF "## ${version}-r${release}" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md 缺少 ${version}-r${release} 段落"; exit 1; }
+          echo "版本与文档检查通过：${version}-r${release}"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-musl
+          cache: true
+          cache-workspaces: rust
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib gettext git libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file curl zstd
+
+      - name: 用 ImmortalWrt SDK 构建
+        env:
+          FM350_WORK_DIR: ${{ runner.temp }}/fm350-release-sdk
+        run: ./scripts/build-release.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-fm350-${{ steps.ver.outputs.tag }}
+          path: dist-release/*
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: steps.ver.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist-release/* --clobber
+          else
+            gh release create "${TAG}" dist-release/* \
+              --title "luci-app-fm350 ${TAG}" --generate-notes
+          fi
