@@ -40,6 +40,9 @@ var PRESET_GROUPS = [
 			{ label: _('小区与邻区'), cmd: 'AT+GTCCINFO?' },
 			{ label: _('载波聚合'), cmd: 'AT+GTCAINFO?' },
 			{ label: _('锁频段状态'), cmd: 'AT+GTACT?' },
+			/* 手册 11.1.13 未列 `?` 形式，但实机（FM350-GL）支持：
+			   `AT+EPRATL?` 回读 `+EPRATL:<num>,<rat…>`，如 `2,128,4` = NR 优先于 LTE。 */
+			{ label: _('优先制式'), cmd: 'AT+EPRATL?' },
 			{ label: _('锁小区状态'), cmd: 'AT+EMMCHLCK?' }
 		]
 	}
