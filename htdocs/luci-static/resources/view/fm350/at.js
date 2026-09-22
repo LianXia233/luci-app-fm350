@@ -10,7 +10,10 @@ var PRESET_GROUPS = [
 		items: [
 			{ label: _('模组信息'), cmd: 'ATI' },
 			{ label: _('USB 模式'), cmd: 'AT+GTUSBMODE?' },
-			{ label: _('模组温度'), cmd: 'AT+GTSENRDTEMP?' },
+			/* 手册 18.3 仅定义写形式 `+GTSENRDTEMP=<sensor_id>`，无 `?` 读形式；
+			   发 `AT+GTSENRDTEMP?` 会返回 +CME ERROR: phone failure。
+			   <sensor_id> = 0 表示一次返回全部传感器读数。 */
+			{ label: _('模组温度'), cmd: 'AT+GTSENRDTEMP=0' },
 			{ label: _('读取 IMEI (只读)'), cmd: 'AT+EGMREXT=0,7' }
 		]
 	},

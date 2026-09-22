@@ -915,9 +915,23 @@ pub fn hangup(at: &AtHandle, cfg: &Config) -> AtResult<String> {
 
 /// 锁制式与频段。
 ///
-/// FM350 实机命令：`AT+GTACT=<mode>[,<...>,<band>]`
-///   - 2 = 仅 LTE，14 = 仅 5G（不限频段），20 = 自动
-///   - 带频段：`AT+GTACT=20,6,3,5078`；部分固件需 `AT+GTACT=14,,,5041`
+/// FM350 官方命令（手册 11.1.14）：
+/// `AT+GTACT=[<rat>[,[<PreferredAct1>],[<PreferredAct2>][,<band_1>[,<band_2>[,...]]]]]`
+///
+/// `<rat>` 取值（手册 p125）：1 = UMTS，2 = LTE，4 = LTE/UMTS，**10 = Automatic**，
+/// 14 = NR-RAN，16 = NR-RAN/WCDMA，17 = NR-RAN/LTE，20 = NR-RAN/WCDMA/LTE。
+/// **注意：20 并非「自动」，20 是三模全开；10 才是 Automatic。**
+/// 手册 Note 6 说明：下发 10（自动）之后查询会回显 20，两者极易混淆。
+///
+/// `<PreferredAct1>` / `<PreferredAct2>`：2 = WCDMA 优先，3 = LTE 优先，6 = NR-RAN 优先；
+/// 仅在三模（`<rat>` = 20）下第二个参数才有效。
+///
+/// 频段编码（手册 p126 / p133）：LTE 为 `100 + n`（101 = B1 … 171 = B71）；
+/// NR 为 `"50"` 与 band 号十进制拼接（501 = n1 … 5041 = n41 … 50512 = n512）；
+/// 0 = 自动选择全部支持频段。
+///
+/// 例：`AT+GTACT=20,6,3,5078` = 三模 + NR 优先于 LTE + 锁 n78；
+/// `AT+GTACT=14,,,5041` = 仅 NR + 锁 n41（空参数跳过两个 PreferredAct）。
 /// 先置 `AT+CFUN=0`（离线）再下发，最后 `AT+CFUN=1` 恢复。
 pub fn lock_band(at: &AtHandle, cfg: &Config, args: &[String]) -> AtResult<Vec<(String, String)>> {
     if args.is_empty() {
@@ -963,16 +977,58 @@ pub fn cell_info(at: &AtHandle, cfg: &Config) -> Vec<(String, String)> {
     run_list(at, cfg, &["AT+GTCCINFO?", "AT+GTCAINFO?"])
 }
 
-/// 制式优先级（`AT+QNWPREFCFG="mode_pref",<A:B:C>`），部分固件支持。
-pub fn rat_order(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    run(at, cfg, r#"AT+QNWPREFCFG="rat_acq_order""#)
+/// 制式名 / 编码 → `+EPRATL` 的 `<rat>` 编码（手册 11.1.13）。
+///
+/// 2 = UMTS，4 = LTE，128 = NR。同时接受已是编码的数字字符串。
+/// 注意这里的编码**与 `+GTACT` 的 `<rat>` 不同**：`+GTACT` 用 1/2/4/10/14…，
+/// `+EPRATL` 只用 2/4/128。
+fn rat_code(item: &str) -> Option<&'static str> {
+    match item.trim().to_ascii_uppercase().as_str() {
+        "UMTS" | "WCDMA" | "3G" | "2" => Some("2"),
+        "LTE" | "4G" | "4" => Some("4"),
+        "NR" | "5G" | "128" => Some("128"),
+        _ => None,
+    }
 }
 
+/// 读取当前制式信息。
+///
+/// 手册 11.1.13 的 `+EPRATL` **只有写形式，没有 `AT+EPRATL?`**，
+/// 因此读取改走 `AT+GTACT?`（手册 11.1.14，返回当前 `<rat>` 与频段配置）。
+/// 两者语义不完全等价：`+GTACT` 是当前选定的制式与频段，
+/// `+EPRATL` 是制式优先顺序列表。
+pub fn rat_order(at: &AtHandle, cfg: &Config) -> AtResult<String> {
+    run(at, cfg, "AT+GTACT?")
+}
+
+/// 设置制式优先顺序（FM350 官方命令 `AT+EPRATL`，手册 11.1.13）。
+///
+/// 手册语法：`AT+EPRATL=<RAT num>,[<rat1>,<rat2>…]`
+///   - `<RAT num>`：0 = 不设优先；1-4 = 后续优先制式的个数；
+///   - `<rat>`：2 = UMTS，4 = LTE，128 = NR；越靠前优先级越高。
+///
+/// 历史修正：本函数原使用 `AT+QNWPREFCFG`（`"rat_acq_order"` / `"mode_pref"`），
+/// 该命令属**高通 / Quectel 平台**专有，FM350-GL（联发科 T700）不支持，
+/// 属跨平台误植；两版官方手册（v2.2 / V2.10）全文均未收录该命令。
 pub fn set_rat_order(at: &AtHandle, cfg: &Config, order: &[String]) -> AtResult<String> {
+    let mut codes: Vec<&'static str> = Vec::new();
+    for item in order {
+        if let Some(code) = rat_code(item) {
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+    }
+    if codes.is_empty() {
+        return Err("缺少有效制式：可填 UMTS / LTE / NR（或编码 2 / 4 / 128）".to_string());
+    }
+    if codes.len() > 4 {
+        return Err("优先制式最多 4 个".to_string());
+    }
     run(
         at,
         cfg,
-        &format!(r#"AT+QNWPREFCFG="mode_pref",{}"#, order.join(":")),
+        &format!("AT+EPRATL={},{}", codes.len(), codes.join(",")),
     )
 }
 
