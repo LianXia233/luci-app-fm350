@@ -354,6 +354,133 @@ fn lte_band_from_earfcn(earfcn: i64) -> Option<&'static str> {
     })
 }
 
+/// 判定 NR 频段号是否为 3GPP 已分配编号。
+///
+/// `<band>` 的编码解出候选频段号后，必须先过这一关：
+/// 否则 `5006` 会被解成根本不存在的 `n6`。
+/// 未分配编号的依据是 3GPP TS 38.101-1 / 38.101-2，
+/// 与 README「三套编码」一节的实机佐证一致 ——
+/// `AT+GTACT` 回显的 `101..171` 序列里 106/109/110/111/115/116/121~124/127 全部缺席。
+fn nr_band_no_is_valid(n: i32) -> bool {
+    // FR1 低段 1..=105 中 3GPP 未分配的编号
+    const UNASSIGNED: [i32; 11] = [6, 9, 10, 11, 15, 16, 21, 22, 23, 24, 27];
+    if (1..=105).contains(&n) {
+        return !UNASSIGNED.contains(&n);
+    }
+    // FR2 与后续补充频段只按已分配区间放行，不做「任意数字都算合法」的宽松处理
+    (256..=269).contains(&n) || (510..=512).contains(&n) || (670..=710).contains(&n)
+}
+
+/// 由 `AT+GTCCINFO?` 的 `<band>` 编码反解 NR 频段名。
+///
+/// 该字段是编码而非人可读名，且存在**两套生成规则**（手册 p126 / p133，
+/// 另见 README「三套编码」一节）：
+///
+/// 1. **数值加法**：`基数 + 频段号`，基数分三档。手册与实机的例子都能对上 ——
+///    `141` = 100 + 41 = n41、`101` = 100 + 1 = n1、`171` = 100 + 71 = n71；
+///    `501` = 500 + 1 = n1；`5041` = 5000 + 41 = n41。
+///    实机 NR 服务小区上报的 `5041` 即属此列。
+/// 2. **十进制字符串拼接**：`50` 直接后接频段号。实机 `AT+GTACT` 候选列表里
+///    出现过 `50512`，按数值加法无解（5000 + 512 = 5512 ≠ 50512），
+///    而 `50` 接 `512` 恰好成立。
+///
+/// 两套规则在部分取值上同解（`5041` 两种解释都指向 n41），故先试数值加法、
+/// 再试字符串拼接；候选频段号一律经过已分配性校验。
+/// 解不出即返回 `None` —— 由调用方保留原始码，**不猜**。
+fn nr_band_from_code(code: &str) -> Option<String> {
+    let c = code.trim();
+    if c.is_empty() || c.len() > 6 || !c.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v: i32 = c.parse().ok()?;
+
+    // 规则 1：数值加法。基数从大到小试，先命中先返回。
+    for base in [5000, 500, 100] {
+        if v > base && nr_band_no_is_valid(v - base) {
+            return Some(format!("n{}", v - base));
+        }
+    }
+
+    // 规则 2：字符串拼接。前缀按长度降序，避免 `5041` 被 `50` 先行吃掉后误判。
+    for prefix in ["500", "100", "50"] {
+        if let Some(rest) = c.strip_prefix(prefix) {
+            if rest.is_empty() {
+                continue;
+            }
+            if let Ok(n) = rest.parse::<i32>() {
+                if nr_band_no_is_valid(n) {
+                    return Some(format!("n{}", n));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 由 `AT+GTCCINFO?` 的 `<band>` 编码反解 LTE 频段名。
+///
+/// 两套编码（手册 p126 / p133）：
+/// - **数值加法**：`100 + 频段号` —— `101` = 100 + 1 = B1 …… `171` = 100 + 71 = B71；
+/// - **band 号直写** —— `1` = B1、`3` = B3、`41` = B41。
+///
+/// 先试 `100 + n`、再按直写解读；两者都要求频段号落在 3GPP 已分配区间
+/// （LTE 为 1..=88，其中 16 未分配）。解不出返回 `None`。
+fn lte_band_from_code(code: &str) -> Option<String> {
+    let c = code.trim();
+    if c.is_empty() || c.len() > 6 || !c.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v: i32 = c.parse().ok()?;
+    let accept = |n: i32| (1..=88).contains(&n) && n != 16;
+
+    // 规则 1：`100 + n`
+    if v > 100 && accept(v - 100) {
+        return Some(format!("B{}", v - 100));
+    }
+    // 规则 2：band 号直写
+    if accept(v) {
+        return Some(format!("B{}", v));
+    }
+    None
+}
+
+/// 把服务小区的 `<bandwidth>` 编码换算为可读带宽。
+///
+/// 同一套数字在两种制式下含义完全不同，必须由 `<rat>` 决定用哪张表：
+/// - **NR**（手册 p191）：编码即带宽的 1/5，单位 MHz ——
+///   `25` = 5 MHz、`50` = 10 MHz、`100` = 20 MHz、`250` = 50 MHz、
+///   `450` = 90 MHz、**`500` = 100 MHz**、`1000` = 200 MHz、`2000` = 400 MHz。
+///   实机 NR 服务小区返回 `500`，即 100 MHz。
+/// - **LTE**：编码是资源块（RB）数 ——
+///   `6` = 1.4 MHz、`15` = 3 MHz、`25` = 5 MHz、`50` = 10 MHz、
+///   `75` = 15 MHz、`100` = 20 MHz。
+///
+/// 编码落在表外返回 `None`，由调用方保留原始值。
+fn bandwidth_text(rat: &str, code: &str) -> Option<String> {
+    let n: i32 = code.trim().parse().ok()?;
+    match rat {
+        "9" => {
+            // 手册 p191 明确列出的 NR 带宽档位
+            const NR_TABLE: [i32; 8] = [25, 50, 100, 250, 450, 500, 1000, 2000];
+            if NR_TABLE.contains(&n) {
+                Some(format!("{} MHz", n / 5))
+            } else {
+                None
+            }
+        }
+        "4" => match n {
+            6 => Some("1.4 MHz".to_string()),
+            15 => Some("3 MHz".to_string()),
+            25 => Some("5 MHz".to_string()),
+            50 => Some("10 MHz".to_string()),
+            75 => Some("15 MHz".to_string()),
+            100 => Some("20 MHz".to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// MCC+MNC → 运营商名称。
 ///
 /// 非权威映射：`AT+COPS?` 在 numeric 格式下只回数字码（实测本模组回 "46000"），
@@ -552,14 +679,40 @@ pub fn signal(at: &AtHandle, cfg: &Config) -> Signal {
     if !cell.is_empty() {
         // 手册 11.1.15：三种制式的服务小区前 10 个字段位置一致
         //   <IsServiceCell>,<rat>,<mcc>,<mnc>,<tac|lac>,<cellid>,<arfcn>,<pci|psc>,<band>,<bandwidth>
+        //
+        // 但后两个字段是**编码值而非人可读名**：实机 NR 服务小区返回
+        // `...,504990,128,5041,500,...` —— `5041` 是 `50|41` = n41、`500` 是带宽的 1/5 = 100 MHz。
+        // 早期版本把编码原样透出，界面于是显示「频段 5041 / 带宽档位 500」，
+        // 看似有值、实则不可读。现按制式解码；编码落在表外时保留原始码并显式标注，
+        // 不把未识别的值伪装成频段名或带宽值。
         s.lac = cget(4);
         s.cid = cget(5);
         s.arfcn = cget(6);
         s.pci = cget(7);
-        s.band = cget(8);
-        s.bandwidth = cget(9);
-        if !s.band.is_empty() {
-            s.band_source = "模组上报".to_string();
+
+        let raw_band = cget(8);
+        let raw_bw = cget(9);
+
+        if !raw_band.is_empty() {
+            let decoded = match cell_rat.as_str() {
+                "9" => nr_band_from_code(&raw_band),
+                "4" => lte_band_from_code(&raw_band),
+                _ => None,
+            };
+            match decoded {
+                Some(name) => {
+                    s.band = name;
+                    s.band_source = "模组上报".to_string();
+                }
+                None => {
+                    s.band = raw_band.clone();
+                    s.band_source = "模组上报（编码未识别）".to_string();
+                }
+            }
+        }
+
+        if !raw_bw.is_empty() {
+            s.bandwidth = bandwidth_text(&cell_rat, &raw_bw).unwrap_or(raw_bw);
         }
     }
 
@@ -613,7 +766,7 @@ pub fn signal(at: &AtHandle, cfg: &Config) -> Signal {
         }
     }
 
-    // 本模组在 NR 制式下 <band> 字段实测为空，
+    // <band> 字段在部分固件版本 / 部分制式下仍会上报为空。
     // 此时按 ARFCN / EARFCN 反推频段号，并**显式标注**为推算值，
     // 避免把推算结果与模组上报值混为一谈。
     // 只在 NR(9) 与 LTE(4) 下推算：UARFCN 的编号体系不同，不参与。
@@ -1491,6 +1644,60 @@ mod band_derive_tests {
     fn nr_band_out_of_table_returns_none() {
         assert_eq!(nr_band_from_arfcn(0), None);          // 0 MHz 不在任何频段
         assert_eq!(nr_band_from_arfcn(3_000_000), None);  // 超出 FR1 栅格
+    }
+
+    #[test]
+    fn nr_band_code_decodes_all_three_encodings() {
+        // 实机 NR 服务小区 <band> = 5041，即 50|41
+        assert_eq!(nr_band_from_code("5041").as_deref(), Some("n41"));
+        // `500` 前缀那套（README 举例）：501 = 500|1
+        assert_eq!(nr_band_from_code("501").as_deref(), Some("n1"));
+        // `100` 前缀那套（README 举例）：141 = 100|41
+        assert_eq!(nr_band_from_code("141").as_deref(), Some("n41"));
+        // 高位写法
+        assert_eq!(nr_band_from_code("5078").as_deref(), Some("n78"));
+        assert_eq!(nr_band_from_code("5079").as_deref(), Some("n79"));
+        assert_eq!(nr_band_from_code("50512").as_deref(), Some("n512"));
+        // 未分配编号与非法输入必须返回 None，不得猜
+        assert_eq!(nr_band_from_code("5006"), None); // n6 未分配
+        assert_eq!(nr_band_from_code("5027"), None); // n27 未分配
+        assert_eq!(nr_band_from_code("500"), None);  // 剥离前缀后余 "0"
+        assert_eq!(nr_band_from_code(""), None);
+        assert_eq!(nr_band_from_code("n41"), None);
+    }
+
+    #[test]
+    fn lte_band_code_decodes_both_encodings() {
+        // `100` 前缀那套：101 = B1
+        assert_eq!(lte_band_from_code("101").as_deref(), Some("B1"));
+        assert_eq!(lte_band_from_code("171").as_deref(), Some("B71"));
+        // band 号直写
+        assert_eq!(lte_band_from_code("3").as_deref(), Some("B3"));
+        assert_eq!(lte_band_from_code("41").as_deref(), Some("B41"));
+        // B16 未分配；越界与非法输入同样返回 None
+        assert_eq!(lte_band_from_code("116"), None);
+        assert_eq!(lte_band_from_code("16"), None);
+        assert_eq!(lte_band_from_code(""), None);
+        assert_eq!(lte_band_from_code("B3"), None);
+    }
+
+    #[test]
+    fn bandwidth_code_maps_by_rat() {
+        // NR（手册 p191）：编码 = MHz × 5。实机返回 500 → 100 MHz
+        assert_eq!(bandwidth_text("9", "500").as_deref(), Some("100 MHz"));
+        assert_eq!(bandwidth_text("9", "250").as_deref(), Some("50 MHz"));
+        assert_eq!(bandwidth_text("9", "450").as_deref(), Some("90 MHz"));
+        assert_eq!(bandwidth_text("9", "25").as_deref(), Some("5 MHz"));
+        assert_eq!(bandwidth_text("9", "1000").as_deref(), Some("200 MHz"));
+        assert_eq!(bandwidth_text("9", "2000").as_deref(), Some("400 MHz"));
+        // LTE：编码 = RB 数
+        assert_eq!(bandwidth_text("4", "100").as_deref(), Some("20 MHz"));
+        assert_eq!(bandwidth_text("4", "6").as_deref(), Some("1.4 MHz"));
+        // 表外编码与未知制式必须返回 None，由调用方保留原始码
+        assert_eq!(bandwidth_text("9", "777"), None);
+        assert_eq!(bandwidth_text("4", "250"), None);
+        assert_eq!(bandwidth_text("2", "500"), None);
+        assert_eq!(bandwidth_text("9", ""), None);
     }
 
     #[test]
