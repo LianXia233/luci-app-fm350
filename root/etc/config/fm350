@@ -19,6 +19,10 @@ config main 'main'
 	option auto_dial '1'
 	option route_guard '1'
 	option poll_interval '30'
+	# 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；设为 0 可关闭独立轮询
+	option v6_poll_interval '300'
+	# IPv6 子接口定时刷新周期（秒）；设为 0 可关闭定时刷新，失效兜底仍保留
+	option v6_refresh_interval '1800'
 	option api_port '8766'
 	# IMEI 写入开关：默认 0（关闭）。高风险不可逆操作，仅在维修等场景临时开启
 	option imei_write '0'

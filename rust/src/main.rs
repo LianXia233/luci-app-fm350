@@ -11,15 +11,15 @@
 mod api;
 mod at;
 mod config;
+mod imei;
 mod modem;
 mod net;
-mod imei;
 mod sms;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::Json;
 
@@ -64,13 +64,15 @@ fm350d —— FM350 模组后端守护与命令行工具
 // ---------------------------------------------------------------- daemon 转发
 
 /// 通过 daemon 的本地 API 执行（daemon 未运行时返回 None）。
-fn via_daemon(cfg: &config::Config, method: &str, path: &str, payload: Option<&Json>) -> Option<Json> {
+fn via_daemon(
+    cfg: &config::Config,
+    method: &str,
+    path: &str,
+    payload: Option<&Json>,
+) -> Option<Json> {
     let addr = format!("127.0.0.1:{}", cfg.api_port);
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().ok()?,
-        Duration::from_millis(500),
-    )
-    .ok()?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(500)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_secs(cfg.at_timeout.max(60))))
         .ok()?;
@@ -93,7 +95,10 @@ fn via_daemon(cfg: &config::Config, method: &str, path: &str, payload: Option<&J
 }
 
 fn print_json(v: &Json) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+    );
 }
 
 /// CLI 执行：优先转发给 daemon，否则本地直连 AT 口。
@@ -119,6 +124,8 @@ where
 /// 互相争抢串口并刷一连串 "Unable to acquire exclusive lock"。
 /// 这里用 flock 做兜底：抢不到锁的实例直接退出，绝不触碰 AT 口。
 const LOCK_FILE: &str = "/var/run/fm350d.lock";
+const V6_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
+const V6_MODEM_POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 #[cfg(unix)]
 fn acquire_singleton() -> Option<std::fs::File> {
@@ -165,12 +172,45 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     eprintln!("fm350d: 守护已启动");
     // 上一次观测到的"其他占用者"。只在集合变化时打印，避免每轮刷日志。
     let mut last_intruders: Vec<u64> = Vec::new();
+    let mut last_v6_refresh: Option<Instant> = None;
+    let mut last_v6_modem_poll: Option<Instant> = None;
+    let mut last_v6_scheduled_refresh = Instant::now();
+    let mut last_modem_ipv6 = String::new();
     loop {
         let cfg = config::load();
         let interval = cfg.poll_interval.max(5);
 
+        let v6_modem_poll_due = cfg.enabled
+            && cfg.ipv6
+            && !cfg.iface_v6.is_empty()
+            && cfg.v6_poll_interval > 0
+            && last_v6_modem_poll
+                .map(|t| {
+                    t.elapsed() >= Duration::from_secs(cfg.v6_poll_interval.max(60))
+                        && t.elapsed() >= V6_MODEM_POLL_MIN_INTERVAL
+                })
+                .unwrap_or(true);
+
         if cfg.enabled && cfg.auto_dial {
             let st = modem::pdp(&at, &cfg);
+            if v6_modem_poll_due {
+                last_v6_modem_poll = Some(Instant::now());
+                if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
+                    eprintln!("fm350d: 模组侧 IPv6 更新为 {}", st.ipv6);
+                    last_modem_ipv6 = st.ipv6.clone();
+                    if net::refresh_ipv6_iface(&cfg) {
+                        eprintln!("fm350d: 模组侧 IPv6 变化，已刷新 {}", cfg.iface_v6);
+                    } else {
+                        eprintln!("fm350d: 模组侧 IPv6 变化，刷新 {} 失败", cfg.iface_v6);
+                    }
+                    let now = Instant::now();
+                    last_v6_refresh = Some(now);
+                    last_v6_scheduled_refresh = now;
+                } else if st.ipv6.is_empty() && !last_modem_ipv6.is_empty() {
+                    eprintln!("fm350d: 模组侧 IPv6 暂未上报");
+                    last_modem_ipv6.clear();
+                }
+            }
             if !st.active {
                 eprintln!("fm350d: PDP 未激活，尝试自动拨号");
                 match modem::dial(&at, &cfg) {
@@ -201,6 +241,32 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                         Err(e) => eprintln!("fm350d: 重新应用网络配置失败: {}", e),
                     }
                 }
+                if cfg.ipv6 && !cfg.iface_v6.is_empty() {
+                    let missing_valid_v6 = ns.ipv6.is_empty();
+                    let v6_refresh_due = cfg.v6_refresh_interval > 0
+                        && last_v6_scheduled_refresh.elapsed()
+                            >= Duration::from_secs(cfg.v6_refresh_interval.max(60));
+                    let v6_recovery_due = missing_valid_v6
+                        && last_v6_refresh
+                            .map(|t| t.elapsed() >= V6_REFRESH_MIN_INTERVAL)
+                            .unwrap_or(true);
+
+                    if v6_refresh_due || v6_recovery_due {
+                        let reason = if v6_recovery_due {
+                            "未发现有效全局 IPv6"
+                        } else {
+                            "到达 IPv6 定时刷新周期"
+                        };
+                        if net::refresh_ipv6_iface(&cfg) {
+                            eprintln!("fm350d: {}，已刷新 {}", reason, cfg.iface_v6);
+                        } else {
+                            eprintln!("fm350d: {}，刷新 {} 失败", reason, cfg.iface_v6);
+                        }
+                        let now = Instant::now();
+                        last_v6_refresh = Some(now);
+                        last_v6_scheduled_refresh = now;
+                    }
+                }
                 // 开机自启补齐：上面只在「地址有偏差」时才重写配置，稳态下
                 // auto 一旦不是 1 就永远补不回来（LuCI 显示「开机时未启动」）。
                 // 这里每轮无条件校验一次，成本 2~4 次 uci get；仅在确有修正时打日志。
@@ -208,6 +274,24 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 if !fixed.is_empty() {
                     eprintln!("fm350d: 已把接口 {:?} 恢复为开机自启", fixed);
                 }
+            }
+        } else if v6_modem_poll_due {
+            let st = modem::pdp(&at, &cfg);
+            last_v6_modem_poll = Some(Instant::now());
+            if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
+                eprintln!("fm350d: 模组侧 IPv6 更新为 {}", st.ipv6);
+                last_modem_ipv6 = st.ipv6.clone();
+                if net::refresh_ipv6_iface(&cfg) {
+                    eprintln!("fm350d: 模组侧 IPv6 变化，已刷新 {}", cfg.iface_v6);
+                } else {
+                    eprintln!("fm350d: 模组侧 IPv6 变化，刷新 {} 失败", cfg.iface_v6);
+                }
+                let now = Instant::now();
+                last_v6_refresh = Some(now);
+                last_v6_scheduled_refresh = now;
+            } else if st.ipv6.is_empty() && !last_modem_ipv6.is_empty() {
+                eprintln!("fm350d: 模组侧 IPv6 暂未上报");
+                last_modem_ipv6.clear();
             }
         }
 
@@ -299,14 +383,16 @@ fn main() {
         "pdp" => run_cli(&cfg, "GET", "/api/pdp", None, |a, c| {
             ok_value(modem::pdp(a, c))
         }),
-        "net" => {
-            print_json(&serde_json::json!({ "ok": true, "net": net::status(&cfg) }))
-        }
+        "net" => print_json(&serde_json::json!({ "ok": true, "net": net::status(&cfg) })),
         // 端口枚举不占用 AT 口；daemon 在跑时优先走它，探测结果更准
         // （daemon 自己持有端口时能如实报告"由本进程持有"）。
         "ports" => {
             let probe = !rest.iter().any(|x| x == "--no-probe");
-            let path = if probe { "/api/ports" } else { "/api/ports?probe=0" };
+            let path = if probe {
+                "/api/ports"
+            } else {
+                "/api/ports?probe=0"
+            };
             match via_daemon(&cfg, "GET", path, None) {
                 Some(j) => print_json(&j),
                 None => print_json(&serde_json::json!({
@@ -338,15 +424,19 @@ fn main() {
             })
         }
 
-        "dial" => run_cli(&cfg, "POST", "/api/dial", Some(&Json::Null), |a, c| {
-            match modem::dial(a, c) {
+        "dial" => run_cli(
+            &cfg,
+            "POST",
+            "/api/dial",
+            Some(&Json::Null),
+            |a, c| match modem::dial(a, c) {
                 Ok(p) => {
                     let n = net::apply_after_dial(c, &p.ipv4, &p.dns);
                     serde_json::json!({ "ok": true, "pdp": p, "net": n.ok() })
                 }
                 Err(e) => serde_json::json!({ "ok": false, "error": e }),
-            }
-        }),
+            },
+        ),
         "hangup" => run_cli(&cfg, "POST", "/api/hangup", None, |a, c| {
             let r = modem::hangup(a, c);
             let _ = net::teardown_iface(c);
@@ -389,19 +479,17 @@ fn main() {
                         ok_or_err(sms::delete(a, c, index))
                     })
                 }
-                "storage" => {
-                    match rest.get(1).cloned() {
-                        Some(mem) => {
-                            let payload = serde_json::json!({ "mem": mem });
-                            run_cli(&cfg, "POST", "/api/sms/storage", Some(&payload), |a, c| {
-                                ok_or_err(sms::set_storage(a, c, &mem))
-                            })
-                        }
-                        None => run_cli(&cfg, "GET", "/api/sms/storage", None, |a, c| {
-                            ok_or_err(sms::storage(a, c))
-                        }),
+                "storage" => match rest.get(1).cloned() {
+                    Some(mem) => {
+                        let payload = serde_json::json!({ "mem": mem });
+                        run_cli(&cfg, "POST", "/api/sms/storage", Some(&payload), |a, c| {
+                            ok_or_err(sms::set_storage(a, c, &mem))
+                        })
                     }
-                }
+                    None => run_cli(&cfg, "GET", "/api/sms/storage", None, |a, c| {
+                        ok_or_err(sms::storage(a, c))
+                    }),
+                },
                 other => {
                     eprintln!("未知 sms 子命令: {}", other);
                     std::process::exit(2);
@@ -483,9 +571,7 @@ fn main() {
             ok_or_err(modem::reboot(a, c))
         }),
 
-        "config" => {
-            print_json(&serde_json::json!({ "ok": true, "config": cfg }))
-        }
+        "config" => print_json(&serde_json::json!({ "ok": true, "config": cfg })),
         "set" => {
             let key = rest.first().cloned().unwrap_or_default();
             let val = rest.get(1).cloned().unwrap_or_default();

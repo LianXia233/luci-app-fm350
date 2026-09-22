@@ -433,6 +433,8 @@ luci-app-fm350/
 | `auto_dial` | `1` | 服务启动后是否自动发起网络拨号 |
 | `route_guard` | `1` | 是否启用默认路由自愈守护 |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
+| `v6_poll_interval` | `300` | 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；`0` 表示关闭独立 V6 轮询 |
+| `v6_refresh_interval` | `1800` | IPv6 子接口定时刷新周期（秒）；`0` 表示关闭定时刷新，失效兜底仍保留 |
 | `api_port` | `8766` | 本地 JSON API 监听端口（仅监听 127.0.0.1） |
 | `imei_write` | `0` | **IMEI 写入全局安全开关**（为 0 时拒绝一切写入操作） |
 
@@ -629,6 +631,11 @@ rm -rf /tmp/luci-modulecache/
   * 修复：v6 子接口置 `extendprefix=1`，由 `/lib/netifd/proto/dhcpv6.sh` 导出 `EXTENDPREFIX`，`/lib/netifd/dhcpv6.script` 再把该 /64 登记为委派前缀并 assign 给 lan。
   * 前置条件：LAN 侧需启用 IPv6 分配（`network.lan` 的 `ip6assign '64'`）。本插件遵循最小干预原则不代改 lan 配置。
 * **链路本地地址不等于「拿到了 IPv6」**：任何 UP 的网卡都自带 `fe80::`。把它计入状态会让前端长期显示有 IPv6，并让在线判定出现假阳性，故 `status()` 按 `fe80::/10` 过滤。
+* **IPv6 有效期必须看 `valid_lft`**：内核里过期的地址可能还短暂出现在 `ip -o addr` 输出中。系统状态读取会排除 `valid_lft 0sec`；`preferred_lft 0sec` 只表示地址已 deprecated，不适合新连接优先选择，但在 `valid_lft` 归零前仍是可用地址。
+* **模组侧 IPv6 与系统侧 IPv6 是两条路径**：
+  * `v6_poll_interval` 控制“问模组”的周期。守护会定时读取 `AT+CGPADDR=<cid>` / `AT+CGCONTRDP=<cid>`，解析得到最新 `pdp.ipv6`；发现模组侧 IPv6 变化时刷新 `fm350v6`。
+  * `v6_refresh_interval` 控制“刷新系统子接口”的周期。守护会定时执行 `ifup <iface_v6>`，兜住 odhcp6c 异常退出、RA/DHCPv6 状态丢失或地址过期后未自动恢复的情况。
+  * 即使关闭定时刷新（`v6_refresh_interval=0`），只要巡检发现系统侧没有有效全局 IPv6，仍会按最小 60 秒节流尝试刷新 `fm350v6`。
 </details>
 
 <details>
