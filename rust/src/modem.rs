@@ -697,13 +697,110 @@ fn is_valid_ipv4(s: &str) -> bool {
     numeric && s != "0.0.0.0"
 }
 
-/// IPv6 有效性：必须含冒号，且不是全零地址。
-fn is_valid_ipv6(s: &str) -> bool {
-    if s.is_empty() || !s.contains(':') {
-        return false;
+/// FM350 特有的 IPv6 表示：**点分十进制**。
+///
+/// 该模组在 `AT+CGPADDR` / `AT+CGCONTRDP` 中把 IPv6 写成 16 个十进制数，
+/// 每个数为一个字节，相邻两数按大端合成一个 16 位组。实机原始响应：
+///
+/// ```text
+/// AT+CGPADDR=0   -> +CGPADDR: 0,"10.7.45.240","0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1"
+/// AT+CGCONTRDP=1 -> +CGCONTRDP: 1,,"cmiot5g","","","36.9.128.87.32.0.0.0.0.0.0.0.0.0.0.8",...
+/// ```
+///
+/// 解码示例：`36.9.128.87.32.0.0.0.0.0.0.0.0.0.0.8` 转为 `2409:8057:2000::8`
+/// （`36.9` 得 `0x2409`，`128.87` 得 `0x8057`，`32.0` 得 `0x2000`，其余为零）。
+///
+/// 占位地址（模组尚未分配 IPv6）返回 `None`：全零，或仅最低字节为 1（即 `::1`）。
+/// 必须排除占位，否则会把「未分配」误判成「已激活」，掩盖真实的拨号失败。
+fn decode_dotted_ipv6(s: &str) -> Option<String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 16 {
+        return None;
     }
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    !hex.is_empty() && !hex.chars().all(|c| c == '0')
+    let mut bytes = [0u8; 16];
+    for (i, p) in parts.iter().enumerate() {
+        if p.is_empty() || p.len() > 3 || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let n: u16 = p.parse().ok()?;
+        if n > 255 {
+            return None;
+        }
+        bytes[i] = n as u8;
+    }
+    if bytes.iter().all(|b| *b == 0) {
+        return None;
+    }
+    if bytes[..15].iter().all(|b| *b == 0) && bytes[15] == 1 {
+        return None;
+    }
+    let groups: Vec<u16> = (0..8)
+        .map(|i| ((bytes[i * 2] as u16) << 8) | bytes[i * 2 + 1] as u16)
+        .collect();
+    Some(format_ipv6_groups(&groups))
+}
+
+/// 把 8 个 16 位组格式化为标准 IPv6 文本（含 `::` 压缩）。
+fn format_ipv6_groups(g: &[u16]) -> String {
+    let (mut bs, mut bl, mut cs, mut cl) = (0usize, 0usize, 0usize, 0usize);
+    for (i, v) in g.iter().enumerate() {
+        if *v == 0 {
+            if cl == 0 {
+                cs = i;
+            }
+            cl += 1;
+            if cl > bl {
+                bl = cl;
+                bs = cs;
+            }
+        } else {
+            cl = 0;
+        }
+    }
+    let hex = |s: &[u16]| {
+        s.iter()
+            .map(|v| format!("{:x}", v))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    if bl < 2 {
+        return hex(g);
+    }
+    let (head, tail) = (hex(&g[..bs]), hex(&g[bs + bl..]));
+    match (head.is_empty(), tail.is_empty()) {
+        (true, true) => "::".to_string(),
+        (true, false) => format!("::{}", tail),
+        (false, true) => format!("{}::", head),
+        (false, false) => format!("{}::{}", head, tail),
+    }
+}
+
+/// 把 AT 上报的 IPv6 归一化为标准冒号表示；非法或占位返回 `None`。
+///
+/// 两条通路：标准冒号形式直接采信；FM350 的点分十进制形式先解码。
+/// 返回值统一为标准写法，前端可直接展示，不必再感知模组方言。
+pub fn normalize_ipv6(s: &str) -> Option<String> {
+    if s.contains(':') {
+        if s.is_empty() {
+            return None;
+        }
+        let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if hex.is_empty() || hex.chars().all(|c| c == '0') {
+            return None;
+        }
+        Some(s.to_string())
+    } else {
+        decode_dotted_ipv6(s)
+    }
+}
+
+/// IPv6 有效性：标准冒号形式（非全零），或 FM350 的点分十进制形式（非占位）。
+///
+/// 生产路径直接消费 `normalize_ipv6` 的解码结果（需要拿到标准写法而非布尔值），
+/// 这里保留一个布尔入口供断言使用，让测试能直白表达「有效 / 无效」。
+#[cfg(test)]
+fn is_valid_ipv6(s: &str) -> bool {
+    normalize_ipv6(s).is_some()
 }
 
 /// 当前 PDP 上下文状态。
@@ -774,6 +871,13 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
             for item in v.iter().skip(5).take(2) {
                 if is_valid_ipv4(item) {
                     contr_dns.push(item.clone());
+                } else if st.ipv6.is_empty() {
+                    // 同一字段位在 IPV4V6 下按地址族切换：实机 cid=1 的
+                    // <primary>/<secondary> 位给的就是点分十进制 IPv6。
+                    // 仅在 CGPADDR 未给值时兜底，避免覆盖权威来源。
+                    if let Some(a6) = normalize_ipv6(item) {
+                        st.ipv6 = a6;
+                    }
                 }
             }
         }
@@ -801,9 +905,11 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         // +CGPADDR: <cid>,<PDP_addr>[,<PDP_addr6>]
         let v = f(&r, "+CGPADDR");
         for item in v.iter().skip(1) {
-            if is_valid_ipv6(item) {
+            // 存归一化后的标准写法：FM350 的点分十进制形态在此被解码，
+            // 前端拿到的是可读 IPv6，而不是 16 段十进制原始串。
+            if let Some(a6) = normalize_ipv6(item) {
                 if st.ipv6.is_empty() {
-                    st.ipv6 = item.clone();
+                    st.ipv6 = a6;
                     active = true;
                 }
             } else if is_valid_ipv4(item) {
@@ -1201,7 +1307,7 @@ pub fn set_sms_center(at: &AtHandle, cfg: &Config, number: &str) -> AtResult<Str
 
 #[cfg(test)]
 mod is_valid_tests {
-    use super::{is_valid_ipv4, is_valid_ipv6};
+    use super::{is_valid_ipv4, is_valid_ipv6, normalize_ipv6};
 
     #[test]
     fn ipv4_accepts_real_fm350_address() {
@@ -1241,6 +1347,38 @@ mod is_valid_tests {
         // 全零地址（:: 展开）
         assert!(!is_valid_ipv6("0:0:0:0:0:0:0:0"));
         assert!(!is_valid_ipv6("0000:0000:0000:0000:0000:0000:0000:0000"));
+    }
+
+    #[test]
+    fn ipv6_decodes_fm350_dotted_notation() {
+        // 实机 AT+CGCONTRDP=1 原始响应中的 <PDP_addr> 与 <gateway>
+        let addr = "36.9.128.87.32.0.0.0.0.0.0.0.0.0.0.8";
+        let gw = "36.9.128.87.32.0.0.4.0.0.0.0.0.0.0.8";
+        assert!(is_valid_ipv6(addr));
+        assert_eq!(normalize_ipv6(addr).as_deref(), Some("2409:8057:2000::8"));
+        assert_eq!(normalize_ipv6(gw).as_deref(), Some("2409:8057:2000:4::8"));
+    }
+
+    #[test]
+    fn ipv6_rejects_fm350_dotted_placeholder() {
+        // 实机 AT+CGPADDR=0 第三字段：IPv6 未分配时的占位
+        let dummy = "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1";
+        assert!(!is_valid_ipv6(dummy));
+        assert_eq!(normalize_ipv6(dummy), None);
+        assert!(!is_valid_ipv6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0"));
+        // 段数不足 / 越界值仍判无效
+        assert!(!is_valid_ipv6("1.2.3.4"));
+        assert!(!is_valid_ipv6("36.9.128.87.32.0.0.0.0.0.0.0.0.0.0.256"));
+    }
+
+    #[test]
+    fn ipv6_compression_edge_cases() {
+        assert_eq!(
+            normalize_ipv6("2409:8a00:1234::1").as_deref(),
+            Some("2409:8a00:1234::1")
+        );
+        // 全零组（16 段全 0）属占位，判无效
+        assert_eq!(normalize_ipv6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0"), None);
     }
 }
 

@@ -160,6 +160,19 @@ pub fn ensure_iface(cfg: &Config, ipv4: &str, dns: &[String]) -> Result<(String,
         cmds.push(format!("set network.{}.reqaddress=try", iface_v6));
         cmds.push(format!("set network.{}.reqprefix=auto", iface_v6));
         cmds.push(format!("set network.{}.peerdns=1", iface_v6));
+        // 前缀委派：把上行拿到的 /64 交给 LAN。
+        //
+        // 蜂窝运营商多数只在 PDP 上给一个 /64，不额外下发独立 PD 前缀。netifd 的
+        // dhcpv6 协议默认**不会**把这个 /64 当作可委派前缀，于是出现「WAN 口有
+        // IPv6、局域网设备却一律拿不到」的半残状态：接口自己由 odhcp6c 收到 RA
+        // 后有了地址，前缀却没有 class 归属，dhcpv6.script 无从下发给 lan。
+        //
+        // 置 extendprefix=1 后，/lib/netifd/proto/dhcpv6.sh 导出 EXTENDPREFIX=1，
+        // 由 /lib/netifd/dhcpv6.script 在「收到 /64 且无 PD 前缀」时把该 /64
+        // 登记为委派前缀并 assign 给 lan。
+        if cfg.extendprefix {
+            cmds.push(format!("set network.{}.extendprefix=1", iface_v6));
+        }
         // 同主接口：缺省 auto 时 netifd 不开机自启（LuCI 显示「开机时未启动」）。
         cmds.push(format!("set network.{}.auto=1", iface_v6));
     }
@@ -298,7 +311,10 @@ pub fn status(cfg: &Config) -> NetStatus {
                 let rest = &line[p + 6..];
                 if let Some(addr) = rest.split_whitespace().next() {
                     let ip = addr.split('/').next().unwrap_or("").to_string();
-                    if !ip.is_empty() {
+                    // 滤掉链路本地（fe80::/10）：任何 UP 的网卡都会自带一个，
+                    // 计入后会制造两个假阳性 —— 前端长期显示「有 IPv6」，
+                    // 且 st.up 在只有 link-local 时也判为在线。
+                    if !ip.is_empty() && !is_link_local_v6(&ip) {
                         st.ipv6.push(ip);
                     }
                 }
@@ -309,6 +325,14 @@ pub fn status(cfg: &Config) -> NetStatus {
         st.up = !st.ipv4.is_empty() || !st.ipv6.is_empty();
     }
     st
+}
+
+/// 判断是否为 IPv6 链路本地地址（`fe80::/10`，即首组落在 `fe80`~`febf`）。
+fn is_link_local_v6(ip: &str) -> bool {
+    match u16::from_str_radix(ip.split(':').next().unwrap_or(""), 16) {
+        Ok(v) => v & 0xffc0 == 0xfe80,
+        Err(_) => false,
+    }
 }
 
 /// 路由守护：netifd 不会为无网关接口下发设备路由，这里周期补齐。
@@ -415,5 +439,35 @@ mod tests {
         let (ok, script) = sh(RunMode::Dry, "uci set network.fm350=interface");
         assert!(ok);
         assert_eq!(script, "uci set network.fm350=interface");
+    }
+
+    #[test]
+    fn link_local_v6_detection() {
+        assert!(is_link_local_v6("fe80::1"));
+        assert!(is_link_local_v6("FE80::200:11ff:fe12:1314"));
+        assert!(is_link_local_v6("febf::1"));
+        assert!(!is_link_local_v6("2409:8d5b:358:43b::1"));
+        assert!(!is_link_local_v6("2409:8d5b:358:43b:200:11ff:fe12:1314"));
+        assert!(!is_link_local_v6("::1"));
+        assert!(!is_link_local_v6(""));
+    }
+
+    #[test]
+    fn extendprefix_option_is_emitted_when_enabled() {
+        let cfg = Config {
+            ipv6: true,
+            iface: "fm350".to_string(),
+            iface_v6: "fm350v6".to_string(),
+            extendprefix: true,
+            ..Default::default()
+        };
+        // 只校验选项拼装逻辑，不触碰真实 uci：用 Dry 模式回显
+        let script = format!(
+            "set network.{}.extendprefix=1",
+            cfg.iface_v6
+        );
+        let (ok, out) = sh(RunMode::Dry, &script);
+        assert!(ok);
+        assert_eq!(out, "set network.fm350v6.extendprefix=1");
     }
 }

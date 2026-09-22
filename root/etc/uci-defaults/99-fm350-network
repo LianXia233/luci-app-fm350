@@ -25,6 +25,8 @@ IFACE_V6="$(get_opt iface_v6)"
 [ -n "$IFACE_V6" ] || IFACE_V6=fm350v6
 IPV6="$(get_opt ipv6)"
 [ -n "$IPV6" ] || IPV6=1
+EXTENDPREFIX="$(get_opt extendprefix)"
+[ -n "$EXTENDPREFIX" ] || EXTENDPREFIX=1
 METRIC="$(get_opt metric)"
 [ -n "$METRIC" ] || METRIC=30
 DATA_DEV="$(get_opt data_dev)"
@@ -52,6 +54,10 @@ if [ "$IPV6" = "1" ] && [ -n "$IFACE_V6" ]; then
 		uci -q set network."$IFACE_V6".reqaddress=try
 		uci -q set network."$IFACE_V6".reqprefix=auto
 		uci -q set network."$IFACE_V6".peerdns=1
+		# 前缀委派：让 netifd 把上行 /64 分配给 lan，否则下游设备拿不到 IPv6
+		if [ "$EXTENDPREFIX" = "1" ]; then
+			uci -q set network."$IFACE_V6".extendprefix=1
+		fi
 	fi
 	uci -q set network."$IFACE_V6".auto=1
 fi

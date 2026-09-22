@@ -895,7 +895,27 @@ return view.extend({
 		o.datatype = 'and(port,min(1))';
 		o.default = '8766';
 
-		/* ---------------- 二、AT 串口管理 ---------------- */
+		/* ---------------- 二、IPv6 前缀委派 ---------------- */
+		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 前缀委派'));
+		s.description = _('蜂窝运营商通常只下发一个 /64 前缀。'
+			+ '开启委派后该前缀会分配给 LAN，局域网设备也能获得 IPv6 地址；'
+			+ '关闭则只有路由器自身的蜂窝接口持有 IPv6。'
+			+ '修改保存后需重新拨号（或重启服务）才会生效。');
+		s.anonymous = false;
+
+		o = s.option(form.Flag, 'ipv6', _('启用 IPv6 子接口'),
+			_('关闭后不再创建 fm350v6 子接口，蜂窝侧仅使用 IPv4'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Flag, 'extendprefix', _('向下委派 IPv6 前缀'),
+			_('把上行 /64 前缀分配给 LAN（netifd extendprefix）。'
+				+ '仅当运营商确实下发前缀时才会生效'));
+		o.default = '1';
+		o.rmempty = false;
+		o.depends('ipv6', '1');
+
+		/* ---------------- 三、AT 串口管理 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('AT 串口管理'));
 		s.description = _('插件独占 AT 口：fm350d 运行期间持续持有该端口并申请排他锁，'
 			+ '其它申请排他锁的程序将无法并发争抢；若有进程绕过锁强开，下方状态栏将直接列出其 PID。'
@@ -1010,7 +1030,7 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(1))';
 		o.default = '10';
 
-		/* ---------------- 三、模组控制指令 ---------------- */
+		/* ---------------- 四、模组控制指令 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('模组控制指令'));
 		s.description = _('日常运维常用控制。「移动网络」开关点击即时生效；切换 USB 模式后模组需重新枚举，耗时约 20–30 秒。');
 
@@ -1072,7 +1092,7 @@ return view.extend({
 			return api.reboot().then(function(res) { notify(res, _('重启指令已下发')); });
 		};
 
-		/* ---------------- 四、IMEI / 设备识别码维护 ---------------- */
+		/* ---------------- 五、IMEI / 设备识别码维护 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('IMEI / 设备识别码维护'));
 		s.description = _('安全警告：写入 IMEI 属于高风险底层操作，不当变更可能导致基站鉴权失败或拒绝入网。'
 			+ '仅限设备维修与合法原厂串号恢复使用。默认锁定保护。');
@@ -1143,7 +1163,7 @@ return view.extend({
 			});
 		};
 
-		/* ---------------- 五、模组硬件诊断信息 ---------------- */
+		/* ---------------- 六、模组硬件诊断信息 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('模组硬件诊断信息'));
 		s.description = _('模组底层固件版本与生效参数，只读显示');
 

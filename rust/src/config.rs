@@ -39,6 +39,12 @@ pub struct Config {
     pub metric: u32,
     #[serde(default = "default_ipv6")]
     pub ipv6: bool,
+    /// 是否把上行 IPv6 前缀委派给 LAN（对应 netifd dhcpv6 的 `extendprefix`）。
+    ///
+    /// 默认开启。蜂窝侧通常只下发一个 /64，不置此项时该前缀不会分配给 lan，
+    /// 表现为「WAN 有 IPv6、局域网设备没有」。
+    #[serde(default = "default_extendprefix")]
+    pub extendprefix: bool,
     #[serde(default = "default_auto_dial")]
     pub auto_dial: bool,
     #[serde(default = "default_route_guard")]
@@ -69,6 +75,7 @@ fn default_iface_v6() -> String { "fm350v6".into() }
 fn default_data_dev() -> String { "auto".into() }
 fn default_metric() -> u32 { 30 }
 fn default_ipv6() -> bool { true }
+fn default_extendprefix() -> bool { true }
 fn default_auto_dial() -> bool { true }
 fn default_route_guard() -> bool { true }
 fn default_poll_interval() -> u64 { 30 }
@@ -157,6 +164,7 @@ pub fn load() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_metric),
         ipv6: uci_get("ipv6").map(|v| v == "1").unwrap_or(true),
+        extendprefix: uci_get("extendprefix").map(|v| v == "1").unwrap_or(true),
         auto_dial: uci_get("auto_dial").map(|v| v == "1").unwrap_or(true),
         route_guard: uci_get("route_guard").map(|v| v == "1").unwrap_or(true),
         poll_interval: uci_get("poll_interval")
