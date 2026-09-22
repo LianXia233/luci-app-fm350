@@ -915,6 +915,32 @@ return view.extend({
 		o.rmempty = false;
 		o.depends('ipv6', '1');
 
+		o = s.option(form.Value, 'v6_poll_interval', _('IPv6 模组轮询周期（秒）'),
+			_('守护进程会按此周期通过 AT+CGPADDR/AT+CGCONTRDP 读取模组侧最新 IPv6；发现模组侧 IPv6 变化时会刷新 IPv6 子接口。设为 0 可关闭独立 V6 轮询'));
+		o.datatype = 'uinteger';
+		o.validate = function(section_id, value) {
+			var n = parseInt(value, 10);
+			if (/^\d+$/.test(value) && (n === 0 || n >= 60))
+				return true;
+			return _('请输入 0，或不小于 60 的整数秒数');
+		};
+		o.default = '300';
+		o.rmempty = false;
+		o.depends('ipv6', '1');
+
+		o = s.option(form.Value, 'v6_refresh_interval', _('IPv6 定时刷新周期（秒）'),
+			_('守护进程会按此周期刷新 IPv6 子接口，避免 RA/DHCPv6 状态异常导致地址过期后不恢复；设为 0 可关闭定时刷新。即使关闭，巡检发现没有有效全局 IPv6 时仍会自动刷新'));
+		o.datatype = 'uinteger';
+		o.validate = function(section_id, value) {
+			var n = parseInt(value, 10);
+			if (/^\d+$/.test(value) && (n === 0 || n >= 60))
+				return true;
+			return _('请输入 0，或不小于 60 的整数秒数');
+		};
+		o.default = '1800';
+		o.rmempty = false;
+		o.depends('ipv6', '1');
+
 		/* ---------------- 三、AT 串口管理 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('AT 串口管理'));
 		s.description = _('插件独占 AT 口：fm350d 运行期间持续持有该端口并申请排他锁，'
@@ -1285,6 +1311,10 @@ return view.extend({
 						]),
 						E('p', {}, [
 							E('span', {}, _('巡检周期：') + (uci.get('fm350', 'main', 'poll_interval') || '30') + _(' 秒')),
+							E('span', { 'style': 'opacity:0.5;' }, '•'),
+							E('span', {}, _('V6 轮询：') + (uci.get('fm350', 'main', 'v6_poll_interval') || '300') + _(' 秒')),
+							E('span', { 'style': 'opacity:0.5;' }, '•'),
+							E('span', {}, _('V6 刷新：') + (uci.get('fm350', 'main', 'v6_refresh_interval') || '1800') + _(' 秒')),
 							E('span', { 'style': 'opacity:0.5;' }, '•'),
 							E('span', {}, _('API 端口：') + (uci.get('fm350', 'main', 'api_port') || '8766'))
 						])

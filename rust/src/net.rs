@@ -88,7 +88,6 @@ fn uci_list_contains(key: &str, item: &str) -> bool {
     ok && out.split_whitespace().any(|x| x == item)
 }
 
-
 /// 探测数据通道网卡名：优先读驱动，其次按名称兜底。
 pub fn detect_dev(cfg: &Config) -> Option<String> {
     if cfg.data_dev != "auto" && !cfg.data_dev.is_empty() {
@@ -98,7 +97,12 @@ pub fn detect_dev(cfg: &Config) -> Option<String> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let driver = fs::read_link(entry.path().join("device/driver"))
-            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .unwrap_or_default();
         if DATA_DRIVERS.iter().any(|d| driver.contains(d)) {
             return Some(name);
@@ -119,13 +123,20 @@ fn uci(script: &str) -> (bool, String) {
 }
 
 fn uci_batch(lines: &[String]) -> Vec<(String, bool, String)> {
-    lines.iter().map(|l| (l.clone(), uci(l).0, "".to_string())).collect()
+    lines
+        .iter()
+        .map(|l| (l.clone(), uci(l).0, "".to_string()))
+        .collect()
 }
 
 /// 确保蜂窝接口存在并应用地址。
 ///
 /// 返回（接口名, 数据网卡, 已执行的 UCI 命令列表）。
-pub fn ensure_iface(cfg: &Config, ipv4: &str, dns: &[String]) -> Result<(String, String, Vec<String>), String> {
+pub fn ensure_iface(
+    cfg: &Config,
+    ipv4: &str,
+    dns: &[String],
+) -> Result<(String, String, Vec<String>), String> {
     let dev = detect_dev(cfg).ok_or_else(|| "未探测到数据通道网卡".to_string())?;
     let iface = &cfg.iface;
     let iface_v6 = &cfg.iface_v6;
@@ -232,7 +243,10 @@ pub fn ensure_iface(cfg: &Config, ipv4: &str, dns: &[String]) -> Result<(String,
             eprintln!("fm350d: ifup {} 失败（rc!=0）: {}", iface_v6, up_out6);
         }
     }
-    let _ = real(&format!("ip route replace default dev {} metric {}", dev, cfg.metric));
+    let _ = real(&format!(
+        "ip route replace default dev {} metric {}",
+        dev, cfg.metric
+    ));
 
     Ok((iface.clone(), dev, cmds))
 }
@@ -307,17 +321,8 @@ pub fn status(cfg: &Config) -> NetStatus {
                     }
                 }
             }
-            if let Some(p) = line.find("inet6 ") {
-                let rest = &line[p + 6..];
-                if let Some(addr) = rest.split_whitespace().next() {
-                    let ip = addr.split('/').next().unwrap_or("").to_string();
-                    // 滤掉链路本地（fe80::/10）：任何 UP 的网卡都会自带一个，
-                    // 计入后会制造两个假阳性 —— 前端长期显示「有 IPv6」，
-                    // 且 st.up 在只有 link-local 时也判为在线。
-                    if !ip.is_empty() && !is_link_local_v6(&ip) {
-                        st.ipv6.push(ip);
-                    }
-                }
+            if let Some(ip) = usable_global_v6_from_addr_line(line) {
+                st.ipv6.push(ip);
             }
         }
         let (_, routes) = real(&format!("ip route show dev {} 2>/dev/null", d));
@@ -327,12 +332,66 @@ pub fn status(cfg: &Config) -> NetStatus {
     st
 }
 
+/// 从 `ip -o addr` 的一行中提取仍在有效期内的公网/全局 IPv6。
+///
+/// 仅排除 `valid_lft 0sec`，不排除 `preferred_lft 0sec`：后者表示地址已
+/// deprecated，不适合新连接优先选择，但在 valid_lft 归零前仍是可用地址。
+fn usable_global_v6_from_addr_line(line: &str) -> Option<String> {
+    let p = line.find("inet6 ")?;
+    let rest = &line[p + 6..];
+    let addr = rest.split_whitespace().next()?;
+    let ip = addr.split('/').next().unwrap_or("");
+
+    // 滤掉链路本地（fe80::/10）：任何 UP 的网卡都会自带一个，计入后会制造
+    // 两个假阳性 —— 前端长期显示「有 IPv6」，且 st.up 在只有 link-local 时
+    // 也判为在线。
+    if ip.is_empty() || is_link_local_v6(ip) {
+        return None;
+    }
+    if !addr_line_has_valid_lifetime(line) {
+        return None;
+    }
+    Some(ip.to_string())
+}
+
+fn addr_line_has_valid_lifetime(line: &str) -> bool {
+    let mut iter = line.split_whitespace();
+    while let Some(tok) = iter.next() {
+        if tok == "valid_lft" {
+            return match iter.next() {
+                Some("forever") => true,
+                Some(v) if v.ends_with("sec") => v
+                    .trim_end_matches("sec")
+                    .parse::<u64>()
+                    .map(|n| n > 0)
+                    .unwrap_or(false),
+                Some(_) => true,
+                None => false,
+            };
+        }
+    }
+    // BusyBox/iproute2 输出异常或旧版本不带 lifetime 时，保守沿用原行为。
+    true
+}
+
 /// 判断是否为 IPv6 链路本地地址（`fe80::/10`，即首组落在 `fe80`~`febf`）。
 fn is_link_local_v6(ip: &str) -> bool {
     match u16::from_str_radix(ip.split(':').next().unwrap_or(""), 16) {
         Ok(v) => v & 0xffc0 == 0xfe80,
         Err(_) => false,
     }
+}
+
+/// IPv6 子接口刷新：用于守护发现全局 IPv6 消失或有效期归零后的自恢复。
+///
+/// 正常续租由 netifd/odhcp6c 负责；这里是兜底，让 odhcp6c 异常退出、
+/// RA/DHCPv6 状态丢失或地址过期被内核移除时，下一轮巡检能重新拉起 fm350v6。
+pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
+    if !cfg.ipv6 || cfg.iface_v6.is_empty() {
+        return false;
+    }
+    let (ok, _) = real(&format!("ifup {}", cfg.iface_v6));
+    ok
 }
 
 /// 路由守护：netifd 不会为无网关接口下发设备路由，这里周期补齐。
@@ -353,7 +412,10 @@ pub fn route_guard(cfg: &Config) -> bool {
     }
     let wanted = format!("default dev {} metric {}", dev, cfg.metric);
     let (_, routes) = real(&format!("ip route show dev {} 2>/dev/null", dev));
-    if routes.lines().any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric))) {
+    if routes
+        .lines()
+        .any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric)))
+    {
         return false;
     }
     let (ok, _) = real(&format!("ip route replace {}", wanted));
@@ -453,6 +515,30 @@ mod tests {
     }
 
     #[test]
+    fn v6_addr_line_requires_valid_lifetime() {
+        let ok = "2: eth2 inet6 2409:8d5b:358:43b::8/64 scope global dynamic valid_lft 3588sec preferred_lft 3588sec";
+        let deprecated = "2: eth2 inet6 2409:8d5b:358:43b::9/64 scope global dynamic valid_lft 120sec preferred_lft 0sec";
+        let expired = "2: eth2 inet6 2409:8d5b:358:43b::a/64 scope global dynamic valid_lft 0sec preferred_lft 0sec";
+        let forever = "2: eth2 inet6 2409:8d5b:358:43b::b/64 scope global valid_lft forever preferred_lft forever";
+        let link_local = "2: eth2 inet6 fe80::200:11ff:fe12:1314/64 scope link valid_lft forever preferred_lft forever";
+
+        assert_eq!(
+            usable_global_v6_from_addr_line(ok).as_deref(),
+            Some("2409:8d5b:358:43b::8")
+        );
+        assert_eq!(
+            usable_global_v6_from_addr_line(deprecated).as_deref(),
+            Some("2409:8d5b:358:43b::9")
+        );
+        assert_eq!(usable_global_v6_from_addr_line(expired), None);
+        assert_eq!(
+            usable_global_v6_from_addr_line(forever).as_deref(),
+            Some("2409:8d5b:358:43b::b")
+        );
+        assert_eq!(usable_global_v6_from_addr_line(link_local), None);
+    }
+
+    #[test]
     fn extendprefix_option_is_emitted_when_enabled() {
         let cfg = Config {
             ipv6: true,
@@ -462,10 +548,7 @@ mod tests {
             ..Default::default()
         };
         // 只校验选项拼装逻辑，不触碰真实 uci：用 Dry 模式回显
-        let script = format!(
-            "set network.{}.extendprefix=1",
-            cfg.iface_v6
-        );
+        let script = format!("set network.{}.extendprefix=1", cfg.iface_v6);
         let (ok, out) = sh(RunMode::Dry, &script);
         assert!(ok);
         assert_eq!(out, "set network.fm350v6.extendprefix=1");

@@ -51,6 +51,12 @@ pub struct Config {
     pub route_guard: bool,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
+    /// 从模组 AT/PDP 信息轮询最新 IPv6 的周期。0 表示关闭独立 V6 轮询。
+    #[serde(default = "default_v6_poll_interval")]
+    pub v6_poll_interval: u64,
+    /// IPv6 子接口定时刷新周期。0 表示关闭定时刷新；地址失效兜底刷新不受影响。
+    #[serde(default = "default_v6_refresh_interval")]
+    pub v6_refresh_interval: u64,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
     /// IMEI / 串号写入开关。默认关闭：写入属高风险不可逆操作，
@@ -61,27 +67,75 @@ pub struct Config {
     pub enabled: bool,
 }
 
-fn default_at_port() -> String { "/dev/ttyUSB1".into() }
-fn default_baudrate() -> u32 { 115200 }
-fn default_at_timeout() -> u64 { 10 }
-fn default_apn() -> String { "cmiot5g".into() }
-fn default_username() -> String { String::new() }
-fn default_password() -> String { String::new() }
-fn default_auth() -> String { "none".into() }
-fn default_pdp_type() -> String { "IPV4V6".into() }
-fn default_cid() -> u32 { 1 }
-fn default_iface() -> String { "fm350".into() }
-fn default_iface_v6() -> String { "fm350v6".into() }
-fn default_data_dev() -> String { "auto".into() }
-fn default_metric() -> u32 { 30 }
-fn default_ipv6() -> bool { true }
-fn default_extendprefix() -> bool { true }
-fn default_auto_dial() -> bool { true }
-fn default_route_guard() -> bool { true }
-fn default_poll_interval() -> u64 { 30 }
-fn default_api_port() -> u16 { 8766 }
-fn default_imei_write() -> bool { false }
-fn default_enabled() -> bool { true }
+fn default_at_port() -> String {
+    "/dev/ttyUSB1".into()
+}
+fn default_baudrate() -> u32 {
+    115200
+}
+fn default_at_timeout() -> u64 {
+    10
+}
+fn default_apn() -> String {
+    "cmiot5g".into()
+}
+fn default_username() -> String {
+    String::new()
+}
+fn default_password() -> String {
+    String::new()
+}
+fn default_auth() -> String {
+    "none".into()
+}
+fn default_pdp_type() -> String {
+    "IPV4V6".into()
+}
+fn default_cid() -> u32 {
+    1
+}
+fn default_iface() -> String {
+    "fm350".into()
+}
+fn default_iface_v6() -> String {
+    "fm350v6".into()
+}
+fn default_data_dev() -> String {
+    "auto".into()
+}
+fn default_metric() -> u32 {
+    30
+}
+fn default_ipv6() -> bool {
+    true
+}
+fn default_extendprefix() -> bool {
+    true
+}
+fn default_auto_dial() -> bool {
+    true
+}
+fn default_route_guard() -> bool {
+    true
+}
+fn default_poll_interval() -> u64 {
+    30
+}
+fn default_v6_poll_interval() -> u64 {
+    300
+}
+fn default_v6_refresh_interval() -> u64 {
+    1800
+}
+fn default_api_port() -> u16 {
+    8766
+}
+fn default_imei_write() -> bool {
+    false
+}
+fn default_enabled() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -170,6 +224,12 @@ pub fn load() -> Config {
         poll_interval: uci_get("poll_interval")
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_poll_interval),
+        v6_poll_interval: uci_get("v6_poll_interval")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_v6_poll_interval),
+        v6_refresh_interval: uci_get("v6_refresh_interval")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_v6_refresh_interval),
         api_port: uci_get("api_port")
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_api_port),
