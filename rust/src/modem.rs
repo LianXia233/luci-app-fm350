@@ -991,14 +991,19 @@ fn rat_code(item: &str) -> Option<&'static str> {
     }
 }
 
-/// 读取当前制式信息。
+/// 读取当前制式优先顺序（`AT+EPRATL?`）。
 ///
-/// 手册 11.1.13 的 `+EPRATL` **只有写形式，没有 `AT+EPRATL?`**，
-/// 因此读取改走 `AT+GTACT?`（手册 11.1.14，返回当前 `<rat>` 与频段配置）。
-/// 两者语义不完全等价：`+GTACT` 是当前选定的制式与频段，
-/// `+EPRATL` 是制式优先顺序列表。
+/// 手册 11.1.13 只描述了写形式 `AT+EPRATL=<num>,<rat…>`，未列出 `?` 读形式；
+/// 但 2026-09-22 实机实测（FM350-GL，Revision 81600.0000.00.29.24.02）
+/// `AT+EPRATL?` 可正常返回 `+EPRATL:<num>,<rat…>` —— 本次回读 `+EPRATL:2,128,4`，
+/// 即「2 个优先制式，NR(128) 优先于 LTE(4)」。
+/// 故读通路与 `set_rat_order()` 的写通路保持对称，同用 `+EPRATL`。
+///
+/// 与 `lock_status()` 的分工：`AT+GTACT?` 返回的是**当前选定制式与频段锁定**
+/// （实测 `+GTACT: 20,6,3,1,2,4,5,8,101,…`，首字段为 `<rat>`、其余为频段列表），
+/// 语义是「锁网锁频配置」，不是优先顺序列表，不能代替本函数。
 pub fn rat_order(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    run(at, cfg, "AT+GTACT?")
+    run(at, cfg, "AT+EPRATL?")
 }
 
 /// 设置制式优先顺序（FM350 官方命令 `AT+EPRATL`，手册 11.1.13）。

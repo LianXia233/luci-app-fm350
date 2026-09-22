@@ -4,7 +4,8 @@
 //!   - 列表：`AT+CMGF=0` + `AT+CSCS="GSM"` + `AT+CMGL=4`
 //!   - 发送：`AT+CMGS=<tpdu 长度>` → 等待 `>` → PDU + Ctrl-Z(0x1A)
 //!   - 删除：`AT+CMGD=<index>`
-//!   - 存储：`AT+CPMS?` / `AT+CPMS="ME","ME","ME"`
+//!   - 存储：`AT+CPMS?` / `AT+CPMS="SM","SM","SM"`
+//!     （实机 `AT+CPMS=?` 仅返回 ("SM")，不支持 "ME"）
 //!
 //! 支持 7-bit（GSM 03.38）与 UCS2（中文）两种编码。
 

@@ -348,7 +348,9 @@ pub fn dispatch(
                 let mem = payload
                     .get("mem")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("ME")
+                    /* 默认值取 "SM"：实机 `AT+CPMS=?` 只返回 ("SM")，
+                       "ME" 不在受支持列表内；与 storage() 解析失败的回落值一致。 */
+                    .unwrap_or("SM")
                     .to_string();
                 at_err(crate::sms::set_storage(at, &cfg, &mem))
             } else {
