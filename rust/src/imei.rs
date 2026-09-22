@@ -2,19 +2,25 @@
 //!
 //! 功能范围：
 //!   - 读取：始终可用（`AT+EGMREXT=0,7`），用于展示与备份；
-//!   - 写入 / 更换：高风险不可逆操作，需同时满足三重条件才允许下发：
+//!   - 写入 / 更换：高风险不可逆操作，需同时满足三个准入条件才允许下发：
 //!       1. UCI `fm350.main.imei_write` 为 1（默认 0）；
 //!       2. 调用方显式传入 `confirm = true`；
-//!       3. 目标值通过 15 位数字与 Luhn 校验。
+//!       3. 目标值为 15 位纯数字（`valid_format` 格式校验）。
+//!     此外会做 Luhn 校验，但**仅作为风险提示返回 warning，不阻断写入**
+//!     （部分厂商 IMEI 不严格符合 Luhn 校验位规则）。
 //!   下发前会自动读取并备份当前 IMEI 到 `/etc/fm350/imei.backup`。
 //!
-//! 注意：写入仅在本模块内构造命令，不经过通用 AT 透传路径，
-//! 以免被误触发。写入操作会记录到系统日志。
+//! 命令出处：`AT+EGMREXT` **未被 Fibocom FM350 AT 手册（v2.2 / V2.10）收录**，
+//! 属社区与实机验证可用的扩展命令。
+//!
+//! 安全边界：写入仅在本模块内构造命令，**不经过通用 AT 透传路径**，以免被误触发。
+//! 通用透传路径（`/api/at` 与 CLI `at`）由 [`crate::at::is_imei_write`]
+//! 无条件拦截全部 IMEI / 串号写形式。写入操作会记录到系统日志。
 
 use std::fs;
 use std::process::Command;
 
-use crate::at::{self, AtHandle, AtResult};
+use crate::at::{AtHandle, AtResult};
 use crate::config::Config;
 
 const BACKUP_DIR: &str = "/etc/fm350";
@@ -177,17 +183,6 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
         luhn_ok: luhn,
         warning,
     })
-}
-
-/// 通用 AT 透传路径的守卫：写入类 IMEI 指令默认拒绝。
-pub fn guard_transparent(cmd: &str, cfg: &Config) -> Result<(), String> {
-    if at::is_imei_write(cmd) && !cfg.imei_write {
-        return Err(format!(
-            "已拒绝 `{}`：IMEI 写入需在设置中开启 imei_write 后，通过 IMEI 专用接口执行",
-            cmd.trim()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
