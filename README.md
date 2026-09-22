@@ -11,12 +11,58 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blueviolet.svg?style=flat-square)](LICENSE)
 
 <p align="center">
-  <b>单静态二进制</b> • <b>零运行时依赖</b> • <b>串口排他持久持有</b> • <b>纯原生 LuCI JS</b>
+  <b>Rust 单静态二进制</b> • <b>无 Python / Lua 后端依赖</b> • <b>串口排他持久持有</b> • <b>纯原生 LuCI JS</b>
 </p>
 
 ---
 
 </div>
+
+## 快速开始
+
+本项目适合已经在 OpenWrt / ImmortalWrt 上使用 **Fibocom FM350-GL** 的用户，用一个 LuCI 页面集中完成状态查看、拨号配置、锁频锁小区、短信收发、AT 调试和基础维护。后端为 `fm350d`，安装后通过 OpenWrt 原生 procd 服务常驻运行。
+
+### 适用范围
+
+| 项目 | 说明 |
+| :--- | :--- |
+| 目标模组 | Fibocom FM350-GL |
+| 目标系统 | OpenWrt 24.10+、ImmortalWrt 24.x / 25.x 及相近 LuCI JS 环境 |
+| 前端入口 | `网络 -> Mobile Network -> FM350-GL` |
+| 后端服务 | `/etc/init.d/fm350d`，二进制位于 `/usr/sbin/fm350d` |
+| 配置文件 | `/etc/config/fm350` |
+| 默认 AT 口 | `/dev/ttyUSB1`，可在服务设置页重新探测和修改 |
+
+### 安装
+
+优先从 GitHub Releases 下载与你的固件包管理器匹配的安装包：
+
+```bash
+# ImmortalWrt 25.x / OpenWrt 24.10+ 常见 apk 固件
+apk add --allow-untrusted luci-app-fm350-*.apk
+
+# 传统 opkg 固件
+opkg install luci-app-fm350_*.ipk
+```
+
+安装后清理 LuCI 缓存并启动服务：
+
+```bash
+rm -f /tmp/luci-indexcache*
+rm -rf /tmp/luci-modulecache/
+/etc/init.d/rpcd reload
+/etc/init.d/fm350d enable
+/etc/init.d/fm350d start
+```
+
+若菜单未立即出现，重新登录 LuCI 或重启 `uhttpd` 后再访问「网络 -> Mobile Network -> FM350-GL」。
+
+### 运行依赖与边界
+
+- 软件包依赖 `luci-base`、`rpcd-mod-ucode`、`kmod-usb-net-rndis`、`kmod-usb-serial-option`；这些由 OpenWrt 包管理器处理。
+- `fm350d` 自身是 Rust 静态二进制，不依赖 Python、Lua 后端脚本或额外 Web 服务。
+- 本插件面向 FM350-GL 实机行为实现，不保证可直接适配其它 T700 / 5G 模组。
+- IMEI 写入默认关闭，需要同时开启 UCI 开关和二次确认；普通状态查看、拨号、短信、锁频不需要开启该开关。
 
 ## 界面预览
 
@@ -110,6 +156,10 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 
 ## 📑 目录索引
 
+- [快速开始](#快速开始)
+  - [适用范围](#适用范围)
+  - [安装](#安装)
+  - [运行依赖与边界](#运行依赖与边界)
 - [界面预览](#界面预览)
 - [💡 核心定位与架构概览](#-核心定位与架构概览)
 - [✨ 功能特性清单](#-功能特性清单)
@@ -141,7 +191,7 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 
 本插件针对广和通 **Fibocom FM350-GL** 5G 模组全新独立实现，彻底抛弃旧式脚本堆砌方案，拥有高可靠的数据与配置架构：
 
-* 🦀 **Rust 单二进制后端 (`fm350d`)**：单一可执行文件运行于 `/usr/sbin/fm350d`，零运行时解释器依赖（**不依赖 Python**、无额外守护进程库）。
+* 🦀 **Rust 单二进制后端 (`fm350d`)**：单一可执行文件运行于 `/usr/sbin/fm350d`，无 Python / Lua 后端运行时依赖，也不引入额外 Web 守护进程。
 * ⚡ **原生 LuCI JS 前端**：遵循 LuCI 现代规范，全基于 `view/form` 与独立 CSS 样式表，不使用内联样式，不使用已废弃的 Lua 页面与控制器。
 * 🔒 **严格串口独占持有**：采用持久持有 + 排他文件锁，杜绝频繁开关串口握手开销；辅以进程级 `/proc/*/fd` 扫描，实现独占状态真实可观测。
 * 🌐 **精简系统集成**：通过标准 `/usr/share/rpcd/ucode/fm350.uc` 提供 ubus 代理，无额外 HTTP 守护进程，不占用额外独立网络端口。
