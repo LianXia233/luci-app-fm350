@@ -483,6 +483,7 @@ make package/luci-app-fm350/compile V=s
 
 * **`.github/workflows/ci.yml`**：在代码推送与 PR 时触发，拦截静态语法错误、CRLF 行尾、JSON 校验、Shell 语法，并运行全部 Rust 单元测试。
 * **`.github/workflows/release.yml`**：推送 `v*` 标签或手动触发，基于 ImmortalWrt SDK 自动交叉编译产出安装包，附带 `SHA256SUMS` 与 SDK 构建签名公钥。
+* **同 Release 内旧版本包自动清理**：发布前执行 `scripts/clean-release-assets.sh`，删除同一 Release 内其它版本的 `.apk` / `.ipk`。`gh release upload --clobber` 只能覆盖**同名**文件，而包名里带版本号，`PKG_RELEASE` 递增后旧包会与新包并存，从 Release 页面下载时容易装到旧版本。清理只动本项目的包，`SHA256SUMS` 与 SDK 公钥保留。
 
 ---
 

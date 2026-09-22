@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           sh -n root/etc/init.d/fm350d
           sh -n scripts/build-release.sh
+          sh -n scripts/clean-release-assets.sh
           bad="$(git ls-files -s root/etc/init.d scripts | awk '$1 != "100755" { print $1, $4 }')"
           if [ -n "${bad}" ]; then
             echo "::error::以下随包脚本缺少可执行位（应为 100755）"
