@@ -92,7 +92,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          RELEASE="$(sed -n 's/^PKG_RELEASE:=//p' Makefile)"
+          [ -n "${RELEASE}" ] || { echo "::error::Makefile 缺少 PKG_RELEASE"; exit 1; }
           if gh release view "${TAG}" >/dev/null 2>&1; then
+            # 清理同一 Release 内其它版本的包：--clobber 只覆盖同名文件，而包名
+            # 含版本号，PKG_RELEASE 递增后旧包会残留，下载时容易装到旧版本。
+            ./scripts/clean-release-assets.sh "${TAG}" "${VERSION}-r${RELEASE}"
             gh release upload "${TAG}" dist-release/* --clobber
           else
             gh release create "${TAG}" dist-release/* \
