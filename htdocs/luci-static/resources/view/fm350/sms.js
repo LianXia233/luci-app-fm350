@@ -89,7 +89,19 @@ var SVG_ICONS = {
 };
 
 /* ---------------- 注入白色毛玻璃设计系统 ---------------- */
+/* 移动端视口保证：部分固件 LuCI 基座未注入 viewport meta，手机浏览器会按
+   980px 布局宽度渲染，导致响应式媒体查询不生效。这里幂等补注，不覆盖已有值。 */
+function ensureViewport() {
+	if (document.querySelector('meta[name="viewport"]'))
+		return;
+	var meta = document.createElement('meta');
+	meta.setAttribute('name', 'viewport');
+	meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+	document.head.appendChild(meta);
+}
+
 function injectFrostedGlassTheme() {
+	ensureViewport();
 	var styleId = 'fm350-sms-glass-styles';
 	if (document.getElementById(styleId)) return;
 
@@ -525,6 +537,26 @@ function injectFrostedGlassTheme() {
 		@keyframes fm350-dot-glow {
 			0%, 100% { transform: scale(1); opacity: 0.8; }
 			50% { transform: scale(1.3); opacity: 1; filter: drop-shadow(0 0 3px #10b981); }
+		}
+
+		/* ---------------- 响应式布局适配 ----------------
+		   仅在小屏（<=767px / <=480px）调整排列、间距与滚动，不改变任何颜色、
+		   字体、边框、圆角、阴影等视觉元素；桌面端（>=768px）样式保持不变。
+		   短信表格列宽固定较宽，小屏改为横向滚动，保证各列内容完整可读。 */
+		@media (max-width: 767px) {
+			.fm350-sms-hero { padding: 16px 18px; gap: 14px; }
+			.fm350-compose-card { padding: 16px 14px; }
+			.fm350-table-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+			.fm350-table-card table { min-width: 900px; }
+			.fm350-hero-meta h2 { flex-wrap: wrap; }
+			.fm350-input-num-box { min-width: 0; flex-basis: 100%; }
+			.fm350-storage-box { max-width: 100%; }
+			.fm350-msg-bubble { max-width: 100%; }
+		}
+		@media (max-width: 480px) {
+			.fm350-sms-hero { padding: 14px 14px; }
+			.fm350-compose-card { padding: 14px 12px; }
+			.fm350-storage-box { padding: 8px 12px; }
 		}
 	`;
 

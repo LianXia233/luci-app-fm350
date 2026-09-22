@@ -95,7 +95,19 @@ var SVG_ICONS = {
 };
 
 /* ---------------- 注入白色毛玻璃设计系统 ---------------- */
+/* 移动端视口保证：部分固件 LuCI 基座未注入 viewport meta，手机浏览器会按
+   980px 布局宽度渲染，导致响应式媒体查询不生效。这里幂等补注，不覆盖已有值。 */
+function ensureViewport() {
+	if (document.querySelector('meta[name="viewport"]'))
+		return;
+	var meta = document.createElement('meta');
+	meta.setAttribute('name', 'viewport');
+	meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+	document.head.appendChild(meta);
+}
+
 function injectFrostedGlassTheme() {
+	ensureViewport();
 	var styleId = 'fm350-service-glass-styles';
 	if (document.getElementById(styleId)) return;
 
@@ -404,6 +416,23 @@ function injectFrostedGlassTheme() {
 			50% { opacity: 1; filter: drop-shadow(0 0 3px #ef4444); }
 		}
 		.fm350-anim-danger-blink { animation: fm350-danger-pulse 1.8s ease-in-out infinite; }
+
+		/* ---------------- 响应式布局适配 ----------------
+		   仅在小屏（<=767px / <=480px）调整排列、间距与滚动，不改变任何颜色、
+		   字体、边框、圆角、阴影等视觉元素；桌面端（>=768px）样式保持不变。 */
+		@media (max-width: 767px) {
+			.fm350-serv-hero { padding: 16px 18px; gap: 14px; }
+			.fm350-service-page .cbi-section { padding: 16px 16px !important; }
+			.fm350-service-page .cbi-value-title { width: 100% !important; min-width: 0 !important; }
+			.fm350-service-page .cbi-section-legend { flex-wrap: wrap; }
+			.fm350-hero-meta h3 { flex-wrap: wrap; }
+			.fm350-hold-badge { word-break: break-all; }
+		}
+		@media (max-width: 480px) {
+			.fm350-serv-hero { padding: 14px 14px; }
+			.fm350-service-page .cbi-section { padding: 14px 12px !important; }
+			.fm350-service-page .cbi-map-descr { margin-bottom: 14px; }
+		}
 	`;
 
 	var style = E('style', { 'id': styleId }, css);

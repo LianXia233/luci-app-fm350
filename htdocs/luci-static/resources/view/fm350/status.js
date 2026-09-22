@@ -236,7 +236,19 @@ function getTempLevel(val) {
 }
 
 /* ---------------- 全局样式注入 ---------------- */
+/* 移动端视口保证：部分固件 LuCI 基座未注入 viewport meta，手机浏览器会按
+   980px 布局宽度渲染，导致响应式媒体查询不生效。这里幂等补注，不覆盖已有值。 */
+function ensureViewport() {
+	if (document.querySelector('meta[name="viewport"]'))
+		return;
+	var meta = document.createElement('meta');
+	meta.setAttribute('name', 'viewport');
+	meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+	document.head.appendChild(meta);
+}
+
 function injectFrostedGlassTheme() {
+	ensureViewport();
 	var styleId = 'fm350-theme-glass-styles';
 	if (document.getElementById(styleId)) return;
 
@@ -746,6 +758,24 @@ function injectFrostedGlassTheme() {
 		@keyframes fm350-pulse-subtle { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.05); opacity: 0.85; } }
 		/* chip() 内那个类此前只写在 SVG 标记里、没有规则，脉冲微动效从未生效 */
 		.fm350-anim-pulse-subtle { transform-box: fill-box; transform-origin: center; animation: fm350-pulse-subtle 2s infinite ease-in-out; }
+
+		/* ---------------- 响应式布局适配 ----------------
+		   仅在小屏（<=767px / <=480px）调整排列、间距与滚动，不改变任何颜色、
+		   字体、边框、圆角、阴影等视觉元素；桌面端（>=768px）样式保持不变。 */
+		@media (max-width: 767px) {
+			.fm350-hero { padding: 16px 18px; gap: 12px; }
+			.fm350-glass-card { padding: 14px 16px; }
+			.fm350-thermal-dashboard { padding: 16px 16px; gap: 14px; }
+			.fm350-table-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+			.fm350-hero-info h2 { flex-wrap: wrap; }
+			.fm350-section-title { margin-left: 2px; }
+			.fm350-footer-note { padding: 14px 16px; }
+		}
+		@media (max-width: 480px) {
+			.fm350-hero { padding: 14px 14px; }
+			.fm350-glass-card { padding: 12px 12px; }
+			.fm350-thermal-dashboard { padding: 14px 14px; }
+		}
 	`;
 
 	var style = E('style', { 'id': styleId }, css);
