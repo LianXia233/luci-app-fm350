@@ -438,7 +438,7 @@ make package/luci-app-fm350/compile V=s
 
 ### CI 与发布流水线
 
-* **`.github/workflows/ci.yml`**：在代码推送与 PR 时触发，拦截静态语法错误、CRLF 行尾、JSON 校验、Shell 语法以及运行 44 项 Rust 单元测试。
+* **`.github/workflows/ci.yml`**：在代码推送与 PR 时触发，拦截静态语法错误、CRLF 行尾、JSON 校验、Shell 语法，并运行全部 Rust 单元测试。
 * **`.github/workflows/release.yml`**：推送 `v*` 标签或手动触发，基于 ImmortalWrt SDK 自动交叉编译产出安装包，附带 `SHA256SUMS` 与 SDK 构建签名公钥。
 
 ---
