@@ -3,7 +3,7 @@ name = "fm350d"
 version = "0.1.0"
 edition = "2021"
 description = "Fibocom FM350 modem daemon / CLI for luci-app-fm350"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [[bin]]
 name = "fm350d"
