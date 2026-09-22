@@ -96,9 +96,23 @@ var GTACT_MODE = {
 	20: { label: '自动（推荐）', desc: '基站与模组自协商最佳连接' }
 };
 
-function bandName(code) {
+/* 频段编码 -> 频段名。
+ *
+ * 模组在 AT+GTACT / AT+GTCCINFO 里上报的是**编码**而非频段名，且同一个数字
+ * 在两种制式下含义不同，必须按制式选表：
+ *   LTE：`100 + n`（101 = B1 …… 171 = B71），另有 band 号直写（3 = B3）；
+ *   NR ：数值加法三档（5000 + n / 500 + n / 100 + n），
+ *        以及 `50` 前缀拼接（50512 = n512）。
+ * rat 省略时按 NR 优先解析，与本次新增前的行为一致，不影响锁频段 UI。
+ */
+function bandName(code, rat) {
 	var n = parseInt(code, 10);
 	if (!isFinite(n)) return 'B' + code;
+	if (rat === 4) {
+		if (n > 100 && n - 100 <= 88) return 'B' + (n - 100);
+		if (n >= 1 && n <= 88) return 'B' + n;
+		return '编号 ' + n;
+	}
 	if (n >= 5000 && n <= 5079) return 'n' + (n - 5000);
 	if (n >= 500 && n <= 599) return 'n' + (n - 500);
 	if (n >= 101 && n <= 199) return 'n' + (n - 100);
@@ -197,6 +211,11 @@ function parseGtccinfo(text) {
 			var guess = arfcnToBandLabel(cell.arfcn, rat);
 			cell.band = guess || '';
 			cell.bandGuessed = !!guess;
+		} else {
+			/* 模组上报的是编码：必须解码后再展示，否则同表内会出现
+			 * 「5041」（上报，未解码）与「n41 (推算)」两种写法并存。 */
+			cell.band = bandName(cell.band, rat);
+			cell.bandGuessed = false;
 		}
 		if (isServing) out.serving = cell;
 		else out.neighbors.push(cell);
