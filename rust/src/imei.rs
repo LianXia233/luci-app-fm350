@@ -14,13 +14,14 @@
 //! 属社区与实机验证可用的扩展命令。
 //!
 //! 安全边界：写入仅在本模块内构造命令，**不经过通用 AT 透传路径**，以免被误触发。
-//! 通用透传路径（`/api/at` 与 CLI `at`）由 [`crate::at::is_imei_write`]
-//! 无条件拦截全部 IMEI / 串号写形式。写入操作会记录到系统日志。
+//! 拦截分两级：`/api/at` 与 CLI `at` 由 [`crate::at::is_imei_write`] **无条件**拦截
+//! 全部 IMEI / 串号写形式；`modem` 模块内部 `run()` 则走 [`guard_transparent`]，
+//! 在 `imei_write` 未开启时拦截。写入操作会记录到系统日志。
 
 use std::fs;
 use std::process::Command;
 
-use crate::at::{AtHandle, AtResult};
+use crate::at::{self, AtHandle, AtResult};
 use crate::config::Config;
 
 const BACKUP_DIR: &str = "/etc/fm350";
@@ -183,6 +184,23 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
         luhn_ok: luhn,
         warning,
     })
+}
+
+/// 通用 AT 透传路径的守卫：写入类 IMEI 指令在未开启 `imei_write` 时拒绝。
+///
+/// 与 [`crate::at::is_imei_write`] 直接拦截的区别：
+///   - `api.rs`（`/api/at`）与 `main.rs`（CLI `at`）**无条件**拦截写形式，
+///     即使开启了 `imei_write` 也不放行，写操作只能走 IMEI 专用接口；
+///   - 本函数用于 `modem.rs` 内部 `run()`，在 `imei_write` 未开启时拦截，
+///     开启后放行，便于维护者在明确授权后经内部路径调试。
+pub fn guard_transparent(cmd: &str, cfg: &Config) -> Result<(), String> {
+    if at::is_imei_write(cmd) && !cfg.imei_write {
+        return Err(format!(
+            "已拒绝 `{}`：IMEI 写入需在设置中开启 imei_write 后，通过 IMEI 专用接口执行",
+            cmd.trim()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
