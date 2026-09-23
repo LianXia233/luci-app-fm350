@@ -2,6 +2,37 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.8-r1
+
+修复一级菜单恒为英文的问题：`admin/modem`（**移动网络**）在只安装本插件时显示
+英文 `Mobile Network`。
+
+### 根因
+
+本仓库**没有任何 i18n 资源**（无 `.po` / `.pot` / `.lmo`，Makefile 也不走 `luci.mk`
+的翻译子包机制）。LuCI 渲染菜单时会调 `_(node.title)`，没有语言目录时该调用
+原样返回 msgid —— 而 `menu.d/luci-app-fm350.json` 里 `admin/modem` 的 title
+写的正是英文 msgid `Mobile Network`，于是菜单恒为英文。
+
+子菜单标题（`状态` / `拨号与 APN` / …）本来就是中文，所以只有这一条父菜单暴露出来；
+装了其他同样注册 `admin/modem` 的插件时，由那个插件（或其语言包）提供译文，
+问题被掩盖 —— 这就是「单独安装本插件才不汉化」的原因。
+
+### 变更
+
+- `root/usr/share/luci/menu.d/luci-app-fm350.json`：`admin/modem` 的
+  `title` 由 `Mobile Network` 改为 `移动网络`，与同级子菜单的写法保持一致。
+  无语言目录时中文原样渲染；中文环境下菜单立即正确。
+
+### 已知取舍
+
+- 英文环境下该一级菜单会显示中文（本插件目前只面向中文环境）。
+- 若日后需要中英双语，应改回英文 msgid 并补一个 i18n 子包
+  （`.po` + `po2lmo` 编译 `.lmo`），届时需注意两点：
+  源码里的中文当 msgid 时 `msgid == msgstr`，`po2lmo` 会按去重规则**丢弃**这些条目，
+  条目全被丢弃时它还会 `unlink()` 掉自己的产物并返回 0（装得上、翻不出）；
+  以及 JSON 菜单 title 也必须进语言目录，只统计视图源码的字符串会漏掉它。
+
 ## 1.0.7-r1
 
 新增 IPv6 取址方式 `v6_mode=dhcpv6`：把 `fm350v6` 直接交给 netifd 的 **odhcp6c**
