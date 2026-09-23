@@ -1,10 +1,19 @@
 //! 网络接口管理与路由守护。
 //!
 //! FM350 的 RNDIS 数据通道**不提供 DHCP**，IPv4 必须以静态地址配置：
-//!   - 地址取自 `AT+CGPADDR`，掩码固定 /32；
+//!   - 地址取自 `AT+CGPADDR`；
 //!   - DNS 取自 `AT+GTDNS`；
-//!   - 由于没有网关，netifd 不会下发设备路由，需要额外一条
-//!     `default dev <dev> metric <m> onlink` 并周期补齐（route guard）。
+//!   - 掩码与网关由 `gateway_mode` 决定（默认 `auto`）：
+//!     * `auto`：先把地址按同网段 `.1` 推导网关，并**实测该网关的 ARP 是否
+//!       可解析**；可解析就按 `/24 + gateway` 配置，由 netifd 下发
+//!       `default via <gw>`；不可解析则回退到无网关方案。
+//!     * `off`：历史行为 —— `/32` + `default dev <dev> metric <m> onlink`。
+//!     * `static`：直接使用 `gateway` 选项。
+//!
+//! 为什么要引入网关：无网关的 onlink 方案下，主机对**每一个公网 IP**都要
+//! 直接发 ARP 请求，完全依赖模组做 ARP 代理。部分运营商/固件下模组只对
+//! 自己的网关 IP 应答 ARP，于是表现为「PDP 已激活、有 IP 有 DNS，却一个包
+//! 都发不出去」（tx_errors 持续上涨、rx 恒为 0、内核刷 NETDEV WATCHDOG）。
 //!
 //! IPv6 与 IPv4 同构：地址取自模组侧 `AT+CGPADDR`（守护读出后静态写入），
 //! 默认路由用无网关的设备路由（`default dev <dev>`）并由 route_guard 周期补齐。
@@ -56,6 +65,97 @@ fn real(script: &str) -> (bool, String) {
 /// 进而让整批 UCI 写入被判失败、`ifup` 被短路 —— 接口就再也起不来。
 fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+// ---------------------------------------------------------------- 网关决策
+
+/// 判断 IPv4 是否落在「可安全推导同网段网关」的地址段。
+///
+/// 只覆盖私有地址与运营商 CGNAT 段（10/8、172.16/12、192.168/16、100.64/10）。
+/// 公网地址不做推导：蜂窝网络下公网 IP 的网关极少是同网段 `.1`，盲目推导
+/// 会写入一条错误网关，反而把原本可用的 onlink 直连彻底堵死。
+fn is_private_or_cgnat(ip: &str) -> bool {
+    let oct: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+    if oct.len() != 4 {
+        return false;
+    }
+    matches!(
+        (oct[0], oct[1]),
+        (10, _) | (172, 16..=31) | (192, 168) | (100, 64..=127)
+    )
+}
+
+/// 由主机侧 IPv4 推导同网段 `.1` 网关（仅对私有 / CGNAT 段）。
+pub fn derive_gateway(ipv4: &str) -> Option<String> {
+    if !is_private_or_cgnat(ipv4) {
+        return None;
+    }
+    let mut parts: Vec<&str> = ipv4.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    *parts.last_mut()? = "1";
+    Some(parts.join("."))
+}
+
+fn mask_or(cfg: &Config, dflt: &str) -> String {
+    if cfg.netmask.is_empty() {
+        dflt.to_string()
+    } else {
+        cfg.netmask.clone()
+    }
+}
+
+/// 规划本轮要使用的掩码与网关。返回 `(netmask, Option<gateway>)`；
+/// `None` 表示沿用无网关的 onlink 设备路由（历史行为）。
+fn plan_gateway(cfg: &Config, ipv4: &str) -> (String, Option<String>) {
+    match cfg.gateway_mode.as_str() {
+        "off" => (mask_or(cfg, "255.255.255.255"), None),
+        "static" => {
+            if cfg.gateway.is_empty() {
+                (mask_or(cfg, "255.255.255.255"), None)
+            } else {
+                (mask_or(cfg, "255.255.255.0"), Some(cfg.gateway.clone()))
+            }
+        }
+        // auto（默认）
+        _ => match derive_gateway(ipv4) {
+            Some(gw) => (mask_or(cfg, "255.255.255.0"), Some(gw)),
+            None => (mask_or(cfg, "255.255.255.255"), None),
+        },
+    }
+}
+
+/// 探测网关在二层是否可用 —— **只判 ARP，不判 ICMP**。
+///
+/// 为什么不能用 ping 的返回码：蜂窝网关普遍不回应 ICMP。实机复现为
+/// `ping 10.8.217.1` 100% 丢包，而同链路 `ping 223.5.5.5` 正常（21 ms）——
+/// 只要 ARP 能解析到网关 MAC，三层转发就是好的。
+pub fn probe_gateway(dev: &str, gw: &str) -> bool {
+    // 先发一个包触发 ARP 解析（ICMP 无应答无妨）
+    let _ = real(&format!(
+        "ping -c 1 -W 2 -I {} {} >/dev/null 2>&1",
+        dev, gw
+    ));
+    let (ok, out) = real(&format!("ip neigh show dev {} {} 2>/dev/null", dev, gw));
+    if !ok {
+        return false;
+    }
+    // FAILED 表示 ARP 无应答；REACHABLE / STALE / DELAY / PROBE 都算解析成功。
+    out.split_whitespace()
+        .any(|t| matches!(t, "REACHABLE" | "STALE" | "DELAY" | "PROBE"))
+}
+
+/// 读取 uci 里当前生效的网关（供 route_guard 补路由时使用）。
+fn current_gateway(cfg: &Config) -> Option<String> {
+    let (ok, v) = real(&format!("uci -q get network.{}.gateway", cfg.iface));
+    if ok {
+        let g = v.trim().to_string();
+        if !g.is_empty() {
+            return Some(g);
+        }
+    }
+    None
 }
 
 /// 定位 wan 防火墙区的下标。
@@ -148,9 +248,13 @@ pub fn ensure_iface(
     let iface = &cfg.iface;
     let iface_v6 = &cfg.iface_v6;
     let route_name = format!("{}_def", iface);
-    let mask = "255.255.255.255";
+    let (plan_mask, plan_gw) = plan_gateway(cfg, ipv4);
+    let mask = plan_mask.as_str();
 
     let mut cmds: Vec<String> = Vec::new();
+    // 不走 uci_batch（它是 `uci -q <子命令>` 形式）的完整 shell 命令，
+    // 用于删除类操作 —— 删除不存在的项会返回非零，不能计入失败判定。
+    let mut shell_cmds: Vec<String> = Vec::new();
 
     // ---- IPv4 主接口（静态 /32）
     cmds.push(format!("set network.{}=interface", iface));
@@ -159,6 +263,16 @@ pub fn ensure_iface(
     cmds.push(format!("set network.{}.ipaddr={}", iface, ipv4));
     cmds.push(format!("set network.{}.netmask={}", iface, mask));
     cmds.push(format!("set network.{}.peerdns=0", iface));
+    // 网关：plan_gw 为 None 表示本轮沿用无网关的 onlink 设备路由。
+    // 无网关时必须显式删掉上一轮可能写进去的 gateway，否则 netifd 会拿
+    // 一个已失效的网关去下发路由（表现为接口起来了却没有任何默认路由）。
+    match &plan_gw {
+        Some(gw) => cmds.push(format!("set network.{}.gateway={}", iface, gw)),
+        None => shell_cmds.push(format!(
+            "uci -q delete network.{}.gateway 2>/dev/null || true",
+            iface
+        )),
+    }
     // 开机默认启用（显式 auto=1）：netifd 对缺省 auto 的接口**不会**开机自启，
     // 实机 ifstatus 即为 "autostart": false，导致重启后蜂窝接口要等守护轮询才起来。
     cmds.push(format!("set network.{}.auto=1", iface));
@@ -195,12 +309,23 @@ pub fn ensure_iface(
         cmds.push(format!("set network.{}.auto=1", iface_v6));
     }
 
-    // ---- 默认路由（onlink，网关不可达也要下发）
-    cmds.push(format!("set network.{}=route", route_name));
-    cmds.push(format!("set network.{}.interface={}", route_name, iface));
-    cmds.push(format!("set network.{}.target=0.0.0.0/0", route_name));
-    cmds.push(format!("set network.{}.onlink=1", route_name));
-    cmds.push(format!("set network.{}.metric={}", route_name, cfg.metric));
+    // ---- 默认路由
+    //
+    // 有网关：交给 netifd 按 gateway 下发，并清理历史遗留的 onlink route
+    // （两者并存时 ARP 行为不可预期，且 onlink 会让主机跳过网关直接问 ARP）。
+    // 无网关：维持 onlink 设备路由 —— netifd 不会为无网关接口自动下发。
+    if plan_gw.is_some() {
+        shell_cmds.push(format!(
+            "uci -q delete network.{} 2>/dev/null || true",
+            route_name
+        ));
+    } else {
+        cmds.push(format!("set network.{}=route", route_name));
+        cmds.push(format!("set network.{}.interface={}", route_name, iface));
+        cmds.push(format!("set network.{}.target=0.0.0.0/0", route_name));
+        cmds.push(format!("set network.{}.onlink=1", route_name));
+        cmds.push(format!("set network.{}.metric={}", route_name, cfg.metric));
+    }
 
     // ---- 防火墙：归入 wan 区
     //
@@ -226,6 +351,11 @@ pub fn ensure_iface(
                 iface
             );
         }
+    }
+
+    // 删除类命令先跑：避免 `set` 之后再 `delete` 把刚写的值清掉。
+    for c in &shell_cmds {
+        let _ = real(c);
     }
 
     let results = uci_batch(&cmds);
@@ -255,10 +385,61 @@ pub fn ensure_iface(
             dev, cfg.metric
         ));
     }
-    let _ = real(&format!(
-        "ip route replace default dev {} metric {}",
-        dev, cfg.metric
-    ));
+    // ---- 网关实测：不可达则整体回退到无网关的 onlink 方案
+    //
+    // 必须在 ifup 之后做：地址落进内核、链路真正 UP 了，ARP 才有意义。
+    // 回退是必要的兜底 —— 推导出的 `.1` 只是经验值，个别运营商并不是它。
+    let mut gw_final = plan_gw.clone();
+    if let Some(gw) = gw_final.clone() {
+        std::thread::sleep(Duration::from_millis(500));
+        if probe_gateway(&dev, &gw) {
+            // 回写实际网关，便于 `uci show fm350` 直接看到、也便于前端展示
+            let _ = real(&format!(
+                "uci -q set fm350.main.gateway={}; uci -q commit fm350",
+                gw
+            ));
+        } else {
+            eprintln!(
+                "fm350d: 网关 {} 在 {} 上未解析到 MAC（ARP 无应答），回退为无网关 onlink 设备路由",
+                gw, dev
+            );
+            gw_final = None;
+            let _ = real(&format!(
+                "uci -q delete network.{}.gateway 2>/dev/null",
+                iface
+            ));
+            let _ = real(&format!(
+                "uci -q set network.{}.netmask=255.255.255.255",
+                iface
+            ));
+            for c in [
+                format!("uci -q set network.{}=route", route_name),
+                format!("uci -q set network.{}.interface={}", route_name, iface),
+                format!("uci -q set network.{}.target=0.0.0.0/0", route_name),
+                format!("uci -q set network.{}.onlink=1", route_name),
+                format!("uci -q set network.{}.metric={}", route_name, cfg.metric),
+            ] {
+                let _ = real(&c);
+            }
+            let _ = real("uci -q commit network");
+            let _ = real(&format!("ifup {}", iface));
+        }
+    }
+
+    match &gw_final {
+        Some(gw) => {
+            let _ = real(&format!(
+                "ip route replace default via {} dev {} metric {}",
+                gw, dev, cfg.metric
+            ));
+        }
+        None => {
+            let _ = real(&format!(
+                "ip route replace default dev {} metric {}",
+                dev, cfg.metric
+            ));
+        }
+    }
 
     Ok((iface.clone(), dev, cmds))
 }
@@ -476,7 +657,10 @@ pub fn route_guard(cfg: &Config) -> bool {
     // ---- IPv4：只有当接口确实拿到地址时才补路由，避免空路由污染主表
     let (_, out) = real(&format!("ip -o -4 addr show dev {} 2>/dev/null", dev));
     if out.contains("inet ") {
-        let wanted = format!("default dev {} metric {}", dev, cfg.metric);
+        let wanted = match current_gateway(cfg) {
+            Some(gw) => format!("default via {} dev {} metric {}", gw, dev, cfg.metric),
+            None => format!("default dev {} metric {}", dev, cfg.metric),
+        };
         let (_, routes) = real(&format!("ip route show dev {} 2>/dev/null", dev));
         if !routes
             .lines()
@@ -553,6 +737,79 @@ pub fn ensure_autostart(cfg: &Config) -> Vec<String> {
         let _ = real("uci commit network");
     }
     touched
+}
+
+// ---------------------------------------------------------------- 数据面健康与自愈
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DataHealth {
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub tx_errors: u64,
+}
+
+/// 读取数据网卡收发统计（走 sysfs，成本极低，可每轮调用）。
+pub fn data_health(dev: &str) -> Option<DataHealth> {
+    let rd = |n: &str| -> Option<u64> {
+        fs::read_to_string(format!("/sys/class/net/{}/statistics/{}", dev, n))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    };
+    Some(DataHealth {
+        rx_packets: rd("rx_packets")?,
+        tx_packets: rd("tx_packets")?,
+        tx_errors: rd("tx_errors")?,
+    })
+}
+
+/// 判定数据面是否卡死。
+///
+/// 判据：**tx_errors 在涨，而 tx_packets 不动**。正常链路上 tx_errors 恒为 0，
+/// 一旦 USB 数据端点被打到 stall，内核每次提交 URB 都会记一次错误、包却一个
+/// 也发不出去（实机：tx_packets 停在 2，tx_errors 从百级一路涨到千级，
+/// 同时刷 `NETDEV WATCHDOG: transmit queue timed out`）。
+///
+/// 不用「RX 不增长」作判据：空闲链路上本来就没有下行流量。
+pub fn data_plane_stalled(prev: &DataHealth, cur: &DataHealth) -> bool {
+    cur.tx_errors > prev.tx_errors && cur.tx_packets <= prev.tx_packets
+}
+
+/// 轻量复位数据网卡：只 down/up 网卡并重新 ifup，不动基带、不重启模组。
+///
+/// 端点偶发 stall（典型诱因是与其它 modem 插件争抢接口）多数能被这一级恢复。
+pub fn bounce_data_dev(cfg: &Config) -> bool {
+    let dev = match detect_dev(cfg) {
+        Some(d) => d,
+        None => return false,
+    };
+    let _ = real(&format!("ip link set {} down", dev));
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = real(&format!("ip link set {} up", dev));
+    std::thread::sleep(Duration::from_secs(1));
+    let (ok, _) = real(&format!("ifup {}", cfg.iface));
+    ok
+}
+
+/// 找出同样绑定在该数据网卡上的**非本插件** uci 接口。
+///
+/// 典型场景：设备上另装了 QModem / ModemManager 之类插件，它们也会在同一个
+/// 网卡上建接口（如 `network.2_1`）并周期性拨号、改写接口。两个守护同时
+/// 操作一块模组会互相打断（接口反复 down/up、AT 口争用），最终把数据端点
+/// 打到 stall —— 表现为"配置全对却就是上不了网"。
+pub fn foreign_ifaces_on_dev(cfg: &Config, dev: &str) -> Vec<String> {
+    let script = format!(
+        "for s in $(uci -q show network 2>/dev/null | sed -n 's/^network\\.\\([^.=]*\\)=interface$/\\1/p'); do \
+         d=$(uci -q get network.$s.device 2>/dev/null); \
+         [ -z \"$d\" ] && d=$(uci -q get network.$s.ifname 2>/dev/null); \
+         [ \"$d\" = {} ] && echo \"$s\"; \
+         done",
+        sq(dev)
+    );
+    let (_, out) = real(&script);
+    out.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|n| !n.is_empty() && n != &cfg.iface && n != &cfg.iface_v6)
+        .collect()
 }
 
 /// 拔号成功后一次性把网络拉起。
@@ -649,5 +906,78 @@ mod tests {
         let (ok, out) = sh(RunMode::Dry, &script);
         assert!(ok);
         assert_eq!(out, "set network.fm350v6.ip6addr=2409:8057:2000::8/128");
+    }
+
+    #[test]
+    fn gateway_is_derived_only_for_private_or_cgnat() {
+        // 运营商 CGNAT / 私有地址：按同网段 .1 推导（QModem 同类策略）
+        assert_eq!(derive_gateway("10.8.217.45").as_deref(), Some("10.8.217.1"));
+        assert_eq!(derive_gateway("10.30.133.8").as_deref(), Some("10.30.133.1"));
+        assert_eq!(derive_gateway("192.168.1.7").as_deref(), Some("192.168.1.1"));
+        assert_eq!(derive_gateway("100.64.0.9").as_deref(), Some("100.64.0.1"));
+        assert_eq!(derive_gateway("172.16.5.9").as_deref(), Some("172.16.5.1"));
+        // 公网地址不推导：蜂窝公网 .1 通常不是网关，写错会堵死链路
+        assert_eq!(derive_gateway("36.112.8.10"), None);
+        assert_eq!(derive_gateway("120.196.165.7"), None);
+        assert_eq!(derive_gateway("not-an-ip"), None);
+    }
+
+    #[test]
+    fn gateway_mode_plans_netmask_and_gateway() {
+        let base = Config {
+            ipv6: false,
+            ..Default::default()
+        };
+
+        let auto = Config {
+            gateway_mode: "auto".into(),
+            ..base.clone()
+        };
+        assert_eq!(plan_gateway(&auto, "10.8.217.45").1.as_deref(), Some("10.8.217.1"));
+        assert_eq!(plan_gateway(&auto, "10.8.217.45").0, "255.255.255.0");
+        // 公网地址：不推导网关，掩码回到 /32
+        assert_eq!(plan_gateway(&auto, "36.112.8.10").1, None);
+        assert_eq!(plan_gateway(&auto, "36.112.8.10").0, "255.255.255.255");
+
+        let off = Config {
+            gateway_mode: "off".into(),
+            ..base.clone()
+        };
+        assert_eq!(plan_gateway(&off, "10.8.217.45").1, None);
+        assert_eq!(plan_gateway(&off, "10.8.217.45").0, "255.255.255.255");
+
+        let st = Config {
+            gateway_mode: "static".into(),
+            gateway: "10.8.217.254".into(),
+            ..base
+        };
+        assert_eq!(plan_gateway(&st, "10.8.217.45").1.as_deref(), Some("10.8.217.254"));
+    }
+
+    #[test]
+    fn stalled_judges_tx_errors_not_idle_rx() {
+        let a = DataHealth {
+            rx_packets: 0,
+            tx_packets: 2,
+            tx_errors: 100,
+        };
+        // 端点 stall：包发不出去（tx_packets 不动），错误计数却在涨
+        let stalled = DataHealth {
+            rx_packets: 0,
+            tx_packets: 2,
+            tx_errors: 145,
+        };
+        assert!(data_plane_stalled(&a, &stalled));
+
+        // 正常链路：tx_packets 在涨（即便同时有零星错误）
+        let healthy = DataHealth {
+            rx_packets: 0,
+            tx_packets: 30,
+            tx_errors: 101,
+        };
+        assert!(!data_plane_stalled(&a, &healthy));
+
+        // 空闲链路：计数完全不变，不算 stall（没流量是正常的）
+        assert!(!data_plane_stalled(&a, &a));
     }
 }

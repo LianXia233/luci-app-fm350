@@ -348,6 +348,11 @@ luci-app-fm350/
 | `extendprefix` | `1` | **已废弃（1.0.3 起）**：原为 netifd dhcpv6 前缀委派选项，IPv6 改为守护静态配置后不再被消费 |
 | `auto_dial` | `1` | 服务启动后自动拨号 |
 | `route_guard` | `1` | 默认路由自愈守护 |
+| `gateway_mode` | `auto` | 网关模式：`auto` 推导并实测同网段 `.1` 网关、失败回退；`static` 用 `gateway`；`off` 无网关 onlink 直连 |
+| `gateway` | （空） | 静态网关（`gateway_mode=static` 必填）；`auto` 实测成功后回写实际值 |
+| `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`） |
+| `data_guard` | `1` | 数据面健康巡检与分级自愈（网卡 stall 时复位 → 重拨 → 重启模组） |
+| `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
 | `v6_poll_interval` | `300` | 从模组 AT/PDP 轮询最新 IPv6 的周期（秒）；发现变化时把模组侧地址静态应用到 IPv6 接口，`0` 关闭 |
 | `v6_refresh_interval` | `1800` | IPv6 接口定时校验周期（秒），按需重新应用模组侧地址；`0` 关闭定时刷新，失效兜底仍保留 |
@@ -503,6 +508,40 @@ make package/luci-app-fm350/compile V=s
   - `v6_poll_interval` 控制「问模组」：定时读 `AT+CGPADDR=<cid>` / `AT+CGCONTRDP=<cid>` 得到最新 `pdp.ipv6`，模组侧变化时把地址静态应用到 `fm350v6` 并补路由。
   - `v6_refresh_interval` 控制「校验接口」：定时检查 `fm350v6` 是否持有模组侧地址，按需重新写入并 `ifup`，兜住 netifd 状态异常或地址被意外移除。
   - 即使关闭定时刷新（`v6_refresh_interval=0`），巡检发现系统侧无有效全局 IPv6 时仍按最小 60 秒节流尝试恢复。
+</details>
+
+<details>
+<summary><b>网关与 ARP：为什么「有 IP 有 DNS 却一个包都发不出去」（1.0.5 起）</b></summary>
+
+- **症状**：`fm350d status` 显示 PDP 已激活、IPv4/IPv6/DNS 齐全、`ip route` 也有一条 `default dev eth2 scope link`，
+  但 `ping 223.5.5.5` 100% 丢包；`ip -s link show eth2` 里 `tx_packets` 停在个位数而 `tx_errors` 一路涨到几百，
+  `rx_packets` 恒为 0，内核反复刷 `rndis_host ... eth2: NETDEV WATCHDOG: transmit queue 0 timed out`。
+- **根因**：旧版本固定下发 `/32` + 无网关的 `onlink` 设备路由。该模型下主机对**每一个公网 IP**都要直接发 ARP 请求，
+  完全依赖模组做 ARP 代理；部分运营商/固件下模组只对**自己的网关 IP** 应答 ARP，于是包根本出不去。
+- **修复（1.0.5）**：新增 `gateway_mode`，默认 `auto`：
+  1. 由 `AT+CGPADDR` 得到的 IPv4 推导同网段 `.1` 作为候选网关（仅对私有地址与 CGNAT 段推导，
+     公网地址不推导——公网 `.1` 通常不是网关，写错反而堵死链路）；
+  2. 掩码 `/24`，写 `gateway`，默认路由交给 netifd 按网关下发（同时清理历史遗留的 onlink route）；
+  3. **实测该网关的 ARP 是否可解析**（`ip neigh` 是否拿到 MAC），不可达则整体回退到 `/32` + onlink 旧方案。
+- **为什么用 ARP 而不是 ping 判断网关可达**：蜂窝网关普遍**不回应 ICMP**。实机复现为 `ping 10.8.217.1` 100% 丢包，
+  而同链路 `ping 223.5.5.5` 正常（21 ms）——只要 ARP 能解析到网关 MAC（实机为 `00:00:88:ff:00:00`），三层转发就是好的。
+- **手动干预**：个别运营商网关不是 `.1` 时，用 `uci set fm350.main.gateway_mode=static; uci set fm350.main.gateway=<网关>; uci commit` 指定；
+  确定必须走直连时设 `gateway_mode=off`。实测成功的网关会回写到 `fm350.main.gateway`，便于 `uci show fm350` 直接查看。
+</details>
+
+<details>
+<summary><b>多插件争抢同一块模组：互相打断导致数据端点 stall（1.0.5 起可观测）</b></summary>
+
+- **症状**：配置逐项核对全对，模组注册正常、信号正常、PDP 有 IP，但链路时通时断直至彻底不通；
+  `logread` 里能看到接口被反复 `down → disabled → enabled → setting up`。
+- **根因**：设备上同时装了另一个 modem 管理插件（典型是 QModem 的 `network.2_1`），它与本插件
+  **共用同一个 AT 口（`/dev/ttyUSB1`）和同一个数据网卡（eth2）**，两边都周期性拨号、改写接口，
+  互相打断，最终把 RNDIS 数据端点打到 stall。这类故障配置看着完全正常，极难定位。
+- **1.0.5 的可观测性**：守护每轮巡检会扫描同一数据网卡上是否还存在**非本插件**的 uci 接口，
+  一旦出现就在系统日志里点名告警（包含冲突接口名），提示只保留一个插件管理该模组。
+  同一数据网卡上的多接口冲突无法靠本插件单方面解决——**部署上必须二选一**。
+- **取舍建议**：本插件面向 FM350 单模组的深度管理（信号/锁频/短信/IMEI 安全体系）；
+  若设备需要同时管多块不同制式的模组，应由另一个插件管理其它模组，双方在各自模组上互不重叠。
 </details>
 
 <details>

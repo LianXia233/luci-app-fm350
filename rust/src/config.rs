@@ -48,6 +48,30 @@ pub struct Config {
     pub auto_dial: bool,
     #[serde(default = "default_route_guard")]
     pub route_guard: bool,
+    /// 网关模式。
+    /// - `auto`（默认）：尝试由 IPv4 推导同网段网关并实测可达性，可达则按
+    ///   「/24 + 网关」配置；不可达自动回退到无网关的 onlink 设备路由。
+    /// - `off`：维持历史行为（/32 + `default dev <dev> onlink`）。
+    /// - `static`：直接使用 `gateway` 选项指定的网关。
+    ///
+    /// 为什么需要它：部分运营商/固件下 RNDIS 通道不做任意 IP 的 ARP 代理，
+    /// /32 + onlink 会让主机对每个公网 IP 直接发 ARP 而得不到应答，
+    /// 表现为「PDP 已激活、有 IP 有 DNS，但一个包都发不出去」。
+    #[serde(default = "default_gateway_mode")]
+    pub gateway_mode: String,
+    /// 静态网关（`gateway_mode=static` 时必填）；auto 模式探测成功后会回写
+    /// 实际使用的网关，便于排查与前端展示。
+    #[serde(default)]
+    pub gateway: String,
+    /// 子网掩码，留空表示由网关模式自行决定（有网关 → /24，无网关 → /32）。
+    #[serde(default)]
+    pub netmask: String,
+    /// 数据面健康检查与自愈：RNDIS 数据端点被打到 stall 时分级恢复。
+    #[serde(default = "default_data_guard")]
+    pub data_guard: bool,
+    /// 连续多少轮判定数据面异常才触发自愈（默认 3 轮）。
+    #[serde(default = "default_data_guard_rounds")]
+    pub data_guard_rounds: u32,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
     /// 从模组 AT/PDP 信息轮询最新 IPv6 的周期。0 表示关闭独立 V6 轮询。
@@ -116,6 +140,15 @@ fn default_auto_dial() -> bool {
 }
 fn default_route_guard() -> bool {
     true
+}
+fn default_gateway_mode() -> String {
+    "auto".into()
+}
+fn default_data_guard() -> bool {
+    true
+}
+fn default_data_guard_rounds() -> u32 {
+    3
 }
 fn default_poll_interval() -> u64 {
     30
@@ -220,6 +253,13 @@ pub fn load() -> Config {
         extendprefix: uci_get("extendprefix").map(|v| v == "1").unwrap_or(true),
         auto_dial: uci_get("auto_dial").map(|v| v == "1").unwrap_or(true),
         route_guard: uci_get("route_guard").map(|v| v == "1").unwrap_or(true),
+        gateway_mode: uci_get("gateway_mode").unwrap_or_else(default_gateway_mode),
+        gateway: uci_get("gateway").unwrap_or_default(),
+        netmask: uci_get("netmask").unwrap_or_default(),
+        data_guard: uci_get("data_guard").map(|v| v == "1").unwrap_or(true),
+        data_guard_rounds: uci_get("data_guard_rounds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_data_guard_rounds),
         poll_interval: uci_get("poll_interval")
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_poll_interval),
