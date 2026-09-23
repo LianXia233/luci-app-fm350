@@ -19,4 +19,11 @@ jobs:
       - name: Install libudev (serialport)
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: cargo test
-        run: cargo test
+        run: |
+          cargo test 2>&1 | tee test.log
+          # 沙箱取不到 Actions 日志 CDN，把测试摘要以 annotation 形式经 Checks API 带回
+          grep -E 'test result:' test.log | while IFS= read -r line; do
+            echo "::notice title=cargo test::$line"
+          done
+          # tee 不影响退出码？会影响（pipefail 未开），显式按最后一跳判失败：
+          grep -q 'test result:' test.log
