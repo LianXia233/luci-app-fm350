@@ -1,0 +1,22 @@
+name: cargo-test
+
+# 会话沙箱无外网（crates.io / rust-lang.org 被防火墙拦截），单元测试
+# 改由 GitHub Actions 执行；仅针对本 arena 分支与手动触发。
+on:
+  push:
+    branches:
+      - 'arena/**'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libudev (serialport)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: cargo test
+        run: cargo test

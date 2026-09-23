@@ -14,7 +14,8 @@ config main 'main'
 	option data_dev 'auto'
 	option metric '30'
 	option ipv6 '1'
-	# 把上行 IPv6 前缀委派给 LAN；关闭后局域网设备将无法获得 IPv6 地址
+	# （已废弃，仅兼容旧配置读取）IPv6 前缀委派改由后端在 v6_mode=dhcpv6 时
+	# 自动写入 network.<iface_v6>.extendprefix=1；本选项后端不再消费
 	option extendprefix '1'
 	option auto_dial '1'
 	option route_guard '1'

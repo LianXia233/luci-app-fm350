@@ -103,7 +103,29 @@ return baseclass.extend({
 	ports: wrap(OBJ, 'ports', [ 'probe' ], null),
 
 	/* ---- 拨号 ---- */
-	dial: wrap(OBJ, 'dial', [ 'apn' ], 'pdp'),
+	/* 不能用 extract('pdp')：那会把 net/net_error 整个丢掉 —— 接口配置
+	   失败时前端只看到「有 pdp 即成功」，错误被静默吞掉（审查问题 #12）。
+	   这里保留完整响应：pdp 拨上但网络配置失败 → ok:false + error=net_error。 */
+	dial: function(apn) {
+		var fn = decl(OBJ, 'dial', [ 'apn' ]);
+		return fn.apply(null, arguments).then(function(res) {
+			var r = parseRaw(res);
+			if (r == null)
+				return { ok: false, error: _('后端无响应') };
+			if (r.ok === false)
+				return { ok: false, error: r.error || _('调用失败') };
+			/* 网络配置失败：pd p 拨上了但地址没落进接口，必须当失败报 */
+			if (r.net_error)
+				return { ok: false, error: r.net_error, pdp: r.pdp };
+			if (r.pdp != null)
+				return { ok: true, value: r.pdp, net: r.net };
+			if (r.result != null)
+				return { ok: true, value: r.result };
+			return { ok: true, value: r };
+		}, function(e) {
+			return { ok: false, error: '' + ((e && e.message) || e || _('调用失败')) };
+		});
+	},
 	hangup: wrap(OBJ, 'hangup', [], 'result'),
 
 	/* ---- AT 透传 ---- */
