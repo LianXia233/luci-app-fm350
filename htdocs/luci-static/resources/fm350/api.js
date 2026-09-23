@@ -114,7 +114,7 @@ return baseclass.extend({
 				return { ok: false, error: _('后端无响应') };
 			if (r.ok === false)
 				return { ok: false, error: r.error || _('调用失败') };
-			/* 网络配置失败：pd p 拨上了但地址没落进接口，必须当失败报 */
+			/* 网络配置失败：pdp 拨上了但地址没落进接口，必须当失败报 */
 			if (r.net_error)
 				return { ok: false, error: r.net_error, pdp: r.pdp };
 			if (r.pdp != null)
