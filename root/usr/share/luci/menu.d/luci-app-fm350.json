@@ -1,6 +1,6 @@
 {
 	"admin/modem": {
-		"title": "Mobile Network",
+		"title": "移动网络",
 		"order": 25,
 		"action": {
 			"type": "firstchild"
