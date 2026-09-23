@@ -1309,7 +1309,7 @@ pub fn apply_after_dial(
     if !ipv4.is_empty() {
         if let Some(dev) = detect_dev(cfg) {
             finalize_gateway(cfg, &dev, ipv4, modem_gw);
-            // fallback 可能触发了 ifup，重新读一次状态
+            // fallback 可能触发了 ifup，重新读一次状态（下方直接返回它）
             last = status(cfg);
         }
     }
@@ -1331,7 +1331,7 @@ pub fn apply_after_dial(
     }
 
     mark_applied(cfg);
-    Ok(status(cfg))
+    Ok(last)
 }
 
 /// 网关 ARP 实测与回退。**必须在地址已落进内核之后调用**
