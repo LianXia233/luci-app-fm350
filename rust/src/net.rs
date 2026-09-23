@@ -507,9 +507,10 @@ pub fn ensure_iface(
         }
         // 同主接口：缺省 auto 时 netifd 不开机自启（LuCI 显示「开机时未启动」）。
         cmds.push(format!("set network.{}.auto=1", iface_v6));
-    } else if cfg.ipv6 && !iface_v6.is_empty() && cfg.v6_mode == "off" {
-        // v6_mode=off：旧版本创建过 fm350v6，这里主动拆掉，让「关闭 IPv6」
-        // 真正生效（审查问题：off 模式下接口骨架残留）。
+    } else if !iface_v6.is_empty() && !v6_managed(cfg) {
+        // 关闭 IPv6（ipv6=0 或 v6_mode=off）：旧版本创建过 fm350v6 却只停止
+        // 刷新，骨架与防火墙登记会一直残留 —— 这里主动拆掉，让「关闭」真正
+        // 生效（审查问题：off/关闭模式下接口骨架残留）。
         shell_cmds.push(format!("ifdown {} >/dev/null 2>&1 || true", iface_v6));
         shell_cmds.push(format!(
             "uci -q delete network.{} 2>/dev/null || true",
@@ -581,6 +582,15 @@ pub fn ensure_iface(
                 let key = format!("firewall.@zone[{}].network", zi);
                 if !uci_list_contains(&key, &name) {
                     cmds.push(format!("add_list {}={}", key, sq(&name)));
+                    fw_changed = true;
+                }
+            }
+            // v6 段已关闭时同步摘掉历史 zone 登记，否则 wan 区会一直挂着
+            // 一个已删除的网络名（fw4 每次 reload 都会告警一次）。
+            if !iface_v6.is_empty() && !v6_section {
+                let key = format!("firewall.@zone[{}].network", zi);
+                if uci_list_contains(&key, iface_v6) {
+                    cmds.push(format!("del_list {}={}", key, sq(iface_v6)));
                     fw_changed = true;
                 }
             }
