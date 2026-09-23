@@ -252,7 +252,7 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                         Err(e) => eprintln!("fm350d: 重新应用网络配置失败: {}", e),
                     }
                 }
-                if cfg.ipv6 && !cfg.iface_v6.is_empty() {
+                if net::v6_managed(&cfg) {
                     // 模组侧有 IPv6 而接口上没有（或不是同一个地址）时，
                     // 直接把模组侧地址静态写入并补设备路由 —— 静态方案下
                     // 「刷新」的意义就是重新应用模组侧地址，而非 ifup 空转。

@@ -936,8 +936,11 @@ return view.extend({
 
 		/* ---------------- 二、IPv6 接口 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 接口'));
-		s.description = _('IPv6 地址由守护从模组侧（AT+CGPADDR）读出后静态应用到'
-			+ '蜂窝接口，不依赖 RA/DHCPv6（FM350 的 RNDIS 数据通道不转发）。'
+		s.description = _('默认走 RA 模式：守护只负责打开数据网卡的 accept_ra，'
+			+ 'IPv6 地址与默认路由全部由内核按运营商下发的 RA 自动配置。'
+			+ '旧版本把模组侧读到的地址以 /128 静态写入并补一条无网关的 onlink 默认路由，'
+			+ '该路由会以更小的 metric 压过 RA 下发的路由，导致 IPv6 完全不通；'
+			+ '且 AT+CGCONTRDP 在上下文去激活后仍返回上一轮的残留地址。'
 			+ '修改保存后需重新拨号（或重启服务）才会生效。');
 		s.anonymous = false;
 
@@ -945,6 +948,17 @@ return view.extend({
 			_('关闭后不再创建 fm350v6 子接口，蜂窝侧仅使用 IPv4'));
 		o.default = '1';
 		o.rmempty = false;
+
+		o = s.option(form.ListValue, 'v6_mode', _('IPv6 获取方式'),
+			_('ra：由内核按运营商 RA 自动配置（推荐，实机验证可用）；'
+				+ 'static：把模组侧地址以 /128 静态写入并补无网关默认路由，'
+				+ '仅在模组固件不转发 RA 时使用；off：不托管 IPv6'));
+		o.value('ra', _('ra（按运营商 RA 自动配置）'));
+		o.value('static', _('static（模组侧地址静态写入）'));
+		o.value('off', _('off（不托管 IPv6）'));
+		o.default = 'ra';
+		o.rmempty = false;
+		o.depends('ipv6', '1');
 
 		o = s.option(form.Value, 'v6_poll_interval', _('IPv6 模组轮询周期（秒）'),
 			_('守护进程会按此周期通过 AT+CGPADDR/AT+CGCONTRDP 读取模组侧最新 IPv6；发现模组侧 IPv6 变化时会把它静态应用到 IPv6 接口。设为 0 可关闭独立 V6 轮询'));

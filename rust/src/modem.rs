@@ -956,17 +956,48 @@ fn is_valid_ipv6(s: &str) -> bool {
     normalize_ipv6(s).is_some()
 }
 
+/// 解析 `AT+CGACT?` 响应中指定 cid 的激活状态。
+///
+/// 返回 `None` 表示模组没回任何 `+CGACT:` 行（该命令在此模组上不可用，
+/// 调用方需回落到地址类启发式判据）；返回 `Some(false)` 表示模组列出了上下文
+/// 明细，但目标 cid 不存在或状态为 0 —— 这是**权威的未激活**结论。
+pub fn cgact_state(resp: &str, cid: u32) -> Option<bool> {
+    let mut seen = false;
+    let mut active = false;
+    for line in resp.lines() {
+        let l = line.trim();
+        if !l.starts_with("+CGACT:") {
+            continue;
+        }
+        seen = true;
+        let rest = l.trim_start_matches("+CGACT:").trim();
+        let v: Vec<String> = rest.split(',').map(|x| x.trim().to_string()).collect();
+        if v.first().and_then(|x| x.parse::<u32>().ok()) == Some(cid) {
+            active = v.get(1).map(|x| x == "1").unwrap_or(false);
+        }
+    }
+    if !seen {
+        None
+    } else {
+        Some(active)
+    }
+}
+
 /// 当前 PDP 上下文状态。
 ///
-/// 激活判据按可靠性排序，任一成立即为已激活：
-///   1. `AT+CGPADDR=<cid>` 返回有效非零地址（本模组最可靠）
-///   2. `AT+CGCONTRDP=<cid>` 返回 `+CGCONTRDP:` 行（3GPP 标准，仅激活时下发，
-///      实机同时给出 DNS，可作为 DNS 备用来源）
-///   3. `AT+CGACT?` 显式回 `<cid>,1`（存在时采信）
+/// 激活判据（`AT+CGACT?` 权威）：
+///   * 模组回了 `+CGACT:` 行 —— 一律以该行状态为准。
+///   * 模组只回裸 `OK`（无 `+CGACT:` 行）—— 回落到
+///     `AT+CGCONTRDP` / `AT+CGPADDR` 的地址类启发式判据。
 ///
-/// 注意：FM350 实机 `AT+CGACT?` 只回裸 `OK`（无 `+CGACT:` 行），
-/// 因此**不能**作为唯一判据；否则会误报未激活，进而让 dial() 重复下发
-/// `AT+CGACT=1,<cid>` 并收到 `+CME ERROR: 5847`。
+/// 实机教训（FM350-GL，APN cmiot5g）：上下文**未激活**时，`AT+CGCONTRDP`
+/// 与 `AT+CGPADDR` 仍会原样返回上一轮会话的残留地址（执行 `AT+CGACT=1,0`
+/// 后二者返回值毫无变化，而 `AT+CGACT?` 明确不再列出该 cid）。此前把它们
+/// 当作激活判据，导致 `dial()` 在「已激活且已有地址」处短路返回、永不下发
+/// `AT+CGACT=1,<cid>`，接口一直写着死地址：ARP 能通（模组代理应答）但三层
+/// 零回包、`ip -s link` 里 rx_packets 冻结。
+///
+/// 因此二者现在只负责提供地址与 DNS，不再单独决定 `active`。
 pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     let mut st = PdpState {
         cid: cfg.cid,
@@ -997,88 +1028,106 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         st.pdp_type = cfg.pdp_type.clone();
     }
 
-    let mut active = false;
     let mut contr_dns: Vec<String> = Vec::new();
 
-    // 判据 2：CGCONTRDP（同时取 DNS 备用值）
+    // 判据 0（权威）：AT+CGACT?
+    //
+    // 只要模组列出了上下文明细，就以它的状态为唯一激活结论；未列出本 cid
+    // 或状态为 0 即判定未激活。
+    let cgact = run(at, cfg, "AT+CGACT?")
+        .ok()
+        .and_then(|r| cgact_state(&r, cfg.cid));
+
+    // CGCONTRDP：只提供地址与 DNS 备用值，不再单独作为激活判据。
+    let mut contr_present = false;
+    let mut contr_ipv4 = String::new();
+    let mut contr_ipv6 = String::new();
     if let Ok(r) = run(at, cfg, &format!("AT+CGCONTRDP={}", cfg.cid)) {
         for line in r.lines() {
             let l = line.trim();
             if !l.starts_with("+CGCONTRDP:") {
                 continue;
             }
-            active = true;
+            contr_present = true;
             let rest = l.trim_start_matches("+CGCONTRDP:").trim();
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
             let v: Vec<String> = rest
                 .split(',')
                 .map(|x| x.trim().trim_matches('"').to_string())
                 .collect();
-            if st.ipv4.is_empty() {
+            if contr_ipv4.is_empty() {
                 if let Some(x) = v.get(3) {
                     if is_valid_ipv4(x) {
-                        st.ipv4 = x.clone();
+                        contr_ipv4 = x.clone();
                     }
                 }
             }
             for item in v.iter().skip(5).take(2) {
                 if is_valid_ipv4(item) {
                     contr_dns.push(item.clone());
-                } else if st.ipv6.is_empty() {
+                } else if contr_ipv6.is_empty() {
                     // 同一字段位在 IPV4V6 下按地址族切换：实机 cid=1 的
                     // <primary>/<secondary> 位给的就是点分十进制 IPv6。
-                    // 仅在 CGPADDR 未给值时兜底，避免覆盖权威来源。
                     if let Some(a6) = normalize_ipv6(item) {
-                        st.ipv6 = a6;
+                        contr_ipv6 = a6;
                     }
                 }
             }
         }
     }
 
-    // 判据 3：CGACT?（仅在确有 +CGACT: 行时采信）
-    if let Ok(r) = run(at, cfg, "AT+CGACT?") {
-        for line in r.lines() {
-            let l = line.trim();
-            if !l.starts_with("+CGACT:") {
-                continue;
+    // CGPADDR：地址的权威来源（本模组最可靠）。
+    //
+    // 同时记录「IPv6 字段位是否出现」：FM350 在网络未下发 IPv6 时把该位写成
+    // `0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1`（::1 占位）。只要该位出现过，就以它
+    // 为准 —— 是占位就判定「无 IPv6」，绝不回落到 CGCONTRDP 的残留值，
+    // 否则会拿陈旧地址配出一条永远不通的 v6 默认路由。
+    let mut addr_ipv4 = String::new();
+    let mut addr_ipv6 = String::new();
+    let mut v6_slot_seen = false;
+    if let Ok(r) = run(at, cfg, &format!("AT+CGPADDR={}", cfg.cid)) {
+        // +CGPADDR: <cid>,<PDP_addr>[,<PDP_addr6>]
+        let v = f(&r, "+CGPADDR");
+        for item in v.iter().skip(1) {
+            let looks_v6 = item.contains(':') || item.split('.').count() == 16;
+            if looks_v6 {
+                v6_slot_seen = true;
             }
-            let rest = l.trim_start_matches("+CGACT:").trim();
-            let v: Vec<String> = rest.split(',').map(|x| x.trim().to_string()).collect();
-            if v.first().and_then(|x| x.parse::<u32>().ok()) == Some(cfg.cid) {
-                if v.get(1).map(|x| x == "1").unwrap_or(false) {
-                    active = true;
+            // 存归一化后的标准写法：FM350 的点分十进制形态在此被解码，
+            // 前端拿到的是可读 IPv6，而不是 16 段十进制原始串。
+            if let Some(a6) = normalize_ipv6(item) {
+                if addr_ipv6.is_empty() {
+                    addr_ipv6 = a6;
+                }
+            } else if is_valid_ipv4(item) {
+                if addr_ipv4.is_empty() {
+                    addr_ipv4 = item.clone();
+                }
+            }
+        }
+        if addr_ipv4.is_empty() {
+            if let Some(x) = at::first_ipv4(&r) {
+                if is_valid_ipv4(&x) {
+                    addr_ipv4 = x;
                 }
             }
         }
     }
 
-    // 判据 1：CGPADDR（最可靠）
-    if let Ok(r) = run(at, cfg, &format!("AT+CGPADDR={}", cfg.cid)) {
-        // +CGPADDR: <cid>,<PDP_addr>[,<PDP_addr6>]
-        let v = f(&r, "+CGPADDR");
-        for item in v.iter().skip(1) {
-            // 存归一化后的标准写法：FM350 的点分十进制形态在此被解码，
-            // 前端拿到的是可读 IPv6，而不是 16 段十进制原始串。
-            if let Some(a6) = normalize_ipv6(item) {
-                if st.ipv6.is_empty() {
-                    st.ipv6 = a6;
-                    active = true;
-                }
-            } else if is_valid_ipv4(item) {
-                if st.ipv4.is_empty() {
-                    st.ipv4 = item.clone();
-                    active = true;
-                }
-            }
-        }
-        if st.ipv4.is_empty() {
-            if let Some(x) = at::first_ipv4(&r) {
-                if is_valid_ipv4(&x) {
-                    st.ipv4 = x;
-                    active = true;
-                }
-            }
+    // 激活结论：CGACT? 可用时以它为准，否则回落到地址类启发式。
+    let active = cgact.unwrap_or(contr_present || !addr_ipv4.is_empty() || !addr_ipv6.is_empty());
+
+    // 未激活时的地址是上一轮会话的残留，一律不采信，避免上层把死地址写进接口。
+    if active {
+        st.ipv4 = if !addr_ipv4.is_empty() {
+            addr_ipv4
+        } else {
+            contr_ipv4
+        };
+        st.ipv6 = addr_ipv6;
+        if st.ipv6.is_empty() && !v6_slot_seen {
+            // CGPADDR 没给过 IPv6 位（老固件）时才用 CGCONTRDP 兜底。
+            st.ipv6 = contr_ipv6;
         }
     }
     st.active = active;
@@ -1108,6 +1157,32 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         ],
     );
     st
+}
+
+#[cfg(test)]
+mod cgact_tests {
+    use super::cgact_state;
+
+    #[test]
+    fn cid_absent_means_inactive() {
+        // 实机故障现场：只有 cid 0 激活，插件用的 cid 1 根本不在列表里
+        assert_eq!(cgact_state("+CGACT: 0,1\nOK", 1), Some(false));
+    }
+
+    #[test]
+    fn cid_present_state_parsed() {
+        assert_eq!(cgact_state("+CGACT: 0,1\n+CGACT: 1,1\nOK", 1), Some(true));
+        assert_eq!(cgact_state("+CGACT: 1,0\nOK", 1), Some(false));
+        assert_eq!(cgact_state("+CGACT: 0,1\nOK", 0), Some(true));
+    }
+
+    #[test]
+    fn bare_ok_is_unknown() {
+        // 部分 FM350 固件只回裸 OK，调用方需回落到地址类判据
+        assert_eq!(cgact_state("OK", 1), None);
+        assert_eq!(cgact_state("", 1), None);
+        assert_eq!(cgact_state("+CME ERROR: unknown", 1), None);
+    }
 }
 
 /// 写入 APN（`AT+CGDCONT=<cid>,"<type>","<apn>"`）。

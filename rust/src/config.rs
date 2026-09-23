@@ -72,6 +72,14 @@ pub struct Config {
     /// 连续多少轮判定数据面异常才触发自愈（默认 3 轮）。
     #[serde(default = "default_data_guard_rounds")]
     pub data_guard_rounds: u32,
+    /// IPv6 获取方式：
+    /// - `ra`：由内核按运营商 RA 自动配置（SLAAC 地址 + `via fe80::` 默认路由），
+    ///   插件只负责打开 `accept_ra`。**默认**，实机验证可用的方案。
+    /// - `static`：旧的静态方案 —— 把模组侧读到的地址以 /128 写入并补
+    ///   无网关的 onlink 默认路由。仅在模组固件不转发 RA 时使用。
+    /// - `off`：不托管 IPv6。
+    #[serde(default = "default_v6_mode")]
+    pub v6_mode: String,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
     /// 从模组 AT/PDP 信息轮询最新 IPv6 的周期。0 表示关闭独立 V6 轮询。
@@ -149,6 +157,9 @@ fn default_data_guard() -> bool {
 }
 fn default_data_guard_rounds() -> u32 {
     3
+}
+fn default_v6_mode() -> String {
+    "ra".into()
 }
 fn default_poll_interval() -> u64 {
     30
@@ -258,8 +269,9 @@ pub fn load() -> Config {
         netmask: uci_get("netmask").unwrap_or_default(),
         data_guard: uci_get("data_guard").map(|v| v == "1").unwrap_or(true),
         data_guard_rounds: uci_get("data_guard_rounds")
-            .and_then(|v| v.parse().ok())
+            .and_then(|x| x.parse().ok())
             .unwrap_or_else(default_data_guard_rounds),
+        v6_mode: uci_get("v6_mode").unwrap_or_else(default_v6_mode),
         poll_interval: uci_get("poll_interval")
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_poll_interval),
