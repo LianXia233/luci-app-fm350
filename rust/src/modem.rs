@@ -1265,6 +1265,39 @@ mod cgact_tests {
     }
 }
 
+/// 3GPP TS27.007 <auth_type>：0=none，1=PAP，2=CHAP，3=PAP+CHAP。
+fn auth_code(auth: &str) -> u8 {
+    match auth {
+        "pap" => 1,
+        "chap" => 2,
+        "both" => 3,
+        _ => 0,
+    }
+}
+
+/// 下发鉴权参数（`AT+CGAUTH=<cid>,<auth>[,<username>,<password>]`）。
+///
+/// LuCI 页面一直提供 auth/username/password 三项配置，但此前从未真正
+/// 下发到模组 —— 需要 PAP/CHAP 的 APN 会在 `AT+CGACT=1` 阶段因鉴权缺失
+/// 而激活失败，用户只看到「拨号失败」无从排查（审查问题 #8）。
+/// `auth=none` 时显式清零，避免模组记住上一次会话的凭据。
+/// 与 [`set_apn`] 一样由调用方 best-effort 调用：个别固件对 `CGAUTH=0`
+/// 回 ERROR，不应因此阻断拨号主流程。
+pub fn apply_auth(at: &AtHandle, cfg: &Config) -> AtResult<String> {
+    let code = auth_code(&cfg.auth);
+    if code == 0 {
+        return run(at, cfg, &format!("AT+CGAUTH={},0", cfg.cid));
+    }
+    run(
+        at,
+        cfg,
+        &format!(
+            "AT+CGAUTH={},{},\"{}\",\"{}\"",
+            cfg.cid, code, cfg.username, cfg.password
+        ),
+    )
+}
+
 /// 写入 APN（`AT+CGDCONT=<cid>,"<type>","<apn>"`）。
 pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResult<String> {
     if apn.is_empty() {
@@ -1282,6 +1315,8 @@ pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResu
 /// 不再直接判失败，而是重新读取上下文状态：只要拿到有效地址即视为成功。
 pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     let _ = set_apn(at, cfg, &cfg.apn, &cfg.pdp_type);
+    // 鉴权必须在 CGACT 之前就位（审查问题 #8：UI 的 PAP/CHAP 此前从未下发）
+    let _ = apply_auth(at, cfg);
 
     // 已激活且已取得地址时直接返回，避免重复激活（模组会回 +CME ERROR: 5847）
     let before = pdp(at, cfg);
