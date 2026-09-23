@@ -215,7 +215,9 @@ SIGNAL = 0.40 x SINR_norm + 0.35 x RSRP_norm + 0.25 x RSRQ_norm
 
 ## 菜单路由与仓库结构
 
-菜单入口：`网络 (Network) -> 移动网络 (Mobile Network) -> FM350-GL`。菜单在 `/usr/share/luci/menu.d/luci-app-fm350.json` 中声明，父节点 `admin/modem/fm350` 为 `firstchild`，六个子节点自动渲染为页面顶部 Tab 切换条。
+菜单入口：`网络 (Network) -> 移动网络 -> FM350-GL`。菜单在 `/usr/share/luci/menu.d/luci-app-fm350.json` 中声明，父节点 `admin/modem/fm350` 为 `firstchild`，六个子节点自动渲染为页面顶部 Tab 切换条。
+
+> 一级菜单 `admin/modem` 的 `title` 自 1.0.8 起直接写中文 `移动网络`。本仓库没有 i18n 资源（无 `.po` / `.lmo`，Makefile 不走 `luci.mk`），若这里保留英文 msgid，则**单独安装本插件**时该菜单恒为英文 —— LuCI 在客户端渲染菜单时调 `_(title)`，没有语言目录时原样返回 msgid（详见 CHANGELOG 1.0.8）。代价是英文环境下该菜单也显示中文。若该菜单键被其他自带语言包的插件重复定义，则由对方覆盖并同样显示中文。
 
 | 选项卡 | 访问路由 | 说明 |
 | :--- | :--- | :--- |
