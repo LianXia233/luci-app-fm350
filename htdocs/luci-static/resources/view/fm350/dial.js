@@ -600,7 +600,18 @@ return view.extend({
 		o.inputtitle = _('断开连接');
 		o.onclick = function() {
 			return api.hangup()
-				.then(function(res) { notify(res, _('断开连接指令已下发')); });
+				.then(function(res) {
+					notify(res, _('断开连接指令已下发'));
+					/* 断开会被自动重拨「撤销」：提醒用户先关开关（审查问题） */
+					if (res && res.ok) {
+						var auto = uci.get('fm350', 'main', 'auto_dial');
+						if (auto == null || auto === '' || auto === '1') {
+							ui.addNotification(null, E('p',
+								_('提示：已开启「开机与断线自动重拨」，守护进程将在下一轮巡检（约 30 秒）自动重新拨号。如需保持断开，请先关闭该开关。')),
+								'warning');
+						}
+					}
+				});
 		};
 
 		/* 渲染整体容器并前置插入 PDP Hero 实时态势看板 */

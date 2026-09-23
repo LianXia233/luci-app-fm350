@@ -329,5 +329,11 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
     if !st.success() {
         return Err("uci commit 失败".to_string());
     }
+    // 保存成功立刻作废进程内缓存：否则「改完 2 s 内点拨号」会拿到旧 APN/
+    // 旧端口（审查问题：CONFIG_CACHE 未随 save 失效）。下一次 load_cached
+    // 会重建缓存，TTL 语义对其余读路径保持不变。
+    if let Ok(mut g) = CONFIG_CACHE.lock() {
+        *g = None;
+    }
     Ok(())
 }

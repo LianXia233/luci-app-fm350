@@ -161,6 +161,17 @@ fn acquire_singleton() -> Option<std::fs::File> {
 /// 反复重启（每次重拨都要几十秒，期间整条链路都是断的）。
 const RECOVER_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// 激活却完全取不到地址时，连续多少轮后去激活强制重拨（审查问题 #1）。
+const NO_ADDR_REDIAL_ROUNDS: u32 = 3;
+
+/// 「该有 v6 却没有」的恢复刷新静默期。从未见过 v6（纯 IPv4 环境 / RA 未
+/// 下发）时用长周期，避免每 60 s 一次 ifup + 日志刷屏（审查问题 #11）；
+/// 一旦观察到过 v6，仍按常规 60 s 恢复。
+const V6_SILENT_RECOVERY_INTERVAL: Duration = Duration::from_secs(1800);
+
+/// 当前 AT 口路径消失后，连续多少轮打不开才尝试自动改选（审查问题 #8）。
+const AT_RESELECT_DOWN_ROUNDS: u32 = 3;
+
 fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let at = Arc::new(at::AtHandle::new());
 
@@ -187,6 +198,13 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let mut last_recover: Option<Instant> = None;
     // 同一数据网卡上的「非本插件」接口（如第三方插件建的 2_1）：仅在变化时告警
     let mut last_foreign: Vec<String> = Vec::new();
+    // 激活却一个地址都取不到的连续轮数（>= NO_ADDR_REDIAL_ROUNDS 触发重拨）
+    let mut no_addr_rounds: u32 = 0;
+    // 是否观察到过 v6（模组侧或接口侧任一）——用于给 v6 恢复刷新降频
+    let mut modem_v6_seen: bool = false;
+    let mut net_v6_seen: bool = false;
+    // 当前 AT 口路径已消失的连续轮数（触发自动改选）
+    let mut at_down_rounds: u32 = 0;
     loop {
         let cfg = config::load();
         let interval = cfg.poll_interval.max(5);
@@ -204,6 +222,9 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
 
         if cfg.enabled && cfg.auto_dial {
             let st = modem::pdp(&at, &cfg);
+            if !st.ipv6.is_empty() {
+                modem_v6_seen = true;
+            }
             if v6_modem_poll_due {
                 last_v6_modem_poll = Some(Instant::now());
                 if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
@@ -222,14 +243,19 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                     last_modem_ipv6.clear();
                 }
             }
+            // PDN 显式为纯 IPv4 时跳过一切 IPv6 维护（避免无谓的 ifup/日志）
+            let pdp_v4_only = st.pdp_type.eq_ignore_ascii_case("IP");
             if !st.active {
+                no_addr_rounds = 0;
                 eprintln!("fm350d: PDP 未激活，尝试自动拨号");
                 match modem::dial(&at, &cfg) {
                     Ok(p) => {
-                        if p.ipv4.is_empty() {
-                            eprintln!("fm350d: 拨号成功但未取得 IPv4，稍后重试");
+                        if p.ipv4.is_empty() && p.ipv6.is_empty() {
+                            // 两个族都空：拨号动作本身成功但没拿到任何地址，
+                            // 等下一轮再试（v6-only 是合法会话，见下一分支）
+                            eprintln!("fm350d: 拨号成功但未取得任何地址，稍后重试");
                         } else {
-                            match net::apply_after_dial(&cfg, &p.ipv4, &p.ipv6, &p.dns) {
+                            match net::apply_after_dial(&cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4) {
                                 Ok(n) => eprintln!("fm350d: 已拨号并配置网络 {:?}", n.ipv4),
                                 Err(e) => eprintln!("fm350d: 配置网络失败: {}", e),
                             }
@@ -238,32 +264,47 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                     Err(e) => eprintln!("fm350d: 拨号失败: {}", e),
                 }
             } else if !st.ipv4.is_empty() {
+                no_addr_rounds = 0;
                 // 地址变化或接口缺失时重新应用。
                 // 这里必须打日志：原先 `let _ =` 把错误吞掉，出现过
                 // 「模组 PDP 正常、主机侧却一直没有 IP」的静默故障。
                 // 成功时只在确有偏差的那一轮打印，不会每 30 s 刷屏。
-                let ns = net::status(&cfg);
+                let mut ns = net::status(&cfg);
+                if !ns.ipv6.is_empty() {
+                    net_v6_seen = true;
+                }
                 if !ns.ipv4.contains(&st.ipv4) {
-                    match net::apply_after_dial(&cfg, &st.ipv4, &st.ipv6, &st.dns) {
-                        Ok(n) => eprintln!(
-                            "fm350d: 接口缺失或地址变化，已重新应用网络配置 {:?}",
-                            n.ipv4
-                        ),
+                    match net::apply_after_dial(&cfg, &st.ipv4, &st.ipv6, &st.dns, &st.gw4) {
+                        Ok(n) => {
+                            eprintln!(
+                                "fm350d: 接口缺失或地址变化，已重新应用网络配置 {:?}",
+                                n.ipv4
+                            );
+                            ns = net::status(&cfg);
+                        }
                         Err(e) => eprintln!("fm350d: 重新应用网络配置失败: {}", e),
                     }
                 }
-                if net::v6_managed(&cfg) {
+                if net::v6_managed(&cfg) && !pdp_v4_only {
                     // 模组侧有 IPv6 而接口上没有（或不是同一个地址）时，
                     // 直接把模组侧地址静态写入并补设备路由 —— 静态方案下
                     // 「刷新」的意义就是重新应用模组侧地址，而非 ifup 空转。
-                    let v6_missing = !st.ipv6.is_empty()
-                        && !ns.ipv6.iter().any(|a| a == &st.ipv6);
+                    let v6_missing =
+                        !st.ipv6.is_empty() && !ns.ipv6.iter().any(|a| a == &st.ipv6);
                     let v6_refresh_due = cfg.v6_refresh_interval > 0
                         && last_v6_scheduled_refresh.elapsed()
                             >= Duration::from_secs(cfg.v6_refresh_interval.max(60));
+                    // 恢复刷新的间隔按「是否真见过 v6」分级：见过（或模组在报）
+                    // 用常规 60 s；从没见过则拉长到 30 分钟，纯 IPv4 环境不再
+                    // 每分钟刷一条「未发现有效全局 IPv6」+ ifup（审查问题 #11）。
+                    let recovery_ivl = if modem_v6_seen || net_v6_seen {
+                        V6_REFRESH_MIN_INTERVAL
+                    } else {
+                        V6_SILENT_RECOVERY_INTERVAL
+                    };
                     let v6_recovery_due = ns.ipv6.is_empty()
                         && last_v6_refresh
-                            .map(|t| t.elapsed() >= V6_REFRESH_MIN_INTERVAL)
+                            .map(|t| t.elapsed() >= recovery_ivl)
                             .unwrap_or(true);
 
                     if v6_missing || v6_recovery_due || v6_refresh_due {
@@ -296,9 +337,46 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 if !fixed.is_empty() {
                     eprintln!("fm350d: 已把接口 {:?} 恢复为开机自启", fixed);
                 }
+            } else {
+                // ---- 审查问题 #1：PDP 已激活但没有 IPv4
+                // 1) IPv6-only 会话：把 v6 配下去并补齐自启，不再无限空转；
+                // 2) 两个族都空：连续 NO_ADDR_REDIAL_ROUNDS 轮后去激活强制
+                //    重拨（地址迟迟不下发时 CGACT=0→1 往往能重新拿到）。
+                if !st.ipv6.is_empty() {
+                    no_addr_rounds = 0;
+                    let ns = net::status(&cfg);
+                    if !ns.ipv6.is_empty() {
+                        net_v6_seen = true;
+                    }
+                    if !ns.ipv6.iter().any(|a| a == &st.ipv6) {
+                        match net::apply_after_dial(&cfg, "", &st.ipv6, &st.dns, &st.gw4) {
+                            Ok(_) => {
+                                eprintln!("fm350d: IPv6-only 会话已配置到 {}", cfg.iface)
+                            }
+                            Err(e) => eprintln!("fm350d: IPv6-only 会话配置失败: {}", e),
+                        }
+                    }
+                    let fixed = net::ensure_autostart(&cfg);
+                    if !fixed.is_empty() {
+                        eprintln!("fm350d: 已把接口 {:?} 恢复为开机自启", fixed);
+                    }
+                } else {
+                    no_addr_rounds += 1;
+                    if no_addr_rounds >= NO_ADDR_REDIAL_ROUNDS {
+                        eprintln!(
+                            "fm350d: PDP 已激活但连续 {} 轮未取到任何地址，去激活以重新拨号",
+                            no_addr_rounds
+                        );
+                        let _ = modem::hangup(&at, &cfg);
+                        no_addr_rounds = 0;
+                    }
+                }
             }
         } else if v6_modem_poll_due {
             let st = modem::pdp(&at, &cfg);
+            if !st.ipv6.is_empty() {
+                modem_v6_seen = true;
+            }
             last_v6_modem_poll = Some(Instant::now());
             if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
                 eprintln!("fm350d: 模组侧 IPv6 更新为 {}", st.ipv6);
@@ -314,6 +392,38 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
             } else if st.ipv6.is_empty() && !last_modem_ipv6.is_empty() {
                 eprintln!("fm350d: 模组侧 IPv6 暂未上报");
                 last_modem_ipv6.clear();
+            }
+        }
+
+        // ---- 参数签名：裸 uci set / 服务重启后的强制重下发（审查问题 #13）
+        // apply 成功时会把签名写入 /var/run/fm350d.applied_sig。这里发现不
+        // 一致且接口上有地址时按当前 UCI/内核状态原样重下发一次；失败不覆盖
+        // 签名，下一轮继续尝试。签名文件不存在（首次安装 / 重启后 /var/run
+        // 清空）时直接登记当前值：netifd 刚按 UCI 拉起，运行态天然同步，
+        // 无需弹跳。
+        if cfg.enabled {
+            let sig = net::config_sig(&cfg);
+            match net::applied_sig() {
+                None => net::mark_applied(&cfg),
+                Some(prev) if prev != sig => {
+                    let ns = net::status(&cfg);
+                    if !ns.ipv4.is_empty() || !ns.ipv6.is_empty() {
+                        // 用 UCI 里已记录的网关作模组网关候选：保住原网关
+                        // 选择，也保住 ARP 实测已通过的事实。
+                        let gw4 = net::current_gateway(&cfg).unwrap_or_default();
+                        match net::apply_after_dial(
+                            &cfg,
+                            ns.ipv4.first().map(|s| s.as_str()).unwrap_or(""),
+                            ns.ipv6.first().map(|s| s.as_str()).unwrap_or(""),
+                            &net::configured_dns(&cfg),
+                            &gw4,
+                        ) {
+                            Ok(_) => eprintln!("fm350d: 网络参数已变更，已重新下发接口配置"),
+                            Err(e) => eprintln!("fm350d: 网络参数变更后重下发失败: {}", e),
+                        }
+                    }
+                }
+                Some(_) => {}
             }
         }
 
@@ -396,10 +506,10 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                         let _ = modem::hangup(&at, &cfg);
                         std::thread::sleep(Duration::from_secs(3));
                         match modem::dial(&at, &cfg) {
-                            Ok(p) if !p.ipv4.is_empty() => net::apply_after_dial(
-                                &cfg, &p.ipv4, &p.ipv6, &p.dns,
-                            )
-                            .is_ok(),
+                            Ok(p) if !p.ipv4.is_empty() || !p.ipv6.is_empty() => {
+                                net::apply_after_dial(&cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4)
+                                    .is_ok()
+                            }
                             Ok(_) => false,
                             Err(e) => {
                                 eprintln!("fm350d: 自愈重拨失败: {}", e);
@@ -441,6 +551,29 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 at.close();
             }
             _ => {}
+        }
+
+        // AT 口失联自愈：配置的端口路径已消失（模组重启 / USB 重枚举导致
+        // tty 编号漂移）且连续多轮打不开时，自动改选仍能应答 AT 的 Fibocom 口。
+        // 仅在「路径消失」时切换：路径仍在时宁可等待 —— 同一模组会导出多个
+        // 2cb7 口（DIAG/GNSS/AT），盲切有选错口的风险（审查问题 #8）。
+        if std::fs::metadata(&cfg.at_port).is_err() {
+            at_down_rounds += 1;
+            if at_down_rounds >= AT_RESELECT_DOWN_ROUNDS {
+                at_down_rounds = 0;
+                at.close(); // 释放可能残留的句柄，避免探测被自己的独占挡住
+                if let Some(newp) = at::identify_at_port(&cfg) {
+                    eprintln!(
+                        "fm350d: AT 口 {} 已不存在，自动改选 {} 并在下一轮独占打开",
+                        cfg.at_port, newp
+                    );
+                    if let Err(e) = config::save(&serde_json::json!({ "at_port": newp })) {
+                        eprintln!("fm350d: 写入新 AT 口失败: {}", e);
+                    }
+                }
+            }
+        } else {
+            at_down_rounds = 0;
         }
 
         // 独占事实巡检：TIOCEXCL 对 root（CAP_SYS_ADMIN）无效，内核不提供
@@ -556,11 +689,23 @@ fn main() {
             &cfg,
             "POST",
             "/api/dial",
-            Some(&Json::Null),
+            // 与 api.rs 的 /api/dial 对齐：payload 携带 apn/pdp_type，
+            // 本地直连路径按本地最新配置执行（Json::Null 会让 API 侧
+            // 走「回退读 UCI」分支，审查问题：CLI dial 传 Null）。
+            Some(&serde_json::json!({ "apn": cfg.apn, "pdp_type": cfg.pdp_type })),
             |a, c| match modem::dial(a, c) {
                 Ok(p) => {
-                    let n = net::apply_after_dial(c, &p.ipv4, &p.ipv6, &p.dns);
-                    serde_json::json!({ "ok": true, "pdp": p, "net": n.ok() })
+                    // 不再把网络配置失败压成 net:false：以 net_error 带出
+                    // 原因，与 api.rs 行为一致（审查问题 #12）。
+                    match net::apply_after_dial(c, &p.ipv4, &p.ipv6, &p.dns, &p.gw4) {
+                        Ok(n) => serde_json::json!({ "ok": true, "pdp": p, "net": n }),
+                        Err(e) => serde_json::json!({
+                            "ok": true,
+                            "pdp": p,
+                            "net": serde_json::Value::Null,
+                            "net_error": e,
+                        }),
+                    }
                 }
                 Err(e) => serde_json::json!({ "ok": false, "error": e }),
             },

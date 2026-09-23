@@ -29,8 +29,12 @@ start_service() {
 }
 
 stop_service() {
-	# 停止前尝试去激活 PDP 并拆除接口，避免残留路由
-	"$PROG" hangup >/dev/null 2>&1
+	# 这里**不再**执行 `fm350d hangup`：stop_service 同样服务配置变更触发的
+	# reload（procd_add_reload_trigger）与系统关机，原先每次都会把
+	# network.fm350/fm350v6 的**删除**持久化进闪存 —— auto_dial=0 的设备
+	# 重启后接口骨架再也起不来，关机也变成一次断链（审查问题 #6）。
+	# 显式断链请走 `fm350d hangup`（LuCI 拨号页 / CLI / API），卸载清理见
+	# Makefile prerm。
 	rm -f "$PIDFILE"
 }
 
