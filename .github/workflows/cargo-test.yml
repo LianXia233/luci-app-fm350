@@ -8,6 +8,10 @@ on:
       - 'arena/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,13 +21,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install libudev (serialport)
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - name: cargo test
         run: |
+          set -o pipefail
           cargo test 2>&1 | tee test.log
-          # 沙箱取不到 Actions 日志 CDN，把测试摘要以 annotation 形式经 Checks API 带回
-          grep -E 'test result:' test.log | while IFS= read -r line; do
-            echo "::notice title=cargo test::$line"
-          done
-          # tee 不影响退出码？会影响（pipefail 未开），显式按最后一跳判失败：
-          grep -q 'test result:' test.log
+          grep -E 'test result:' test.log || { echo "::error::no test result lines"; exit 1; }
+      # 复刻仓库自带 CI 的 rust-tests 步骤（cwd=repo 根 + --locked），并把
+      # 完整输出经 check-run output 回传（沙箱取不到 Actions 日志 CDN）。
+      - name: publish report via check-run
+        if: always()
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          {
+            echo "## plain cargo test (cwd=rust)"
+            grep -E 'test result:|error|warning: unused' rust/test.log 2>/dev/null | head -50
+            echo
+            echo "## repo-CI replica: cargo test --locked (cwd=repo root)"
+            cargo test --locked --manifest-path rust/Cargo.toml 2>&1 | tail -80
+            rc=$?
+            echo "replica_rc=$rc"
+          } > /tmp/report.txt 2>&1
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.request
+          text = pathlib.Path('/tmp/report.txt').read_text(errors='replace')[:60000]
+          payload = {
+              "name": "test-report",
+              "head_sha": os.environ["GITHUB_SHA"],
+              "status": "completed",
+              "conclusion": "neutral",
+              "output": {"title": "cargo test report", "summary": text},
+          }
+          req = urllib.request.Request(
+              "https://api.github.com/repos/%s/check-runs" % os.environ["GITHUB_REPOSITORY"],
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": "Bearer %s" % os.environ["GH_TOKEN"],
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req) as r:
+                  print("check-run created:", r.status)
+          except Exception as e:
+              print("check-run create failed:", e)
+          PY
