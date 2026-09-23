@@ -1229,10 +1229,20 @@ pub fn bounce_data_dev(cfg: &Config) -> bool {
         Some(d) => d,
         None => return false,
     };
+    // 先走 netifd 的 ifdown：让它同步移除地址/路由并把运行态置 down，
+    // 否则裸 `ip link set down` 会造成「内核链路 down、netifd 仍以为 up」
+    // 的状态漂移（审查问题：bounce 直接操作裸链路）。
+    let _ = real(&format!("ifdown {}", cfg.iface));
+    if v6_managed(cfg) {
+        let _ = real(&format!("ifdown {}", cfg.iface_v6));
+    }
+    // 硬复位数据端点（stall 自愈的核心动作）：即便 ifdown 因异常没能落下
+    // 链路，这里也强制拉低；命令幂等，链路已 down 时无副作用。
     let _ = real(&format!("ip link set {} down", dev));
     std::thread::sleep(Duration::from_secs(2));
     let _ = real(&format!("ip link set {} up", dev));
     std::thread::sleep(Duration::from_secs(1));
+    // 回到 netifd：由它按 UCI 重新下发地址与路由（裸 up 不会恢复配置）。
     let (ok, _) = real(&format!("ifup {}", cfg.iface));
     // 数据面复位会让 v6 子接口（device=@主接口）跟着失联，这里一并拉回，
     // 否则 v6 侧要等下一轮 refresh 才恢复。
