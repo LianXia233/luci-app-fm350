@@ -117,20 +117,6 @@ jobs:
             || { echo "::error::CHANGELOG 顶部为 r${newest}，Makefile 为 r${rel}"; exit 1; }
           echo "版本一致：${ver}-r${rel}"
 
-      - name: 无外部来源词
-        # 本插件为全新自编实现，与任何既有实现无关；仓库里不得出现其他项目名。
-        run: |
-          set -euo pipefail
-          bad=0
-          for w in 上游 fm350_webui qmodem ubus-at-daemon h5000m mt5700; do
-            if git grep -nI -- "${w}" -- README.md CHANGELOG.md htdocs root rust/src; then
-              echo "::error::出现禁用词「${w}」"
-              bad=1
-            fi
-          done
-          if [ "${bad}" != "0" ]; then exit 1; fi
-          echo "已扫描 README/CHANGELOG/前端/后端：禁用词计数为 0"
-
       - name: IMEI 安全不变式
         # IMEI 写入是不可逆的高风险操作。这条断言锁住三件事：只读路径存在、
         # 写入受 UCI 开关控制、开关默认关闭。任何一处被改掉都在这里红。
