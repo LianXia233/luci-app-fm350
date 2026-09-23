@@ -341,11 +341,11 @@ luci-app-fm350/
 | `cid` | `1` | 激活的 PDP Context ID |
 | `auth` | `none` | 认证协议：`none` / `pap` / `chap` |
 | `iface` | `fm350` | IPv4 接口名（生成于 `/etc/config/network`） |
-| `iface_v6` | `fm350v6` | IPv6 接口名（静态 proto，关联 `device=@fm350`） |
+| `iface_v6` | `fm350v6` | IPv6 接口名（关联 `device=@fm350`；proto 由 `v6_mode` 决定：`none` / `dhcpv6` / `static`） |
 | `data_dev` | `auto` | 蜂窝数据通道网卡名，`auto` 依驱动自动探测 |
 | `metric` | `30` | 默认路由跃点优先级 |
 | `ipv6` | `1` | 是否创建并接管 IPv6 子接口 |
-| `extendprefix` | `1` | **已废弃（1.0.3 起）**：原为 netifd dhcpv6 前缀委派选项，IPv6 改为守护静态配置后不再被消费 |
+| `extendprefix` | `1` | **插件侧已废弃（1.0.3 起）**，后端不消费此字段；`v6_mode=dhcpv6` 时插件会自动在 `fm350v6` 接口上写入 `extendprefix=1` |
 | `auto_dial` | `1` | 服务启动后自动拨号 |
 | `route_guard` | `1` | 默认路由自愈守护 |
 | `gateway_mode` | `auto` | 网关模式：`auto` 推导并实测同网段 `.1` 网关、失败回退；`static` 用 `gateway`；`off` 无网关 onlink 直连 |
@@ -353,7 +353,7 @@ luci-app-fm350/
 | `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`） |
 | `data_guard` | `1` | 数据面健康巡检与分级自愈（网卡 stall 时复位 → 重拨 → 重启模组） |
 | `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
-| `v6_mode` | `ra` | IPv6 获取方式：`ra` 由内核按运营商 RA 自动配置（默认，推荐）；`static` 把模组侧地址以 `/128` 静态写入；`off` 不托管 IPv6 |
+| `v6_mode` | `ra` | IPv6 获取方式：`dhcpv6` 交给 netifd 的 odhcp6c（与 QModem 同款，推荐）——用户态收 RA，不受内核 `accept_ra` 影响，并可把 `/64` 委派给 LAN；`ra` 由内核按运营商 RA 自动配置（默认）；`static` 把模组侧地址以 `/128` 静态写入；`off` 不托管 IPv6 |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
 | `v6_poll_interval` | `300` | 从模组 AT/PDP 轮询最新 IPv6 的周期（秒）；`v6_mode=static` 下发现变化时把模组侧地址静态应用到 IPv6 接口，`0` 关闭 |
 | `v6_refresh_interval` | `1800` | IPv6 接口定时校验周期（秒），按需重新应用模组侧地址；`0` 关闭定时刷新，失效兜底仍保留 |
@@ -508,15 +508,17 @@ make package/luci-app-fm350/compile V=s
   - IPv4 提取按「严格 4 段十进制且非 `0.0.0.0`」判定，16 段串不会被误收。
 - **IPv6 占位地址显式排除**：未分配时模组回 `0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1`（即 `::1`），结构与真实地址完全一致，只判「是否 16 段」会把拨号失败误报为在线。后端排除全零与「仅最低字节为 1」两种占位。
   - 1.0.6 起该字段位升级为 **IPv6 的权威来源**：只要 `AT+CGPADDR` 带出了 v6 字段位，就以其为准——是占位即判定「网络未下发 IPv6」，**不再回落**到 `AT+CGCONTRDP` 里同样陈旧的 IPv6。实机 APN `cmiot5g` 在 `IPV4V6` 下就是这种情形：v6 位恒为 `::1`，而 `AT+CGCONTRDP` 仍残留 `2409:8057:2000::8`，照抄会配出一条永远不通的 v6 默认路由。只有当模组固件根本不返回 v6 字段位时，才用 `AT+CGCONTRDP` 兜底。
-- **IPv6 默认按运营商 RA 自动配置（`v6_mode=ra`，1.0.6 起，旧结论已推翻）**：
+- **IPv6 取址方式由 `v6_mode` 决定（1.0.6 引入 `ra`，1.0.7 增加 `dhcpv6`；旧结论「RNDIS 不转发 RA」已推翻）**：
   - 旧版认为「FM350 的 RNDIS 通道不转发运营商 RA/DHCPv6」，**实机证明是错的** —— 模组一直在发 RA。当年 odhcp6c 拿不到地址另有原因，见下一条。
   - **真正的坑一：`accept_ra` 被 forwarding 关死**。蜂窝网卡进 WAN 区后 `net.ipv6.conf.<dev>.forwarding=1`，内核在默认 `accept_ra=1` 下会**直接丢弃**所有 RA。必须设为 `2`（即使转发也接收）。证据：手工 `sysctl -w net.ipv6.conf.eth2.accept_ra=2` 后立刻收到 `default via fe80::2 dev eth2 proto ra mtu 1432`，SLAAC 随即拿到 `2409:8d5b:35c:702::/64`。
   - **真正的坑二：静态方案的 onlink 路由会压掉 RA 路由**。旧实现写 `/128` + `default dev <dev> metric <m>`，metric 比 RA 下发的 `metric 1024` 更小，于是 v6 全量发出却零回包。`route_guard` 现改为「已有任何一条 v6 默认路由就不再补」。
   - **真正的坑三：静态地址本身是残留**（见上一条「残留地址陷阱」）—— `AT+CGCONTRDP` 在上下文去激活后仍返回上一轮的 IPv6。
   - RA 模式下插件把 `fm350v6` 切成 `proto=none`（netifd 只拉设备、不写地址），并每轮兜底打开 `accept_ra=2` / `accept_ra_defrtr=1` / `accept_ra_pinfo=1`（USB 复位后 sysctl 会回默认值）。RA 等 6 秒仍不来才回落到 `static`。
-  - `v6_mode` 三选一：`ra`（默认）/ `static`（旧行为）/ `off`（不托管）。
-  - `extendprefix` 随之废弃：旧方案靠 netifd dhcpv6 前缀委派把 /64 分给 LAN，静态方案下不再有该路径；字段仅保留兼容旧配置读取，后端不再消费。
-  - LAN 侧如需 IPv6 前缀，可在拿到蜂窝 /64 后另行规划（本插件遵循最小干预原则不代改 lan 配置）。
+  - `v6_mode` 四选一：`dhcpv6`（交给 odhcp6c，推荐）/ `ra`（默认，内核按 RA 配置）/ `static`（旧行为）/ `off`（不托管）。未识别取值（含旧配置缺项）一律回落 `ra`。
+  - **`dhcpv6`（1.0.7 新增）**：`fm350v6` 置为 `proto=dhcpv6` + `extendprefix=1`，由 netifd 拉起 odhcp6c 托管全部 v6 取址。odhcp6c 在**用户态**用原始套接字收发 RS/RA 与 DHCPv6，**不经过内核 `accept_ra`**，因此 `accept_ra=0` + `forwarding=1` 下同样能取到地址；`extendprefix=1` 还能把拿到的 `/64` 继续委派给 LAN（内网设备也就有了 IPv6）。这是 QModem 插件对 fibocom + mediatek 组合采用的同款方案，两插件共存时行为一致、不会互相改写同一张网卡的 v6 策略。
+  - `dhcpv6` / `ra` 模式下 `route_guard` 只维护一条 metric `2048` 的 onlink 兜底路由（odhcp6c 下发的路由 metric 为 `512`、RA 路由为 `1024`，均优先级更高），且**不删除**任何路由 —— netifd 的 ifdown/ifup 会冲掉 RA 路由，删掉会留下默认路由真空。
+  - `extendprefix` 作为**插件选项**自 1.0.3 起已废弃（后端不消费该字段）；但 `v6_mode=dhcpv6` 下插件会自动在 `fm350v6` **接口**上写入 `extendprefix=1`，二者不是同一回事。
+  - LAN 侧如需 IPv6 前缀：`dhcpv6` 模式下由 `extendprefix=1` 自动委派；`ra` / `static` 模式下需另行规划（本插件遵循最小干预原则不代改 lan 配置）。
 - **链路本地地址不等于「拿到了 IPv6」**：任何 UP 的网卡都自带 `fe80::`，计入状态会让前端长期显示有 IPv6 并造成在线假阳性，`status()` 按 `fe80::/10` 过滤。
 - **IPv6 有效期必须看 `valid_lft`**：内核里过期的地址可能短暂出现在 `ip -o addr` 输出中，状态读取排除 `valid_lft 0sec`；`preferred_lft 0sec` 仅表示 deprecated，`valid_lft` 归零前仍可用。
 - **模组侧与系统侧 IPv6 是两条路径**：

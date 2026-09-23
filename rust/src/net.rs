@@ -301,7 +301,17 @@ pub fn ensure_iface(
                 iface_v6, stale
             ));
         }
-        if v6_ra_mode(cfg) {
+        if v6_dhcp_mode(cfg) {
+            // DHCPv6 模式：交给 odhcp6c（不写静态 /128，也不碰 sysctl）。
+            // extendprefix=1 让 odhcp6c 拿到的 /64 能委派给 LAN，内网设备
+            // 也能用上 IPv6 —— QModem 就是这个做法，实机已验证。
+            cmds.push(format!("set network.{}.proto=dhcpv6", iface_v6));
+            cmds.push(format!("set network.{}.extendprefix=1", iface_v6));
+            shell_cmds.push(format!(
+                "uci -q delete network.{}.ip6addr 2>/dev/null || true",
+                iface_v6
+            ));
+        } else if v6_ra_mode(cfg) {
             // RA 模式：只打开 accept_ra，绝不写静态 /128 —— 模组侧
             // `AT+CGCONTRDP` 在上下文去激活后仍返回上一轮的残留地址，照抄会
             // 配出一个根本不属于本会话的 v6 地址。
@@ -609,6 +619,8 @@ pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
             enable_v6_ra(&dev);
             ensure_v6_ra_proto(cfg);
         }
+    } else if v6_dhcp_mode(cfg) {
+        ensure_v6_dhcpv6_proto(cfg);
     }
     let (ok, _) = real(&format!("ifup {}", cfg.iface_v6));
     ok
@@ -619,10 +631,20 @@ pub fn v6_managed(cfg: &Config) -> bool {
     cfg.ipv6 && !cfg.iface_v6.is_empty() && cfg.v6_mode != "off"
 }
 
-/// 是否走 RA 模式：`v6_mode` 为 `ra`（默认）或未识别值时都按 RA 处理，
-/// 只有显式 `static` 才回落到旧的静态方案。
+/// 是否走 RA 模式：`v6_mode` 为 `ra`（默认）或未识别值时都按 RA 处理；
+/// 显式 `static` / `dhcpv6` / `off` 各自走自己的分支。
 pub fn v6_ra_mode(cfg: &Config) -> bool {
-    cfg.ipv6 && cfg.v6_mode != "static" && cfg.v6_mode != "off"
+    cfg.ipv6 && !matches!(cfg.v6_mode.as_str(), "static" | "dhcpv6" | "off")
+}
+
+/// 是否走 DHCPv6 模式：把 IPv6 交给 netifd 的 odhcp6c（与 QModem 同款做法）。
+///
+/// 为什么这条路径最稳：odhcp6c 在**用户态**用 raw socket 收 ICMPv6 RA，
+/// 完全不看 `net.ipv6.conf.<dev>.accept_ra`。蜂窝网卡进 WAN 区后
+/// `forwarding=1`、内核默认值会让 RA 全丢（实机 `accept_ra=0` 时 QModem 的
+/// v6 照样通），而 odhcp6c 天然绕开了这个坑，不需要插件去改 sysctl。
+pub fn v6_dhcp_mode(cfg: &Config) -> bool {
+    cfg.ipv6 && cfg.v6_mode == "dhcpv6"
 }
 
 /// 打开数据网卡的 IPv6 RA 接收。
@@ -677,6 +699,28 @@ fn ensure_v6_ra_proto(cfg: &Config) {
     let _ = real("uci commit network");
 }
 
+/// DHCPv6 模式下把 v6 子接口交给 netifd 的 odhcp6c。
+///
+/// `proto=dhcpv6` + `extendprefix=1`：地址、默认路由、`/64` 前缀委派全部由
+/// odhcp6c/netifd 负责，插件既不写静态地址也不改 sysctl。
+fn ensure_v6_dhcpv6_proto(cfg: &Config) {
+    let iface_v6 = &cfg.iface_v6;
+    let (ok_proto, proto) = real(&format!("uci -q get network.{}.proto", iface_v6));
+    if !ok_proto || proto.trim() != "dhcpv6" {
+        let _ = uci(&format!("set network.{}.proto=dhcpv6", iface_v6));
+    }
+    let (ok_ext, ext) = real(&format!("uci -q get network.{}.extendprefix", iface_v6));
+    if !ok_ext || ext.trim() != "1" {
+        let _ = uci(&format!("set network.{}.extendprefix=1", iface_v6));
+    }
+    // 旧版本可能留下静态地址，留着会和 odhcp6c 抢同一个地址
+    let _ = real(&format!(
+        "uci -q delete network.{}.ip6addr 2>/dev/null || true",
+        iface_v6
+    ));
+    let _ = real("uci commit network");
+}
+
 /// 把模组侧 IPv6 地址写入 v6 接口（静态）并补齐设备路由。
 ///
 /// 与 [`ensure_iface`] 的区别：本函数只处理 IPv6 一侧，供守护在「模组侧
@@ -694,6 +738,15 @@ pub fn apply_ipv6_addr(cfg: &Config, ipv6: &str) -> bool {
         Some(d) => d,
         None => return false,
     };
+
+    // DHCPv6 模式：IPv6 完全交给 odhcp6c，插件不写地址、不改 sysctl。
+    // 这里只兜底确认接口形态正确（proto=dhcpv6 + extendprefix=1），
+    // 然后触发一次 ifup 让 netifd 重新拉起 odhcp6c。
+    if v6_dhcp_mode(cfg) {
+        ensure_v6_dhcpv6_proto(cfg);
+        let _ = real(&format!("ifup {}", iface_v6));
+        return true;
+    }
 
     // RA 模式：地址与默认路由由内核按运营商 RA 处理，插件不写静态 /128。
     // 只有当 RA 迟迟不来（个别固件/运营商确实不转发 RA）时才回落到静态方案。
@@ -782,9 +835,11 @@ pub fn route_guard(cfg: &Config) -> bool {
         // RA 模式下每轮兜底打开 accept_ra：USB 复位/网卡重建后 sysctl 会回到
         // 默认值，而 forwarding=1 时默认值 0 会让内核彻底丢弃 RA。
         let ra = v6_ra_mode(cfg);
+        let dhcp = v6_dhcp_mode(cfg);
         if ra {
             enable_v6_ra(&dev);
         }
+        // dhcpv6 模式不改任何 sysctl：路由与地址归 odhcp6c/netifd 管。
         let (_, out6) = real(&format!("ip -o -6 addr show dev {} 2>/dev/null", dev));
         let has_global_v6 = out6
             .lines()
@@ -803,7 +858,13 @@ pub fn route_guard(cfg: &Config) -> bool {
             // 「默认路由真空」，`ping -6` 直接报 Network unreachable。
             // 为什么不把 onlink 放在低 metric：那会压过 RA 路由，强制主机对
             // 每个目的地址直接发 NS，完全依赖模组做 NDP 代理。
-            let metric6 = if ra { V6_FALLBACK_METRIC } else { cfg.metric };
+            // dhcpv6 模式下 odhcp6c 装的是 `default from <prefix> via fe80::2
+            // metric 512`，同样必须让兜底路由排在它后面。
+            let metric6 = if ra || dhcp {
+                V6_FALLBACK_METRIC
+            } else {
+                cfg.metric
+            };
             let (_, routes6) = real(&format!("ip -6 route show dev {} 2>/dev/null", dev));
             let wanted6 = format!("default dev {} metric {}", dev, metric6);
             let has_wanted = routes6.lines().any(|l| {
@@ -813,8 +874,9 @@ pub fn route_guard(cfg: &Config) -> bool {
                 let (ok6, _) = real(&format!("ip -6 route replace {}", wanted6));
                 acted = acted || ok6;
             }
-            // 迁移：清掉旧版本写在 cfg.metric 上的 onlink 路由，否则它比 RA 优先生效。
-            if ra && metric6 != cfg.metric {
+            // 迁移：清掉旧版本写在 cfg.metric 上的 onlink 路由，否则它比
+            // RA / odhcp6c 下发的路由优先生效。
+            if (ra || dhcp) && metric6 != cfg.metric {
                 let stale = routes6.lines().any(|l| {
                     l.trim().starts_with("default")
                         && !l.contains(" via ")
@@ -1046,6 +1108,33 @@ mod tests {
         let (ok, out) = sh(RunMode::Dry, &script);
         assert!(ok);
         assert_eq!(out, "set network.fm350v6.ip6addr=2409:8057:2000::8/128");
+    }
+
+    /// 四种 v6_mode 必须两两互斥，且未识别值回落到 ra（兼容旧配置）。
+    #[test]
+    fn v6_mode_predicates_are_mutually_exclusive() {
+        let mk = |mode: &str, ipv6: bool| Config {
+            ipv6,
+            v6_mode: mode.to_string(),
+            iface: "fm350".to_string(),
+            iface_v6: "fm350v6".to_string(),
+            ..Default::default()
+        };
+        for (mode, managed, ra, dhcp) in [
+            ("dhcpv6", true, false, true),
+            ("ra", true, true, false),
+            ("static", true, false, false),
+            ("off", false, false, false),
+            ("", true, true, false), // 未识别/缺省 -> ra
+        ] {
+            let c = mk(mode, true);
+            assert_eq!(v6_managed(&c), managed, "managed mode={}", mode);
+            assert_eq!(v6_ra_mode(&c), ra, "ra mode={}", mode);
+            assert_eq!(v6_dhcp_mode(&c), dhcp, "dhcp mode={}", mode);
+        }
+        // ipv6 总开关关闭时任何模式都不托管
+        let off = mk("dhcpv6", false);
+        assert!(!v6_managed(&off) && !v6_ra_mode(&off) && !v6_dhcp_mode(&off));
     }
 
     #[test]

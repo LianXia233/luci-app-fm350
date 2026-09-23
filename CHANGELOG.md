@@ -2,6 +2,62 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.7-r1
+
+新增 IPv6 取址方式 `v6_mode=dhcpv6`：把 `fm350v6` 直接交给 netifd 的 **odhcp6c**
+托管，与 QModem 插件同款方案。
+
+### 背景
+
+1.0.6 引入的 `ra` 模式依赖**内核**接收运营商 RA（需把 `accept_ra` 兜底设为 `2`，
+   并清理压住 RA 路由的历史静态路由）。这套逻辑在本机型上验证通过，但它有两个
+   结构性弱点：
+
+- **依赖内核 sysctl 正确**：蜂窝网卡一旦进 WAN 区就带 `forwarding=1`，
+  若 `accept_ra` 被别的插件/脚本改回 `0`/`1`，RA 会被内核静默丢弃，
+  插件只能靠每轮巡检重设，属于「持续对抗」而非「一次配好」。
+- **与 QModem 等第三方插件行为不一致**：QModem 对 `fibocom` + `mediatek` 组合
+  固定走 `proto=dhcpv6`，两插件共存时同一网卡被两套 v6 策略轮流改写。
+
+`odhcp6c` 在**用户态**用原始套接字自行收发 RS/RA 与 DHCPv6，**不经过内核
+`accept_ra`**，因此 `accept_ra=0` + `forwarding=1` 下同样能取到地址；并可通过
+`extendprefix=1` 把拿到的 `/64` 前缀继续委派给 LAN。
+
+### 变更
+
+- 新增 `v6_mode=dhcpv6`：`fm350v6` 置为 `proto=dhcpv6` + `extendprefix=1`，
+  删除历史 `ip6addr`，地址、默认路由、前缀委派全部由 odhcp6c 产出，插件不再插手。
+- `v6_mode` 现在有四种取值，语义两两互斥（新增单测 `v6_mode_predicates_are_mutually_exclusive`
+  断言真值表）：
+
+  | 取值 | 托管 | 取址方式 |
+  | --- | --- | --- |
+  | `dhcpv6` | 是 | netifd + odhcp6c（用户态收 RA，可委派前缀给 LAN） |
+  | `ra`（默认） | 是 | 内核按 RA 自动配置（SLAAC），插件兜底开 `accept_ra=2` |
+  | `static` | 是 | 插件写 `AT+CGPADDR`/`AT+CGCONTRDP` 返回的静态地址 |
+  | `off` | 否 | 插件完全不碰 IPv6 |
+
+  未识别的取值（含旧配置缺项）一律回落到 `ra`，保持向后兼容。
+- `route_guard` 的 v6 分支对 `dhcpv6` 与 `ra` 一致：只维护一条 metric `2048` 的
+  onlink 兜底路由（odhcp6c 下发的路由 metric 为 `512`，优先级更高），
+  **不删除**任何路由，避免 netifd flap 期间出现默认路由真空。
+- LuCI 设置页 `v6_mode` 下拉框新增 `dhcpv6`（标为推荐）。
+
+### 说明
+
+- `dhcpv6` 与 `ra` 的差别只在**谁来收 RA**：前者是 odhcp6c（用户态），
+  后者是内核。两者最终都能拿到 SLAAC 地址与 `via fe80::` 默认路由；
+  差别是 `dhcpv6` 同时具备**前缀委派到 LAN** 的能力，且不受内核 sysctl 干扰。
+- 选择建议：与 QModem 等插件共存、或需要给内网下发 IPv6 时用 `dhcpv6`；
+  追求最少用户态进程时用 `ra`。
+- 本版默认为 `ra`（与 1.0.6 行为一致），如需 `dhcpv6` 手工切换：
+
+  ```
+  uci set fm350.main.v6_mode='dhcpv6'
+  uci commit fm350
+  /etc/init.d/fm350 restart
+  ```
+
 ## 1.0.6-r1
 
 修复「配置全对、ARP 也通，但 rx_packets 恒为 0、IPv4 完全不通」的实机故障：
