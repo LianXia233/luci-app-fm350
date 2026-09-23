@@ -950,7 +950,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'v6_mode', _('IPv6 获取方式'),
-			_('dhcpv6：交给 netifd 的 odhcp6c（与 QModem 同款，推荐）——'
+			_('dhcpv6：交给 netifd 的 odhcp6c（与主流第三方插件同款，推荐）——'
 				+ 'odhcp6c 在用户态自己收 RA，不受内核 accept_ra 影响，'
 				+ '并可把 /64 前缀委派给 LAN；'
 				+ 'ra：由内核按运营商 RA 自动配置；'

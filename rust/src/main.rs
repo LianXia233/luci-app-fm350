@@ -185,7 +185,7 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let mut last_health: Option<net::DataHealth> = None;
     let mut recover_level: u32 = 0;
     let mut last_recover: Option<Instant> = None;
-    // 同一数据网卡上的「非本插件」接口（如 QModem 的 2_1）：仅在变化时告警
+    // 同一数据网卡上的「非本插件」接口（如第三方插件建的 2_1）：仅在变化时告警
     let mut last_foreign: Vec<String> = Vec::new();
     loop {
         let cfg = config::load();
