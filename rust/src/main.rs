@@ -157,6 +157,10 @@ fn acquire_singleton() -> Option<std::fs::File> {
         .ok()
 }
 
+/// 数据面自愈的冷却时间：同一级恢复动作至少要间隔这么久，避免把模组
+/// 反复重启（每次重拨都要几十秒，期间整条链路都是断的）。
+const RECOVER_COOLDOWN: Duration = Duration::from_secs(300);
+
 fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let at = Arc::new(at::AtHandle::new());
 
@@ -176,6 +180,13 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let mut last_v6_modem_poll: Option<Instant> = None;
     let mut last_v6_scheduled_refresh = Instant::now();
     let mut last_modem_ipv6 = String::new();
+    // 数据面健康巡检状态：连续异常轮数、上一轮统计、已完成到第几级自愈
+    let mut stall_rounds: u32 = 0;
+    let mut last_health: Option<net::DataHealth> = None;
+    let mut recover_level: u32 = 0;
+    let mut last_recover: Option<Instant> = None;
+    // 同一数据网卡上的「非本插件」接口（如 QModem 的 2_1）：仅在变化时告警
+    let mut last_foreign: Vec<String> = Vec::new();
     loop {
         let cfg = config::load();
         let interval = cfg.poll_interval.max(5);
@@ -309,6 +320,112 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
         if cfg.route_guard {
             if net::route_guard(&cfg) {
                 eprintln!("fm350d: 已补齐默认设备路由");
+            }
+        }
+
+        // ---- 冲突告警：同一数据网卡上是否还有别的插件建的接口
+        //
+        // 两个 modem 插件同时管一块模组时会互相打断（AT 口争用 + 接口反复
+        // down/up），最终把 RNDIS 数据端点打到 stall —— 这类故障的配置看着
+        // 完全正常，极难定位，因此必须显式喊出来。
+        if cfg.enabled {
+            if let Some(dev) = net::detect_dev(&cfg) {
+                let foreign = net::foreign_ifaces_on_dev(&cfg, &dev);
+                if foreign != last_foreign {
+                    if foreign.is_empty() {
+                        if !last_foreign.is_empty() {
+                            eprintln!(
+                                "fm350d: 数据网卡 {} 上的外部接口 {:?} 已消失",
+                                dev, last_foreign
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "fm350d: 警告：数据网卡 {} 上还存在其它插件的接口 {:?}，\
+                             与本插件的 {} 冲突（两者会互相拨号、反复重置链路），\
+                             请只保留其中一个管理该模组",
+                            dev, foreign, cfg.iface
+                        );
+                    }
+                    last_foreign = foreign;
+                }
+            }
+        }
+
+        // ---- 数据面健康巡检与分级自愈
+        if cfg.data_guard && cfg.enabled {
+            let healthy = match (net::detect_dev(&cfg), last_health) {
+                (Some(dev), Some(prev)) => {
+                    if let Some(cur) = net::data_health(&dev) {
+                        let stalled = net::data_plane_stalled(&prev, &cur);
+                        last_health = Some(cur);
+                        if stalled {
+                            stall_rounds += 1;
+                        } else {
+                            stall_rounds = 0;
+                            recover_level = 0;
+                        }
+                        !stalled
+                    } else {
+                        true
+                    }
+                }
+                (Some(dev), None) => {
+                    last_health = net::data_health(&dev);
+                    true
+                }
+                _ => true,
+            };
+
+            let rounds_needed = cfg.data_guard_rounds.max(1);
+            let cooled = last_recover
+                .map(|t| t.elapsed() >= RECOVER_COOLDOWN)
+                .unwrap_or(true);
+            if !healthy && stall_rounds >= rounds_needed && cooled {
+                let level = recover_level + 1;
+                eprintln!(
+                    "fm350d: 数据面连续 {} 轮无进展（tx_errors 增长而 tx_packets 不动），\
+                     执行第 {} 级自愈",
+                    stall_rounds, level
+                );
+                let done = match level {
+                    // 第 1 级：复位数据网卡（不动基带）
+                    1 => net::bounce_data_dev(&cfg),
+                    // 第 2 级：重新拨号（先去激活再激活，重建 PDP 与接口）
+                    2 => {
+                        let _ = modem::hangup(&at, &cfg);
+                        std::thread::sleep(Duration::from_secs(3));
+                        match modem::dial(&at, &cfg) {
+                            Ok(p) if !p.ipv4.is_empty() => net::apply_after_dial(
+                                &cfg, &p.ipv4, &p.ipv6, &p.dns,
+                            )
+                            .is_ok(),
+                            Ok(_) => false,
+                            Err(e) => {
+                                eprintln!("fm350d: 自愈重拨失败: {}", e);
+                                false
+                            }
+                        }
+                    }
+                    // 第 3 级：重启模组（AT+CFUN=1,1），代价最大，放在最后
+                    _ => match modem::reboot(&at, &cfg) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!("fm350d: 自愈重启模组失败: {}", e);
+                            false
+                        }
+                    },
+                };
+                eprintln!(
+                    "fm350d: 第 {} 级自愈{}，等待下一轮复核",
+                    level,
+                    if done { "已执行" } else { "执行失败" }
+                );
+                recover_level = level;
+                last_recover = Some(Instant::now());
+                stall_rounds = 0;
+                // 自愈后基线失效，下一轮重新取基准
+                last_health = net::detect_dev(&cfg).and_then(|d| net::data_health(&d));
             }
         }
 

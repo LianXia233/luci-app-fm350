@@ -895,6 +895,45 @@ return view.extend({
 		o.datatype = 'and(port,min(1))';
 		o.default = '8766';
 
+		/* ---------------- 一之二、蜂窝接口与网关 ---------------- */
+		s = m.section(form.NamedSection, 'main', 'fm350', _('蜂窝接口与网关'));
+		s.description = _('RNDIS 数据通道不提供 DHCP，IPv4 由守护静态配置。默认 auto 模式会'
+			+ '按同网段 .1 推导网关并实测其 ARP 是否可解析：可达则按「/24 + 网关」下发默认路由，'
+			+ '不可达自动回退到无网关的 onlink 设备路由（旧行为）。'
+			+ '无网关方案依赖模组对任意公网 IP 做 ARP 代理，部分运营商下会完全不通。');
+		s.anonymous = false;
+
+		o = s.option(form.ListValue, 'gateway_mode', _('网关模式'),
+			_('auto：推导并实测同网段 .1 网关，失败自动回退；static：使用下方指定网关；off：不使用网关（/32 + onlink 直连）'));
+		o.value('auto', _('auto（自动推导并实测）'));
+		o.value('static', _('static（指定网关）'));
+		o.value('off', _('off（无网关 onlink 直连）'));
+		o.default = 'auto';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'gateway', _('静态网关'),
+			_('gateway_mode=static 时必填；auto 模式实测成功后会把实际网关回写到此处，便于排查'));
+		o.datatype = 'ip4addr';
+		o.depends('gateway_mode', 'static');
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'netmask', _('子网掩码'),
+			_('留空表示由网关模式决定：有网关取 255.255.255.0，无网关取 255.255.255.255'));
+		o.datatype = 'ip4addr';
+		o.rmempty = true;
+
+		o = s.option(form.Flag, 'data_guard', _('数据面健康巡检与自愈'),
+			_('网卡出现「tx_errors 持续上涨而 tx_packets 不动」（RNDIS 数据端点 stall）时，'
+				+ '按「复位数据网卡 → 重新拨号 → 重启模组」三级依次恢复，各级之间冷却 5 分钟'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'data_guard_rounds', _('自愈触发轮数'),
+			_('连续多少轮判定数据面无进展才触发自愈，最小 1 轮'));
+		o.datatype = 'and(uinteger,min(1))';
+		o.default = '3';
+		o.depends('data_guard', '1');
+
 		/* ---------------- 二、IPv6 接口 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 接口'));
 		s.description = _('IPv6 地址由守护从模组侧（AT+CGPADDR）读出后静态应用到'
