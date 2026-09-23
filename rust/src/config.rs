@@ -39,10 +39,9 @@ pub struct Config {
     pub metric: u32,
     #[serde(default = "default_ipv6")]
     pub ipv6: bool,
-    /// 是否把上行 IPv6 前缀委派给 LAN（对应 netifd dhcpv6 的 `extendprefix`）。
-    ///
-    /// 默认开启。蜂窝侧通常只下发一个 /64，不置此项时该前缀不会分配给 lan，
-    /// 表现为「WAN 有 IPv6、局域网设备没有」。
+    /// 已废弃（v1.0.3 起）：原为 netifd dhcpv6 的 extendprefix 选项。
+    /// IPv6 已改为守护静态配置（RNDIS 通道无 RA/DHCPv6 可用），本字段仅保留
+    /// 以兼容旧配置读取，后端不再消费。
     #[serde(default = "default_extendprefix")]
     pub extendprefix: bool,
     #[serde(default = "default_auto_dial")]

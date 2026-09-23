@@ -142,7 +142,7 @@ TTY 会话窗口与历史翻阅。
 
 ![服务设置 · 1/3](docs/preview/settings-1.png)
 
-守护进程设置、IPv6 前缀委派、AT 串口管理与占用探测。
+守护进程设置、IPv6 接口、AT 串口管理与占用探测。
 
 ![服务设置 · 2/3](docs/preview/settings-2.png)
 
@@ -207,7 +207,7 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 | 📶 **网络状态** | 网络注册状态、运营商名称与代号、接入制式 (NR/LTE)、RSRP / RSRQ / SINR、频段 / PCI / ARFCN / TAC / 小区 ID、载波聚合状态 (CA) |
 | 🌡️ **温控监测** | 5G 基带核心温度 (`md_5g`)、SoC 峰值温度、**全量 23 路独立硬件传感器明细表**（读数为 0 的通道视为未装配，不计入活跃列表） |
 | 🌐 **蜂窝拨号** | APN 配置、PDP 协议类型 (IPv4/IPv6/IPv4v6)、CID、认证协议、状态侦测、实时 IPv4/IPv6 地址与 DNS 提取 |
-| 🔀 **路由守护** | 自动配置 IPv4 `/32` 静态接口与 IPv6 `dhcpv6` 子接口；把上行 `/64` 前缀委派给 LAN，自愈补齐缺失的默认路由 (`onlink`)，支持 Metric 跃点微调 |
+| 🔀 **路由守护** | 自动配置 IPv4 `/32` 静态接口与 IPv6 `/128` 静态子接口（地址取自模组侧 AT+CGPADDR，不依赖 RA/DHCPv6），自愈补齐缺失的默认路由 (`onlink`)，支持 Metric 跃点微调 |
 | 🔒 **锁网锁频** | 支持 `AT+GTACT` 频段与制式锁定、`AT+EMMCHLCK` 物理小区 (PCI) 锁定，支持指定网络搜索优先级 |
 | 📩 **短信中心** | 规范 PDU 编解码（中文 UCS2、英文 GSM 7-bit 自动适配）、收件箱列表、单条/批量删除、短信存储容量查询 |
 | 🎛️ **硬件控制** | 软件重启模组、飞行模式与在线模式切换、实体双 SIM 卡槽软件倒换、USB 复合模式调整 |
@@ -475,16 +475,16 @@ luci-app-fm350/
 | `cid` | `1` | 激活的目标 PDP Context ID |
 | `auth` | `none` | 认证协议：`none` / `pap` / `chap` |
 | `iface` | `fm350` | IPv4 接口名称（生成于 `/etc/config/network`） |
-| `iface_v6` | `fm350v6` | IPv6 接口名称（关联 `device=@fm350`） |
+| `iface_v6` | `fm350v6` | IPv6 接口名称（静态 proto，关联 `device=@fm350`） |
 | `data_dev` | `auto` | 蜂窝数据通道网卡名称，`auto` 依驱动自动探测 |
 | `metric` | `30` | 下发默认路由的跃点优先级数值 |
 | `ipv6` | `1` | 是否创建并接管 IPv6 子接口 |
-| `extendprefix` | `1` | 是否把上行 IPv6 前缀（通常为 /64）委派给 LAN；关闭后局域网设备无法获得 IPv6 |
+| `extendprefix` | `1` | **已废弃（1.0.3 起）**：原为 netifd dhcpv6 的前缀委派选项，IPv6 改为守护静态配置后不再被消费 |
 | `auto_dial` | `1` | 服务启动后是否自动发起网络拨号 |
 | `route_guard` | `1` | 是否启用默认路由自愈守护 |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
-| `v6_poll_interval` | `300` | 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；`0` 表示关闭独立 V6 轮询 |
-| `v6_refresh_interval` | `1800` | IPv6 子接口定时刷新周期（秒）；`0` 表示关闭定时刷新，失效兜底仍保留 |
+| `v6_poll_interval` | `300` | 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒），发现变化时把模组侧地址静态应用到 IPv6 接口；`0` 表示关闭独立 V6 轮询 |
+| `v6_refresh_interval` | `1800` | IPv6 接口定时校验周期（秒），按需重新应用模组侧地址；`0` 表示关闭定时刷新，失效兜底仍保留 |
 | `api_port` | `8766` | 本地 JSON API 监听端口（仅监听 127.0.0.1） |
 | `imei_write` | `0` | **IMEI 写入全局安全开关**（为 0 时拒绝一切写入操作） |
 
@@ -677,15 +677,15 @@ rm -rf /tmp/luci-modulecache/
   * 仅「拒绝 16 段串」并不够：真实 IPv6 也走这一形态，一律拒绝会让 `pdp.ipv6` 恒为空；而只认冒号形式还会在仅有 IPv6 可用时误判「未激活」并触发重复拨号。后端统一经 `normalize_ipv6()` 解码成标准冒号写法再入库。
   * IPv4 提取仍按「严格 4 段十进制且非 `0.0.0.0`」判定，因此 16 段串不会被误收为 IPv4。
 * **IPv6 占位地址必须显式排除**：IPv6 未分配时模组回 `0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1`（即 `::1`）。它与真实地址结构完全一致，只判「是否 16 段」会把它当成已分配，从而把拨号失败误报为在线。后端排除全零与「仅最低字节为 1」两种占位。
-* **IPv6 前缀默认不会下发到 LAN**：运营商通常只在 PDP 上给一个 /64、不额外下发独立 PD 前缀，而 netifd 的 dhcpv6 协议默认**不**把该 /64 当作可委派前缀 —— 于是出现「WAN 口有 IPv6、局域网设备一律没有」的半残状态。
-  * 修复：v6 子接口置 `extendprefix=1`，由 `/lib/netifd/proto/dhcpv6.sh` 导出 `EXTENDPREFIX`，`/lib/netifd/dhcpv6.script` 再把该 /64 登记为委派前缀并 assign 给 lan。
-  * 前置条件：LAN 侧需启用 IPv6 分配（`network.lan` 的 `ip6assign '64'`）。本插件遵循最小干预原则不代改 lan 配置。
+* **IPv6 由守护静态配置，不走 RA/DHCPv6（1.0.3 起）**：FM350 的 RNDIS 数据通道与不提供 IPv4 DHCP 同理，**不转发运营商的 RA/DHCPv6**——odhcp6c 在该网卡上永远等不到应答，`fm350v6`（dhcpv6 proto）表现为每秒 down/up 循环且永远拿不到地址。现改为与 IPv4 同构的方案：守护从 `AT+CGPADDR` 读出模组侧 IPv6 后，以 `proto=static` + `ip6addr <addr>/128` 写入 `fm350v6`，并用无网关设备路由 `ip -6 route replace default dev <dev>` 补齐默认路由（`route_guard` 周期兜底）。
+  * `extendprefix` 配置项随之废弃：旧方案依赖 netifd dhcpv6 的前缀委派把 /64 分给 LAN，静态方案下不再有该路径；本字段仅保留以兼容旧配置读取，后端不再消费。
+  * LAN 侧下发 IPv6 前缀如需恢复，可在拿到蜂窝 /64 后另行规划（本插件遵循最小干预原则不代改 lan 配置）。
 * **链路本地地址不等于「拿到了 IPv6」**：任何 UP 的网卡都自带 `fe80::`。把它计入状态会让前端长期显示有 IPv6，并让在线判定出现假阳性，故 `status()` 按 `fe80::/10` 过滤。
 * **IPv6 有效期必须看 `valid_lft`**：内核里过期的地址可能还短暂出现在 `ip -o addr` 输出中。系统状态读取会排除 `valid_lft 0sec`；`preferred_lft 0sec` 只表示地址已 deprecated，不适合新连接优先选择，但在 `valid_lft` 归零前仍是可用地址。
 * **模组侧 IPv6 与系统侧 IPv6 是两条路径**：
-  * `v6_poll_interval` 控制“问模组”的周期。守护会定时读取 `AT+CGPADDR=<cid>` / `AT+CGCONTRDP=<cid>`，解析得到最新 `pdp.ipv6`；发现模组侧 IPv6 变化时刷新 `fm350v6`。
-  * `v6_refresh_interval` 控制“刷新系统子接口”的周期。守护会定时执行 `ifup <iface_v6>`，兜住 odhcp6c 异常退出、RA/DHCPv6 状态丢失或地址过期后未自动恢复的情况。
-  * 即使关闭定时刷新（`v6_refresh_interval=0`），只要巡检发现系统侧没有有效全局 IPv6，仍会按最小 60 秒节流尝试刷新 `fm350v6`。
+  * `v6_poll_interval` 控制“问模组”的周期。守护会定时读取 `AT+CGPADDR=<cid>` / `AT+CGCONTRDP=<cid>`，解析得到最新 `pdp.ipv6`；发现模组侧 IPv6 变化时，把该地址静态应用到 `fm350v6` 并补齐设备路由。
+  * `v6_refresh_interval` 控制“校验系统接口”的周期。守护会定时检查 `fm350v6` 是否持有模组侧地址，按需重新写入并 `ifup`，兜住 netifd 状态异常或地址被意外移除的情况。
+  * 即使关闭定时刷新（`v6_refresh_interval=0`），只要巡检发现系统侧没有有效全局 IPv6，仍会按最小 60 秒节流尝试恢复 `fm350v6`。
 </details>
 
 <details>

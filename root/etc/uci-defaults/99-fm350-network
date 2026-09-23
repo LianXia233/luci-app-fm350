@@ -25,8 +25,6 @@ IFACE_V6="$(get_opt iface_v6)"
 [ -n "$IFACE_V6" ] || IFACE_V6=fm350v6
 IPV6="$(get_opt ipv6)"
 [ -n "$IPV6" ] || IPV6=1
-EXTENDPREFIX="$(get_opt extendprefix)"
-[ -n "$EXTENDPREFIX" ] || EXTENDPREFIX=1
 METRIC="$(get_opt metric)"
 [ -n "$METRIC" ] || METRIC=30
 DATA_DEV="$(get_opt data_dev)"
@@ -45,20 +43,21 @@ if [ "$(uci -q get network."$IFACE")" != "interface" ]; then
 fi
 uci -q set network."$IFACE".auto=1
 
-# IPv6 子接口（dhcpv6，附着在主接口上）
+# IPv6 子接口（静态，附着在主接口上；地址由守护从模组侧读出后填入）
+#
+# 历史说明：曾用 proto=dhcpv6（odhcp6c）获取 IPv6，但 FM350 的 RNDIS 通道
+# 不转发运营商 RA/DHCPv6，odhcp6c 永远等不到应答，fm350v6 表现为每秒
+# down/up 循环。现改为与 IPv4 同构的静态方案，地址取自 AT+CGPADDR。
 if [ "$IPV6" = "1" ] && [ -n "$IFACE_V6" ]; then
 	if [ "$(uci -q get network."$IFACE_V6")" != "interface" ]; then
 		uci -q set network."$IFACE_V6"=interface
-		uci -q set network."$IFACE_V6".proto=dhcpv6
+		uci -q set network."$IFACE_V6".proto=static
 		uci -q set network."$IFACE_V6".device="@$IFACE"
-		uci -q set network."$IFACE_V6".reqaddress=try
-		uci -q set network."$IFACE_V6".reqprefix=auto
-		uci -q set network."$IFACE_V6".peerdns=1
-		# 前缀委派：让 netifd 把上行 /64 分配给 lan，否则下游设备拿不到 IPv6
-		if [ "$EXTENDPREFIX" = "1" ]; then
-			uci -q set network."$IFACE_V6".extendprefix=1
-		fi
 	fi
+	# 清理 dhcpv6 时代的遗留选项（缺省项 uci -q delete 静默跳过）
+	for stale in reqaddress reqprefix peerdns extendprefix; do
+		uci -q delete network."$IFACE_V6".$stale
+	done
 	uci -q set network."$IFACE_V6".auto=1
 fi
 
