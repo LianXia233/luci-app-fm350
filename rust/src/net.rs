@@ -6,7 +6,13 @@
 //!   - 由于没有网关，netifd 不会下发设备路由，需要额外一条
 //!     `default dev <dev> metric <m> onlink` 并周期补齐（route guard）。
 //!
-//! IPv6 通过 `device=@fm350` 的 dhcpv6 子接口获取。
+//! IPv6 与 IPv4 同构：地址取自模组侧 `AT+CGPADDR`（守护读出后静态写入），
+//! 默认路由用无网关的设备路由（`default dev <dev>`）并由 route_guard 周期补齐。
+//!
+//! 为什么不走 dhcpv6（odhcp6c）：FM350 的 RNDIS 数据通道与 IPv4 一样**不转发
+//! 运营商的 RA/DHCPv6**（实机 tcpdump 无任何 ICMPv6 RS/RA 往来），odhcp6c 在该
+//! 网卡上永远等不到应答，netifd 表现为 fm350v6 每秒 down/up 循环（实机日志复现）。
+//! 因此 IPv6 完全由本插件后端自行实现，不依赖任何外部 IPv6 客户端。
 //!
 //! 接口、路由与防火墙区段均由本插件独立创建与管理。
 
@@ -135,6 +141,7 @@ fn uci_batch(lines: &[String]) -> Vec<(String, bool, String)> {
 pub fn ensure_iface(
     cfg: &Config,
     ipv4: &str,
+    ipv6: &str,
     dns: &[String],
 ) -> Result<(String, String, Vec<String>), String> {
     let dev = detect_dev(cfg).ok_or_else(|| "未探测到数据通道网卡".to_string())?;
@@ -163,26 +170,26 @@ pub fn ensure_iface(
     cmds.push(format!("set network.{}.metric={}", iface, cfg.metric));
     cmds.push(format!("set network.{}.defaultroute=1", iface));
 
-    // ---- IPv6（dhcpv6，附着在主接口上）
+    // ---- IPv6（静态，附着在主接口设备上的独立接口）
+    //
+    // 地址由守护从模组侧（AT+CGPADDR / AT+CGCONTRDP）读出后静态写入，
+    // 不走 dhcpv6/odhcp6c —— RNDIS 通道不转发 RA/DHCPv6，见模块头注释。
+    // 掩码固定 /128，与 IPv4 的 /32 对称：不产生直连路由，默认路由走设备路由。
     if cfg.ipv6 && !iface_v6.is_empty() {
         cmds.push(format!("set network.{}=interface", iface_v6));
-        cmds.push(format!("set network.{}.proto=dhcpv6", iface_v6));
+        cmds.push(format!("set network.{}.proto=static", iface_v6));
         cmds.push(format!("set network.{}.device=@{}", iface_v6, iface));
-        cmds.push(format!("set network.{}.reqaddress=try", iface_v6));
-        cmds.push(format!("set network.{}.reqprefix=auto", iface_v6));
-        cmds.push(format!("set network.{}.peerdns=1", iface_v6));
-        // 前缀委派：把上行拿到的 /64 交给 LAN。
-        //
-        // 蜂窝运营商多数只在 PDP 上给一个 /64，不额外下发独立 PD 前缀。netifd 的
-        // dhcpv6 协议默认**不会**把这个 /64 当作可委派前缀，于是出现「WAN 口有
-        // IPv6、局域网设备却一律拿不到」的半残状态：接口自己由 odhcp6c 收到 RA
-        // 后有了地址，前缀却没有 class 归属，dhcpv6.script 无从下发给 lan。
-        //
-        // 置 extendprefix=1 后，/lib/netifd/proto/dhcpv6.sh 导出 EXTENDPREFIX=1，
-        // 由 /lib/netifd/dhcpv6.script 在「收到 /64 且无 PD 前缀」时把该 /64
-        // 登记为委派前缀并 assign 给 lan。
-        if cfg.extendprefix {
-            cmds.push(format!("set network.{}.extendprefix=1", iface_v6));
+        // 清理 dhcpv6 时代的遗留选项：proto 已切 static，留着既无意义也会误导。
+        // delete 必须带 `|| true`：uci 对不存在的选项即使 -q 也返回非零，
+        // 会让整批写入被误判失败（实机踩过）。
+        for stale in ["reqaddress", "reqprefix", "peerdns", "extendprefix"] {
+            cmds.push(format!(
+                "uci -q delete network.{}.{} 2>/dev/null || true",
+                iface_v6, stale
+            ));
+        }
+        if !ipv6.is_empty() {
+            cmds.push(format!("set network.{}.ip6addr={}/128", iface_v6, ipv6));
         }
         // 同主接口：缺省 auto 时 netifd 不开机自启（LuCI 显示「开机时未启动」）。
         cmds.push(format!("set network.{}.auto=1", iface_v6));
@@ -242,6 +249,11 @@ pub fn ensure_iface(
         if !up_ok6 {
             eprintln!("fm350d: ifup {} 失败（rc!=0）: {}", iface_v6, up_out6);
         }
+        // IPv6 默认路由：无网关设备路由，netifd 不会为静态地址自动下发
+        let _ = real(&format!(
+            "ip -6 route replace default dev {} metric {}",
+            dev, cfg.metric
+        ));
     }
     let _ = real(&format!(
         "ip route replace default dev {} metric {}",
@@ -384,8 +396,9 @@ fn is_link_local_v6(ip: &str) -> bool {
 
 /// IPv6 子接口刷新：用于守护发现全局 IPv6 消失或有效期归零后的自恢复。
 ///
-/// 正常续租由 netifd/odhcp6c 负责；这里是兜底，让 odhcp6c 异常退出、
-/// RA/DHCPv6 状态丢失或地址过期被内核移除时，下一轮巡检能重新拉起 fm350v6。
+/// 正常情况下静态地址常驻内核；这里是兜底，让 netifd 状态异常或地址被
+/// 意外移除时，下一轮巡检能重新拉起 fm350v6（ifup static 会重新应用
+/// uci 里已记录的 ip6addr）。
 pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
     if !cfg.ipv6 || cfg.iface_v6.is_empty() {
         return false;
@@ -394,9 +407,62 @@ pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
     ok
 }
 
+/// 把模组侧 IPv6 地址写入 v6 接口（静态）并补齐设备路由。
+///
+/// 与 [`ensure_iface`] 的区别：本函数只处理 IPv6 一侧，供守护在「模组侧
+/// IPv6 变化」或「接口缺地址」时调用，避免为补一个 v6 地址而整批重写
+/// IPv4 配置。地址变化时才会真正写 uci；proto 每次都会校验为 static
+/// （兜底迁移旧的 dhcpv6 配置）。
+///
+/// 返回是否执行了写入/刷新动作。
+pub fn apply_ipv6_addr(cfg: &Config, ipv6: &str) -> bool {
+    if !cfg.ipv6 || cfg.iface_v6.is_empty() || ipv6.is_empty() {
+        return false;
+    }
+    let iface_v6 = &cfg.iface_v6;
+    let dev = match detect_dev(cfg) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    let mut cmds: Vec<String> = Vec::new();
+    // section 缺失时 uci set <name>.<opt> 会报错，先确保接口存在
+    let (ok_sec, sec) = real(&format!("uci -q get network.{}", iface_v6));
+    if !ok_sec || sec.trim() != "interface" {
+        cmds.push(format!("set network.{}=interface", iface_v6));
+    }
+    // proto 兜底校正为 static（从 dhcpv6 旧配置升级的场景）
+    let (ok_proto, proto) = real(&format!("uci -q get network.{}.proto", iface_v6));
+    if !ok_proto || proto.trim() != "static" {
+        cmds.push(format!("set network.{}.proto=static", iface_v6));
+    }
+    for stale in ["reqaddress", "reqprefix", "peerdns", "extendprefix"] {
+        cmds.push(format!("delete network.{}.{}", iface_v6, stale));
+    }
+    // 设备归属同样兜底（@<主接口>），防止历史配置指向错误设备
+    let iface = &cfg.iface;
+    let (ok_dev, cur_dev) = real(&format!("uci -q get network.{}.device", iface_v6));
+    if !ok_dev || cur_dev.trim() != format!("@{}", iface) {
+        cmds.push(format!("set network.{}.device=@{}", iface_v6, iface));
+    }
+    cmds.push(format!("set network.{}.ip6addr={}/128", iface_v6, ipv6));
+    cmds.push(format!("set network.{}.auto=1", iface_v6));
+
+    for c in &cmds {
+        let _ = uci(c);
+    }
+    let _ = real("uci commit network");
+    let _ = real(&format!("ifup {}", iface_v6));
+    let _ = real(&format!(
+        "ip -6 route replace default dev {} metric {}",
+        dev, cfg.metric
+    ));
+    true
+}
+
 /// 路由守护：netifd 不会为无网关接口下发设备路由，这里周期补齐。
 ///
-/// 返回是否执行了补齐动作。
+/// IPv4 与 IPv6 各自独立检查；返回是否执行了补齐动作。
 pub fn route_guard(cfg: &Config) -> bool {
     if !cfg.route_guard {
         return false;
@@ -405,21 +471,48 @@ pub fn route_guard(cfg: &Config) -> bool {
         Some(d) => d,
         None => return false,
     };
-    // 只有当接口确实拿到地址时才补路由，避免空路由污染主表
+    let mut acted = false;
+
+    // ---- IPv4：只有当接口确实拿到地址时才补路由，避免空路由污染主表
     let (_, out) = real(&format!("ip -o -4 addr show dev {} 2>/dev/null", dev));
-    if !out.contains("inet ") {
-        return false;
+    if out.contains("inet ") {
+        let wanted = format!("default dev {} metric {}", dev, cfg.metric);
+        let (_, routes) = real(&format!("ip route show dev {} 2>/dev/null", dev));
+        if !routes
+            .lines()
+            .any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric)))
+        {
+            let (ok, _) = real(&format!("ip route replace {}", wanted));
+            acted = acted || ok;
+        }
     }
-    let wanted = format!("default dev {} metric {}", dev, cfg.metric);
-    let (_, routes) = real(&format!("ip route show dev {} 2>/dev/null", dev));
-    if routes
-        .lines()
-        .any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric)))
-    {
-        return false;
+
+    // ---- IPv6：静态地址同样无网关，默认路由需要周期补齐。
+    // 只有当设备上确有全局 IPv6 地址时才补（link-local 不算）。
+    if cfg.ipv6 {
+        let (_, out6) = real(&format!("ip -o -6 addr show dev {} 2>/dev/null", dev));
+        let has_global_v6 = out6
+            .lines()
+            .filter(|l| l.contains("inet6 "))
+            .filter_map(|l| usable_global_v6_from_addr_line(l))
+            .next()
+            .is_some();
+        if has_global_v6 {
+            let (_, routes6) = real(&format!("ip -6 route show dev {} 2>/dev/null", dev));
+            if !routes6
+                .lines()
+                .any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric)))
+            {
+                let (ok6, _) = real(&format!(
+                    "ip -6 route replace default dev {} metric {}",
+                    dev, cfg.metric
+                ));
+                acted = acted || ok6;
+            }
+        }
     }
-    let (ok, _) = real(&format!("ip route replace {}", wanted));
-    ok
+
+    acted
 }
 
 /// 保证插件创建的接口处于「开机自启」状态。
@@ -463,11 +556,16 @@ pub fn ensure_autostart(cfg: &Config) -> Vec<String> {
 }
 
 /// 拔号成功后一次性把网络拉起。
-pub fn apply_after_dial(cfg: &Config, ipv4: &str, dns: &[String]) -> Result<NetStatus, String> {
+pub fn apply_after_dial(
+    cfg: &Config,
+    ipv4: &str,
+    ipv6: &str,
+    dns: &[String],
+) -> Result<NetStatus, String> {
     if ipv4.is_empty() {
         return Err("缺少 IPv4 地址，无法配置接口".to_string());
     }
-    ensure_iface(cfg, ipv4, dns)?;
+    ensure_iface(cfg, ipv4, ipv6, dns)?;
 
     // `ifup` 是异步的：netifd 受理后，地址要过一会儿才落进内核。
     // 直接读一次 status() 常常读到空地址，于是把「刚拨上」误报成失败
@@ -539,18 +637,17 @@ mod tests {
     }
 
     #[test]
-    fn extendprefix_option_is_emitted_when_enabled() {
+    fn static_v6_addr_option_is_formatted_correctly() {
         let cfg = Config {
             ipv6: true,
             iface: "fm350".to_string(),
             iface_v6: "fm350v6".to_string(),
-            extendprefix: true,
             ..Default::default()
         };
         // 只校验选项拼装逻辑，不触碰真实 uci：用 Dry 模式回显
-        let script = format!("set network.{}.extendprefix=1", cfg.iface_v6);
+        let script = format!("set network.{}.ip6addr={}/128", cfg.iface_v6, "2409:8057:2000::8");
         let (ok, out) = sh(RunMode::Dry, &script);
         assert!(ok);
-        assert_eq!(out, "set network.fm350v6.extendprefix=1");
+        assert_eq!(out, "set network.fm350v6.ip6addr=2409:8057:2000::8/128");
     }
 }

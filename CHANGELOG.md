@@ -2,6 +2,37 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.3-r1
+
+IPv6 获取路线重构：**放弃 dhcpv6（odhcp6c），改由守护静态配置模组侧 IPv6**，
+修复「拨号页显示存在 IPv6、接口实际永远拿不到地址」的问题。
+
+### 根因
+
+FM350 的 RNDIS 数据通道与不提供 IPv4 DHCP 同理，**不转发运营商的 RA/DHCPv6**。
+此前 `fm350v6` 使用 `proto=dhcpv6`（odhcp6c）获取地址，odhcp6c 在该网卡上永远
+等不到应答，netifd 表现为 `fm350v6` 每秒 down/up 循环（实机日志复现），接口
+始终拿不到 IPv6；而拨号页显示的 IPv6 来自模组侧 `AT+CGPADDR`，于是出现
+「页面显示有 V6、接口没有 V6」的割裂状态。
+
+### 变更
+
+- **IPv6 静态化**：守护从 `AT+CGPADDR` 读出模组侧 IPv6 后，以
+  `proto=static` + `ip6addr <addr>/128` 写入 `fm350v6`（附着 `@fm350` 设备），
+  与 IPv4 的 `/32` 静态方案同构。
+- **IPv6 默认路由自愈**：无网关设备路由
+  `ip -6 route replace default dev <dev> metric <m>` 在拨号后下发，
+  `route_guard` 按周期为 v4 / v6 各自补齐。
+- **守护新增 `apply_ipv6_addr()`**：模组侧 IPv6 变化、接口未持有模组侧地址、
+  或无有效全局 IPv6 时，直接把最新模组侧地址写入接口并补路由；
+  拨号接口 `/api/dial` 与 CLI `fm350d dial` 同步传递 `pdp.ipv6`。
+- **配置迁移**：升级或重装时自动把旧 `dhcpv6` 配置迁移为 `static`，
+  并清理 `reqaddress` / `reqprefix` / `peerdns` / `extendprefix` 遗留选项
+  （uci-defaults 与守护双路径兜底）。
+- **设置页**：`extendprefix`（向下委派 IPv6 前缀）开关随静态化方案移除，
+  IPv6 区块更名为「IPv6 接口」并更新说明。
+- **配置项 `extendprefix` 废弃**：仅保留字段以兼容旧配置读取，后端不再消费。
+
 ## 1.0.2-r1
 
 增强 IPv6 地址有效性判断与自动恢复策略，补齐“从模组定时轮询最新 IPv6”和

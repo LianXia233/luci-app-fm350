@@ -198,10 +198,10 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
                     eprintln!("fm350d: 模组侧 IPv6 更新为 {}", st.ipv6);
                     last_modem_ipv6 = st.ipv6.clone();
-                    if net::refresh_ipv6_iface(&cfg) {
-                        eprintln!("fm350d: 模组侧 IPv6 变化，已刷新 {}", cfg.iface_v6);
+                    if net::apply_ipv6_addr(&cfg, &st.ipv6) {
+                        eprintln!("fm350d: 模组侧 IPv6 变化，已应用到 {}", cfg.iface_v6);
                     } else {
-                        eprintln!("fm350d: 模组侧 IPv6 变化，刷新 {} 失败", cfg.iface_v6);
+                        eprintln!("fm350d: 模组侧 IPv6 变化，应用 {} 失败", cfg.iface_v6);
                     }
                     let now = Instant::now();
                     last_v6_refresh = Some(now);
@@ -218,7 +218,7 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                         if p.ipv4.is_empty() {
                             eprintln!("fm350d: 拨号成功但未取得 IPv4，稍后重试");
                         } else {
-                            match net::apply_after_dial(&cfg, &p.ipv4, &p.dns) {
+                            match net::apply_after_dial(&cfg, &p.ipv4, &p.ipv6, &p.dns) {
                                 Ok(n) => eprintln!("fm350d: 已拨号并配置网络 {:?}", n.ipv4),
                                 Err(e) => eprintln!("fm350d: 配置网络失败: {}", e),
                             }
@@ -233,7 +233,7 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 // 成功时只在确有偏差的那一轮打印，不会每 30 s 刷屏。
                 let ns = net::status(&cfg);
                 if !ns.ipv4.contains(&st.ipv4) {
-                    match net::apply_after_dial(&cfg, &st.ipv4, &st.dns) {
+                    match net::apply_after_dial(&cfg, &st.ipv4, &st.ipv6, &st.dns) {
                         Ok(n) => eprintln!(
                             "fm350d: 接口缺失或地址变化，已重新应用网络配置 {:?}",
                             n.ipv4
@@ -242,22 +242,33 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                     }
                 }
                 if cfg.ipv6 && !cfg.iface_v6.is_empty() {
-                    let missing_valid_v6 = ns.ipv6.is_empty();
+                    // 模组侧有 IPv6 而接口上没有（或不是同一个地址）时，
+                    // 直接把模组侧地址静态写入并补设备路由 —— 静态方案下
+                    // 「刷新」的意义就是重新应用模组侧地址，而非 ifup 空转。
+                    let v6_missing = !st.ipv6.is_empty()
+                        && !ns.ipv6.iter().any(|a| a == &st.ipv6);
                     let v6_refresh_due = cfg.v6_refresh_interval > 0
                         && last_v6_scheduled_refresh.elapsed()
                             >= Duration::from_secs(cfg.v6_refresh_interval.max(60));
-                    let v6_recovery_due = missing_valid_v6
+                    let v6_recovery_due = ns.ipv6.is_empty()
                         && last_v6_refresh
                             .map(|t| t.elapsed() >= V6_REFRESH_MIN_INTERVAL)
                             .unwrap_or(true);
 
-                    if v6_refresh_due || v6_recovery_due {
-                        let reason = if v6_recovery_due {
+                    if v6_missing || v6_recovery_due || v6_refresh_due {
+                        let reason = if v6_missing {
+                            "接口未持有模组侧 IPv6"
+                        } else if v6_recovery_due {
                             "未发现有效全局 IPv6"
                         } else {
                             "到达 IPv6 定时刷新周期"
                         };
-                        if net::refresh_ipv6_iface(&cfg) {
+                        let done = if st.ipv6.is_empty() {
+                            net::refresh_ipv6_iface(&cfg)
+                        } else {
+                            net::apply_ipv6_addr(&cfg, &st.ipv6)
+                        };
+                        if done {
                             eprintln!("fm350d: {}，已刷新 {}", reason, cfg.iface_v6);
                         } else {
                             eprintln!("fm350d: {}，刷新 {} 失败", reason, cfg.iface_v6);
@@ -281,10 +292,10 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
             if !st.ipv6.is_empty() && st.ipv6 != last_modem_ipv6 {
                 eprintln!("fm350d: 模组侧 IPv6 更新为 {}", st.ipv6);
                 last_modem_ipv6 = st.ipv6.clone();
-                if net::refresh_ipv6_iface(&cfg) {
-                    eprintln!("fm350d: 模组侧 IPv6 变化，已刷新 {}", cfg.iface_v6);
+                if net::apply_ipv6_addr(&cfg, &st.ipv6) {
+                    eprintln!("fm350d: 模组侧 IPv6 变化，已应用到 {}", cfg.iface_v6);
                 } else {
-                    eprintln!("fm350d: 模组侧 IPv6 变化，刷新 {} 失败", cfg.iface_v6);
+                    eprintln!("fm350d: 模组侧 IPv6 变化，应用 {} 失败", cfg.iface_v6);
                 }
                 let now = Instant::now();
                 last_v6_refresh = Some(now);
@@ -431,7 +442,7 @@ fn main() {
             Some(&Json::Null),
             |a, c| match modem::dial(a, c) {
                 Ok(p) => {
-                    let n = net::apply_after_dial(c, &p.ipv4, &p.dns);
+                    let n = net::apply_after_dial(c, &p.ipv4, &p.ipv6, &p.dns);
                     serde_json::json!({ "ok": true, "pdp": p, "net": n.ok() })
                 }
                 Err(e) => serde_json::json!({ "ok": false, "error": e }),

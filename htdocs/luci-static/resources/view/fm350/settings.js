@@ -895,11 +895,10 @@ return view.extend({
 		o.datatype = 'and(port,min(1))';
 		o.default = '8766';
 
-		/* ---------------- 二、IPv6 前缀委派 ---------------- */
-		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 前缀委派'));
-		s.description = _('蜂窝运营商通常只下发一个 /64 前缀。'
-			+ '开启委派后该前缀会分配给 LAN，局域网设备也能获得 IPv6 地址；'
-			+ '关闭则只有路由器自身的蜂窝接口持有 IPv6。'
+		/* ---------------- 二、IPv6 接口 ---------------- */
+		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 接口'));
+		s.description = _('IPv6 地址由守护从模组侧（AT+CGPADDR）读出后静态应用到'
+			+ '蜂窝接口，不依赖 RA/DHCPv6（FM350 的 RNDIS 数据通道不转发）。'
 			+ '修改保存后需重新拨号（或重启服务）才会生效。');
 		s.anonymous = false;
 
@@ -908,15 +907,8 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'extendprefix', _('向下委派 IPv6 前缀'),
-			_('把上行 /64 前缀分配给 LAN（netifd extendprefix）。'
-				+ '仅当运营商确实下发前缀时才会生效'));
-		o.default = '1';
-		o.rmempty = false;
-		o.depends('ipv6', '1');
-
 		o = s.option(form.Value, 'v6_poll_interval', _('IPv6 模组轮询周期（秒）'),
-			_('守护进程会按此周期通过 AT+CGPADDR/AT+CGCONTRDP 读取模组侧最新 IPv6；发现模组侧 IPv6 变化时会刷新 IPv6 子接口。设为 0 可关闭独立 V6 轮询'));
+			_('守护进程会按此周期通过 AT+CGPADDR/AT+CGCONTRDP 读取模组侧最新 IPv6；发现模组侧 IPv6 变化时会把它静态应用到 IPv6 接口。设为 0 可关闭独立 V6 轮询'));
 		o.datatype = 'uinteger';
 		o.validate = function(section_id, value) {
 			var n = parseInt(value, 10);
@@ -929,7 +921,7 @@ return view.extend({
 		o.depends('ipv6', '1');
 
 		o = s.option(form.Value, 'v6_refresh_interval', _('IPv6 定时刷新周期（秒）'),
-			_('守护进程会按此周期刷新 IPv6 子接口，避免 RA/DHCPv6 状态异常导致地址过期后不恢复；设为 0 可关闭定时刷新。即使关闭，巡检发现没有有效全局 IPv6 时仍会自动刷新'));
+			_('守护进程会按此周期校验接口上的 IPv6 地址并按需重新应用模组侧地址；设为 0 可关闭定时刷新。即使关闭，巡检发现没有有效全局 IPv6 时仍会自动恢复'));
 		o.datatype = 'uinteger';
 		o.validate = function(section_id, value) {
 			var n = parseInt(value, 10);
