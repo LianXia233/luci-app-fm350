@@ -291,9 +291,8 @@ pub fn ensure_iface(
     // 掩码固定 /128，与 IPv4 的 /32 对称：不产生直连路由，默认路由走设备路由。
     if cfg.ipv6 && !iface_v6.is_empty() {
         cmds.push(format!("set network.{}=interface", iface_v6));
-        cmds.push(format!("set network.{}.proto=static", iface_v6));
         cmds.push(format!("set network.{}.device=@{}", iface_v6, iface));
-        // 清理 dhcpv6 时代的遗留选项：proto 已切 static，留着既无意义也会误导。
+        // 清理 dhcpv6 时代的遗留选项：proto 已切 static/none，留着既无意义也会误导。
         // delete 必须带 `|| true`：uci 对不存在的选项即使 -q 也返回非零，
         // 会让整批写入被误判失败（实机踩过）。
         for stale in ["reqaddress", "reqprefix", "peerdns", "extendprefix"] {
@@ -302,8 +301,29 @@ pub fn ensure_iface(
                 iface_v6, stale
             ));
         }
-        if !ipv6.is_empty() {
-            cmds.push(format!("set network.{}.ip6addr={}/128", iface_v6, ipv6));
+        if v6_ra_mode(cfg) {
+            // RA 模式：只打开 accept_ra，绝不写静态 /128 —— 模组侧
+            // `AT+CGCONTRDP` 在上下文去激活后仍返回上一轮的残留地址，照抄会
+            // 配出一个根本不属于本会话的 v6 地址。
+            cmds.push(format!("set network.{}.proto=none", iface_v6));
+            shell_cmds.push(format!(
+                "uci -q delete network.{}.ip6addr 2>/dev/null || true",
+                iface_v6
+            ));
+            shell_cmds.push(format!(
+                "sysctl -w net.ipv6.conf.{}.accept_ra=2 >/dev/null 2>&1 || true", dev
+            ));
+            shell_cmds.push(format!(
+                "sysctl -w net.ipv6.conf.{}.accept_ra_defrtr=1 >/dev/null 2>&1 || true", dev
+            ));
+            shell_cmds.push(format!(
+                "sysctl -w net.ipv6.conf.{}.accept_ra_pinfo=1 >/dev/null 2>&1 || true", dev
+            ));
+        } else {
+            cmds.push(format!("set network.{}.proto=static", iface_v6));
+            if !ipv6.is_empty() {
+                cmds.push(format!("set network.{}.ip6addr={}/128", iface_v6, ipv6));
+            }
         }
         // 同主接口：缺省 auto 时 netifd 不开机自启（LuCI 显示「开机时未启动」）。
         cmds.push(format!("set network.{}.auto=1", iface_v6));
@@ -581,11 +601,80 @@ fn is_link_local_v6(ip: &str) -> bool {
 /// 意外移除时，下一轮巡检能重新拉起 fm350v6（ifup static 会重新应用
 /// uci 里已记录的 ip6addr）。
 pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
-    if !cfg.ipv6 || cfg.iface_v6.is_empty() {
+    if !v6_managed(cfg) {
         return false;
+    }
+    if v6_ra_mode(cfg) {
+        if let Some(dev) = detect_dev(cfg) {
+            enable_v6_ra(&dev);
+            ensure_v6_ra_proto(cfg);
+        }
     }
     let (ok, _) = real(&format!("ifup {}", cfg.iface_v6));
     ok
+}
+
+/// IPv6 是否交由本插件托管（`ipv6=1` 且 `v6_mode != off`）。
+pub fn v6_managed(cfg: &Config) -> bool {
+    cfg.ipv6 && !cfg.iface_v6.is_empty() && cfg.v6_mode != "off"
+}
+
+/// 是否走 RA 模式：`v6_mode` 为 `ra`（默认）或未识别值时都按 RA 处理，
+/// 只有显式 `static` 才回落到旧的静态方案。
+pub fn v6_ra_mode(cfg: &Config) -> bool {
+    cfg.ipv6 && cfg.v6_mode != "static" && cfg.v6_mode != "off"
+}
+
+/// 打开数据网卡的 IPv6 RA 接收。
+///
+/// 为什么必须是 `accept_ra=2`：蜂窝接口被 netifd 放进 WAN 区后
+/// `net.ipv6.conf.<dev>.forwarding=1`，内核默认（`accept_ra=1`）会**直接丢弃**
+/// 所有 RA。只有 2 表示「即使开了转发也接收 RA」。实机正是卡在这里：
+/// 模组一直在发 RA（`ip -6 neigh` 里能看到 router 标记），但内核一条都不处理。
+pub fn enable_v6_ra(dev: &str) -> bool {
+    let mut ok = true;
+    for c in [
+        format!("sysctl -w net.ipv6.conf.{}.accept_ra=2", dev),
+        format!("sysctl -w net.ipv6.conf.{}.accept_ra_defrtr=1", dev),
+        format!("sysctl -w net.ipv6.conf.{}.accept_ra_pinfo=1", dev),
+    ] {
+        let (o, _) = real(&format!("{} >/dev/null 2>&1 || true", c));
+        ok = ok && o;
+    }
+    ok
+}
+
+/// 内核是否已按 RA 拿到 IPv6（默认路由或 SLAAC 地址）。
+pub fn ra_v6_ready(dev: &str) -> bool {
+    let (_, routes) = real(&format!("ip -6 route show default dev {} 2>/dev/null", dev));
+    if routes
+        .lines()
+        .any(|l| l.trim().starts_with("default") && l.contains("proto ra"))
+    {
+        return true;
+    }
+    let (_, addrs) = real(&format!("ip -o -6 addr show dev {} 2>/dev/null", dev));
+    addrs
+        .lines()
+        .any(|l| l.contains("inet6 ") && l.contains("proto kernel_ra"))
+}
+
+/// RA 模式下把 v6 子接口切成「不托管地址」的形态，并清掉历史静态地址。
+///
+/// `proto=none` 让 netifd 只把设备拉起、不写任何地址，地址与默认路由全部
+/// 交给内核按 RA 处理 —— 这样插件那条 `default dev <dev> metric <m>` 就不会
+/// 以更低 metric 压过 RA 下发的 `default via fe80::2 metric 1024`。
+fn ensure_v6_ra_proto(cfg: &Config) {
+    let iface_v6 = &cfg.iface_v6;
+    let (ok_proto, proto) = real(&format!("uci -q get network.{}.proto", iface_v6));
+    if !ok_proto || proto.trim() != "none" {
+        let _ = uci(&format!("set network.{}.proto=none", iface_v6));
+    }
+    let _ = real(&format!(
+        "uci -q delete network.{}.ip6addr 2>/dev/null || true",
+        iface_v6
+    ));
+    let _ = real("uci commit network");
 }
 
 /// 把模组侧 IPv6 地址写入 v6 接口（静态）并补齐设备路由。
@@ -597,7 +686,7 @@ pub fn refresh_ipv6_iface(cfg: &Config) -> bool {
 ///
 /// 返回是否执行了写入/刷新动作。
 pub fn apply_ipv6_addr(cfg: &Config, ipv6: &str) -> bool {
-    if !cfg.ipv6 || cfg.iface_v6.is_empty() || ipv6.is_empty() {
+    if !v6_managed(cfg) || ipv6.is_empty() {
         return false;
     }
     let iface_v6 = &cfg.iface_v6;
@@ -605,6 +694,22 @@ pub fn apply_ipv6_addr(cfg: &Config, ipv6: &str) -> bool {
         Some(d) => d,
         None => return false,
     };
+
+    // RA 模式：地址与默认路由由内核按运营商 RA 处理，插件不写静态 /128。
+    // 只有当 RA 迟迟不来（个别固件/运营商确实不转发 RA）时才回落到静态方案。
+    if v6_ra_mode(cfg) {
+        enable_v6_ra(&dev);
+        ensure_v6_ra_proto(cfg);
+        if ra_v6_ready(&dev) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        enable_v6_ra(&dev);
+        if ra_v6_ready(&dev) {
+            return true;
+        }
+        eprintln!("fm350d: 未收到运营商 RA，回落到模组侧静态 IPv6");
+    }
 
     let mut cmds: Vec<String> = Vec::new();
     // section 缺失时 uci set <name>.<opt> 会报错，先确保接口存在
@@ -673,7 +778,13 @@ pub fn route_guard(cfg: &Config) -> bool {
 
     // ---- IPv6：静态地址同样无网关，默认路由需要周期补齐。
     // 只有当设备上确有全局 IPv6 地址时才补（link-local 不算）。
-    if cfg.ipv6 {
+    if v6_managed(cfg) {
+        // RA 模式下每轮兜底打开 accept_ra：USB 复位/网卡重建后 sysctl 会回到
+        // 默认值，而 forwarding=1 时默认值 0 会让内核彻底丢弃 RA。
+        let ra = v6_ra_mode(cfg);
+        if ra {
+            enable_v6_ra(&dev);
+        }
         let (_, out6) = real(&format!("ip -o -6 addr show dev {} 2>/dev/null", dev));
         let has_global_v6 = out6
             .lines()
@@ -682,22 +793,51 @@ pub fn route_guard(cfg: &Config) -> bool {
             .next()
             .is_some();
         if has_global_v6 {
+            // RA 路由由内核按 RA 下发，metric 固定 1024（`proto ra`）。
+            // 这里维护的 onlink 路由只是**兜底**：metric 取 2048，比 RA 差，
+            // 所以 RA 在时由 RA 优先，RA 还没来（或 netifd 重启把 RA 路由冲掉
+            // 到下一轮 RA 到达之间）时由它兜住流量。
+            //
+            // 为什么不直接删掉 onlink 路由：实机观察到 RA 路由会被 ifdown/ifup
+            // 冲掉、且要等下一次 RA（最长数百秒）才回来，删除会造成
+            // 「默认路由真空」，`ping -6` 直接报 Network unreachable。
+            // 为什么不把 onlink 放在低 metric：那会压过 RA 路由，强制主机对
+            // 每个目的地址直接发 NS，完全依赖模组做 NDP 代理。
+            let metric6 = if ra { V6_FALLBACK_METRIC } else { cfg.metric };
             let (_, routes6) = real(&format!("ip -6 route show dev {} 2>/dev/null", dev));
-            if !routes6
-                .lines()
-                .any(|l| l.trim().starts_with("default") && l.contains(&format!("metric {}", cfg.metric)))
-            {
-                let (ok6, _) = real(&format!(
-                    "ip -6 route replace default dev {} metric {}",
-                    dev, cfg.metric
-                ));
+            let wanted6 = format!("default dev {} metric {}", dev, metric6);
+            let has_wanted = routes6.lines().any(|l| {
+                l.trim().starts_with("default") && l.contains(&format!("metric {}", metric6))
+            });
+            if !has_wanted {
+                let (ok6, _) = real(&format!("ip -6 route replace {}", wanted6));
                 acted = acted || ok6;
+            }
+            // 迁移：清掉旧版本写在 cfg.metric 上的 onlink 路由，否则它比 RA 优先生效。
+            if ra && metric6 != cfg.metric {
+                let stale = routes6.lines().any(|l| {
+                    l.trim().starts_with("default")
+                        && !l.contains(" via ")
+                        && l.contains(&format!("metric {}", cfg.metric))
+                });
+                if stale {
+                    let _ = real(&format!(
+                        "ip -6 route del default dev {} metric {} 2>/dev/null || true",
+                        dev, cfg.metric
+                    ));
+                    acted = true;
+                }
             }
         }
     }
 
     acted
 }
+
+/// RA 模式下 onlink 兜底 IPv6 默认路由的 metric。
+///
+/// 必须大于内核按 RA 下发默认路由的 metric（1024），否则兜底路由会压过 RA 路由。
+const V6_FALLBACK_METRIC: u32 = 2048;
 
 /// 保证插件创建的接口处于「开机自启」状态。
 ///
