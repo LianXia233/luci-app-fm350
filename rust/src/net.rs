@@ -304,7 +304,7 @@ pub fn ensure_iface(
         if v6_dhcp_mode(cfg) {
             // DHCPv6 模式：交给 odhcp6c（不写静态 /128，也不碰 sysctl）。
             // extendprefix=1 让 odhcp6c 拿到的 /64 能委派给 LAN，内网设备
-            // 也能用上 IPv6 —— QModem 就是这个做法，实机已验证。
+            // 也能用上 IPv6 —— 主流第三方插件就是这个做法，实机已验证。
             cmds.push(format!("set network.{}.proto=dhcpv6", iface_v6));
             cmds.push(format!("set network.{}.extendprefix=1", iface_v6));
             shell_cmds.push(format!(
@@ -637,11 +637,11 @@ pub fn v6_ra_mode(cfg: &Config) -> bool {
     cfg.ipv6 && !matches!(cfg.v6_mode.as_str(), "static" | "dhcpv6" | "off")
 }
 
-/// 是否走 DHCPv6 模式：把 IPv6 交给 netifd 的 odhcp6c（与 QModem 同款做法）。
+/// 是否走 DHCPv6 模式：把 IPv6 交给 netifd 的 odhcp6c（与主流第三方插件同款做法）。
 ///
 /// 为什么这条路径最稳：odhcp6c 在**用户态**用 raw socket 收 ICMPv6 RA，
 /// 完全不看 `net.ipv6.conf.<dev>.accept_ra`。蜂窝网卡进 WAN 区后
-/// `forwarding=1`、内核默认值会让 RA 全丢（实机 `accept_ra=0` 时 QModem 的
+/// `forwarding=1`、内核默认值会让 RA 全丢（实机 `accept_ra=0` 时第三方插件的
 /// v6 照样通），而 odhcp6c 天然绕开了这个坑，不需要插件去改 sysctl。
 pub fn v6_dhcp_mode(cfg: &Config) -> bool {
     cfg.ipv6 && cfg.v6_mode == "dhcpv6"
@@ -994,7 +994,7 @@ pub fn bounce_data_dev(cfg: &Config) -> bool {
 
 /// 找出同样绑定在该数据网卡上的**非本插件** uci 接口。
 ///
-/// 典型场景：设备上另装了 QModem / ModemManager 之类插件，它们也会在同一个
+/// 典型场景：设备上另装了其它 modem 管理插件（如 ModemManager），它们也会在同一个
 /// 网卡上建接口（如 `network.2_1`）并周期性拨号、改写接口。两个守护同时
 /// 操作一块模组会互相打断（接口反复 down/up、AT 口争用），最终把数据端点
 /// 打到 stall —— 表现为"配置全对却就是上不了网"。
@@ -1139,7 +1139,7 @@ mod tests {
 
     #[test]
     fn gateway_is_derived_only_for_private_or_cgnat() {
-        // 运营商 CGNAT / 私有地址：按同网段 .1 推导（QModem 同类策略）
+        // 运营商 CGNAT / 私有地址：按同网段 .1 推导（同类插件通行策略）
         assert_eq!(derive_gateway("10.8.217.45").as_deref(), Some("10.8.217.1"));
         assert_eq!(derive_gateway("10.30.133.8").as_deref(), Some("10.30.133.1"));
         assert_eq!(derive_gateway("192.168.1.7").as_deref(), Some("192.168.1.1"));
