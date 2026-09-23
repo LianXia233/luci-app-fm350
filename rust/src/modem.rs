@@ -1747,6 +1747,18 @@ mod is_valid_tests {
             Some("2409:8057:2000:4:0:0:0:8")
         );
     }
+
+    #[test]
+    fn auth_code_matches_27007() {
+        use super::auth_code;
+        assert_eq!(auth_code("none"), 0);
+        assert_eq!(auth_code("pap"), 1);
+        assert_eq!(auth_code("chap"), 2);
+        assert_eq!(auth_code("both"), 3);
+        // 未知值保守按 none 处理，不下发半吊子鉴权
+        assert_eq!(auth_code(""), 0);
+        assert_eq!(auth_code("PAP"), 0); // UCI 里只有小写枚举，按字面匹配
+    }
 }
 
 #[cfg(test)]
