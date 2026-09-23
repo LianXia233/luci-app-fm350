@@ -74,9 +74,12 @@ pub struct Config {
     pub data_guard_rounds: u32,
     /// IPv6 获取方式：
     /// - `ra`：由内核按运营商 RA 自动配置（SLAAC 地址 + `via fe80::` 默认路由），
-    ///   插件只负责打开 `accept_ra`。**默认**，实机验证可用的方案。
+    ///   插件只负责打开 `accept_ra`。**默认**。
+    /// - `dhcpv6`：把 IPv6 交给 netifd 的 odhcp6c（与 QModem 同款做法）。
+    ///   odhcp6c 在用户态自己收 RA，不依赖内核 `accept_ra`，还能通过
+    ///   `extendprefix=1` 把 /64 委派给 LAN。插件既不写地址也不改 sysctl。
     /// - `static`：旧的静态方案 —— 把模组侧读到的地址以 /128 写入并补
-    ///   无网关的 onlink 默认路由。仅在模组固件不转发 RA 时使用。
+    ///   无网关的 onlink 默认路由。仅在以上两种都不适用时使用。
     /// - `off`：不托管 IPv6。
     #[serde(default = "default_v6_mode")]
     pub v6_mode: String,
