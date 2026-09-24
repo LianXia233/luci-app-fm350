@@ -355,7 +355,9 @@ luci-app-fm350/
 | `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`） |
 | `data_guard` | `1` | 数据面健康巡检与分级自愈（网卡 stall 时复位 → 重拨 → 重启模组） |
 | `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
-| `v6_mode` | `ra` | IPv6 获取方式：`dhcpv6` 交给 netifd 的 odhcp6c（与主流第三方插件同款，推荐）——用户态收 RA，不受内核 `accept_ra` 影响，并可把 `/64` 委派给 LAN；`ra` 由内核按运营商 RA 自动配置（默认）；`static` 把模组侧地址以 `/128` 静态写入；`off` 不托管 IPv6 |
+| `net_guard` | `1` | 公网连通性保活：IPv4/IPv6 各自独立向公共 DNS 发 ICMP（绑定数据网卡），「模组侧有地址」不等于「真正可用」；连续多轮失败才按栈恢复，v6 单独故障绝不重拨 |
+| `net_guard_rounds` | `3` | 连续多少轮连通性探测失败才触发该栈的恢复动作（每栈 300 s 恢复冷却） |
+| `v6_mode` | `dhcpv6` | IPv6 获取方式：`dhcpv6` 交给 netifd 的 odhcp6c（**默认**）——用户态收 RA，不受内核 `accept_ra` 影响，并把 `/64` 委派给 LAN；`ra` 由内核按运营商 RA 自动配置；`static` 把模组侧地址以 `/128` 静态写入；`off` 不托管 IPv6。注：运行时对未识别取值仍回落 `ra` 处理，仅新装默认值变为 `dhcpv6` |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
 | `v6_poll_interval` | `300` | 从模组 AT/PDP 轮询最新 IPv6 的周期（秒）；`v6_mode=static` 下发现变化时把模组侧地址静态应用到 IPv6 接口，`0` 关闭 |
 | `v6_refresh_interval` | `1800` | IPv6 接口定时校验周期（秒），按需重新应用模组侧地址；`0` 关闭定时刷新，失效兜底仍保留 |
@@ -516,7 +518,7 @@ make package/luci-app-fm350/compile V=s
   - **真正的坑二：静态方案的 onlink 路由会压掉 RA 路由**。旧实现写 `/128` + `default dev <dev> metric <m>`，metric 比 RA 下发的 `metric 1024` 更小，于是 v6 全量发出却零回包。`route_guard` 现改为「已有任何一条 v6 默认路由就不再补」。
   - **真正的坑三：静态地址本身是残留**（见上一条「残留地址陷阱」）—— `AT+CGCONTRDP` 在上下文去激活后仍返回上一轮的 IPv6。
   - RA 模式下插件把 `fm350v6` 切成 `proto=none`（netifd 只拉设备、不写地址），并每轮兜底打开 `accept_ra=2` / `accept_ra_defrtr=1` / `accept_ra_pinfo=1`（USB 复位后 sysctl 会回默认值）。RA 等 6 秒仍不来才回落到 `static`。
-  - `v6_mode` 四选一：`dhcpv6`（交给 odhcp6c，推荐）/ `ra`（默认，内核按 RA 配置）/ `static`（旧行为）/ `off`（不托管）。未识别取值（含旧配置缺项）一律回落 `ra`。
+  - `v6_mode` 四选一：`dhcpv6`（交给 odhcp6c，**1.0.10-r2 起为新装默认**）/ `ra`（内核按 RA 配置，1.0.10-r1 及以前的默认）/ `static`（旧行为）/ `off`（不托管）。未识别取值在运行时仍按 `ra` 处理，仅影响配置缺省与首装骨架形态。
   - **`dhcpv6`（1.0.7 新增）**：`fm350v6` 置为 `proto=dhcpv6` + `extendprefix=1`，由 netifd 拉起 odhcp6c 托管全部 v6 取址。odhcp6c 在**用户态**用原始套接字收发 RS/RA 与 DHCPv6，**不经过内核 `accept_ra`**，因此 `accept_ra=0` + `forwarding=1` 下同样能取到地址；`extendprefix=1` 还能把拿到的 `/64` 继续委派给 LAN（内网设备也就有了 IPv6）。这是主流第三方插件对 fibocom + mediatek 组合采用的同款方案，两者共存时行为一致、不会互相改写同一张网卡的 v6 策略。
   - `dhcpv6` / `ra` 模式下 `route_guard` 只维护一条 metric `2048` 的 onlink 兜底路由（odhcp6c 下发的路由 metric 为 `512`、RA 路由为 `1024`，均优先级更高），且**不删除**任何路由 —— netifd 的 ifdown/ifup 会冲掉 RA 路由，删掉会留下默认路由真空。
   - `extendprefix` 作为**插件选项**自 1.0.3 起已废弃（后端不消费该字段）；但 `v6_mode=dhcpv6` 下插件会自动在 `fm350v6` **接口**上写入 `extendprefix=1`，二者不是同一回事。

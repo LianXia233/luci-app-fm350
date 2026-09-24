@@ -72,6 +72,14 @@ pub struct Config {
     /// 连续多少轮判定数据面异常才触发自愈（默认 3 轮）。
     #[serde(default = "default_data_guard_rounds")]
     pub data_guard_rounds: u32,
+    /// 公网连通性保活（net_guard）：IPv4 与 IPv6 各自独立探测公网可达性，
+    /// 「模组侧有地址/接口有路由」不代表真正可用；连续多轮探测失败才按栈
+    /// 分级恢复，且 v6 单独故障绝不重拨（不误杀正常栈）。
+    #[serde(default = "default_net_guard")]
+    pub net_guard: bool,
+    /// 连续多少轮连通性探测失败才触发该栈的恢复动作（默认 3 轮）。
+    #[serde(default = "default_net_guard_rounds")]
+    pub net_guard_rounds: u32,
     /// IPv6 获取方式：
     /// - `ra`：由内核按运营商 RA 自动配置（SLAAC 地址 + `via fe80::` 默认路由），
     ///   插件只负责打开 `accept_ra`。**默认**。
@@ -161,8 +169,14 @@ fn default_data_guard() -> bool {
 fn default_data_guard_rounds() -> u32 {
     3
 }
+fn default_net_guard() -> bool {
+    true
+}
+fn default_net_guard_rounds() -> u32 {
+    3
+}
 fn default_v6_mode() -> String {
-    "ra".into()
+    "dhcpv6".into()
 }
 fn default_poll_interval() -> u64 {
     30
@@ -274,6 +288,10 @@ pub fn load() -> Config {
         data_guard_rounds: uci_get("data_guard_rounds")
             .and_then(|x| x.parse().ok())
             .unwrap_or_else(default_data_guard_rounds),
+        net_guard: uci_get("net_guard").map(|v| v == "1").unwrap_or(true),
+        net_guard_rounds: uci_get("net_guard_rounds")
+            .and_then(|x| x.parse().ok())
+            .unwrap_or_else(default_net_guard_rounds),
         v6_mode: uci_get("v6_mode").unwrap_or_else(default_v6_mode),
         poll_interval: uci_get("poll_interval")
             .and_then(|v| v.parse().ok())
