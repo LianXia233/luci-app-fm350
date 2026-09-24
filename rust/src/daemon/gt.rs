@@ -19,7 +19,7 @@
 //! 防抖，也会在事件风暴时反复断网。让既有巡检去做判定，天然继承它的
 //! 全部防抖与幂等语义。
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::at::urc::{self, GtEvent};
 use crate::config::Config;
