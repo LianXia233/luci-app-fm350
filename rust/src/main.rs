@@ -161,6 +161,11 @@ fn acquire_singleton() -> Option<std::fs::File> {
 /// 反复重启（每次重拨都要几十秒，期间整条链路都是断的）。
 const RECOVER_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// 公网连通性保活（net_guard）的恢复冷却时间：每栈独立计时，连续观测轮
+/// 达到阈值后至少间隔这么久才执行下一次恢复动作，防止探测目标抖动引发
+/// 恢复风暴。
+const NET_GUARD_COOLDOWN: Duration = Duration::from_secs(300);
+
 /// 激活却完全取不到地址时，连续多少轮后去激活强制重拨（审查问题 #1）。
 const NO_ADDR_REDIAL_ROUNDS: u32 = 3;
 
@@ -205,6 +210,16 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
     let mut net_v6_seen: bool = false;
     // 当前 AT 口路径已消失的连续轮数（触发自动改选）
     let mut at_down_rounds: u32 = 0;
+    // 公网连通性保活状态：双栈各自独立计数、独立恢复分级、独立日志状态。
+    // last_netX_ok 为 None 表示「无地址，探测不适用」（交回地址巡检兜底）。
+    let mut net4_fail_rounds: u32 = 0;
+    let mut net6_fail_rounds: u32 = 0;
+    let mut net4_recover_level: u32 = 0;
+    let mut net6_recover_level: u32 = 0;
+    let mut last_net4_ok: Option<bool> = None;
+    let mut last_net6_ok: Option<bool> = None;
+    let mut last_net4_recover: Option<Instant> = None;
+    let mut last_net6_recover: Option<Instant> = None;
     loop {
         let cfg = config::load();
         let interval = cfg.poll_interval.max(5);
@@ -536,6 +551,188 @@ fn daemon_loop(cfg_initial: config::Config) -> Result<(), String> {
                 stall_rounds = 0;
                 // 自愈后基线失效，下一轮重新取基准
                 last_health = net::detect_dev(&cfg).and_then(|d| net::data_health(&d));
+            }
+        }
+
+        // ---- 公网连通性保活（net_guard）：双栈独立探测、独立恢复
+        //
+        // 「拿到地址」不等于「真正可用」：PDP 激活、接口有地址有路由甚至
+        // 网关 ARP 可解析，都可能因运营商侧承载异常而一个包都出不去。这里
+        // 对两个栈分别向公共 DNS 发 ICMP（绑定数据网卡，不受多 WAN 干扰），
+        // 连续 net_guard_rounds 轮全部目标不可达才执行该栈的恢复动作：
+        //   * IPv4：第 1 级 ifdown/ifup 主接口（netifd 重新下发地址/路由，
+        //     不触碰 v6 子接口与数据网卡链路）；第 2 级去激活重拨 —— 重拨会
+        //     同时重建双栈 PDP，仅在 v4 持续断网且接口级恢复无效后执行；
+        //   * IPv6：只做 v6 子接口级恢复（dhcpv6 模式即重启 odhcp6c 重新
+        //     SOLICIT），v6 单独故障绝不重拨 —— 不误杀正常栈；双栈同时不可达
+        //     时才升级为重拨。v6 整体 会话丢失（模组侧不再上报地址）时由
+        //     拨号巡检分支统一处理，这里不重复兜底。
+        // 日志只在状态翻转与恢复动作执行时打印（限频防刷屏）。
+        if cfg.net_guard && cfg.enabled {
+            if let Some(dev) = net::detect_dev(&cfg) {
+                let ns = net::status(&cfg);
+                let rounds = cfg.net_guard_rounds.max(1);
+                let cooled4 = last_net4_recover
+                    .map(|t| t.elapsed() >= NET_GUARD_COOLDOWN)
+                    .unwrap_or(true);
+                let cooled6 = last_net6_recover
+                    .map(|t| t.elapsed() >= NET_GUARD_COOLDOWN)
+                    .unwrap_or(true);
+
+                // ---- IPv4：仅当接口持有 v4 地址时才探测（无地址属下发问题，
+                //      由拨号/地址巡检分支负责）。
+                if ns.ipv4.is_empty() {
+                    if last_net4_ok.is_some() {
+                        eprintln!(
+                            "fm350d: net_guard: 接口 {} 暂无 IPv4 地址，连通性探测交回地址巡检",
+                            cfg.iface
+                        );
+                    }
+                    net4_fail_rounds = 0;
+                    net4_recover_level = 0;
+                    last_net4_ok = None;
+                } else {
+                    let ok4 = net::check_connectivity4(&dev);
+                    if ok4 {
+                        if last_net4_ok == Some(false) {
+                            eprintln!("fm350d: net_guard: IPv4 公网连通性已恢复");
+                        }
+                        net4_fail_rounds = 0;
+                        net4_recover_level = 0;
+                        last_net4_ok = Some(true);
+                    } else {
+                        if last_net4_ok != Some(false) {
+                            eprintln!(
+                                "fm350d: net_guard: IPv4 公网连通性丢失（地址 {:?}），开始连续观测",
+                                ns.ipv4
+                            );
+                        }
+                        last_net4_ok = Some(false);
+                        net4_fail_rounds += 1;
+                        if net4_fail_rounds >= rounds && cooled4 {
+                            net4_recover_level += 1;
+                            let done = match net4_recover_level {
+                                1 => {
+                                    eprintln!(
+                                        "fm350d: net_guard: IPv4 连续 {} 轮不可达，重建接口 {}（第 1 级）",
+                                        net4_fail_rounds, cfg.iface
+                                    );
+                                    net::bounce_iface_v4(&cfg)
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "fm350d: net_guard: 接口级重建无效，去激活重拨（第 2 级，双栈短暂中断）"
+                                    );
+                                    let _ = modem::hangup(&at, &cfg);
+                                    std::thread::sleep(Duration::from_secs(3));
+                                    match modem::dial(&at, &cfg) {
+                                        Ok(p) if !p.ipv4.is_empty() || !p.ipv6.is_empty() => net::apply_after_dial(
+                                            &cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4,
+                                        )
+                                        .is_ok(),
+                                        _ => false,
+                                    }
+                                }
+                            };
+                            eprintln!(
+                                "fm350d: net_guard: IPv4 第 {} 级恢复{}",
+                                net4_recover_level,
+                                if done { "已执行" } else { "执行失败" }
+                            );
+                            last_net4_recover = Some(Instant::now());
+                            net4_fail_rounds = 0;
+                        }
+                    }
+                }
+
+                // ---- IPv6：与 v4 完全独立。仅当子接口持有全局 v6 地址时才探测。
+                if ns.ipv6.is_empty() {
+                    if last_net6_ok.is_some() {
+                        eprintln!(
+                            "fm350d: net_guard: 接口 {} 暂无全局 IPv6 地址，探测交回 v6 地址巡检",
+                            cfg.iface_v6
+                        );
+                    }
+                    net6_fail_rounds = 0;
+                    net6_recover_level = 0;
+                    last_net6_ok = None;
+                } else {
+                    let ok6 = net::check_connectivity6(&dev);
+                    if ok6 {
+                        if last_net6_ok == Some(false) {
+                            eprintln!("fm350d: net_guard: IPv6 公网连通性已恢复");
+                        }
+                        net6_fail_rounds = 0;
+                        net6_recover_level = 0;
+                        last_net6_ok = Some(true);
+                    } else {
+                        if last_net6_ok != Some(false) {
+                            eprintln!(
+                                "fm350d: net_guard: IPv6 公网连通性丢失（地址 {:?}），开始连续观测",
+                                ns.ipv6
+                            );
+                        }
+                        last_net6_ok = Some(false);
+                        net6_fail_rounds += 1;
+                        if net6_fail_rounds >= rounds && cooled6 {
+                            net6_fail_rounds = 0;
+                            // 双栈同时不可达（v4 也无地址或探测失败）时才允许
+                            // 重拨；v6 独占故障只做 v6 子接口级恢复。
+                            let v4_down_too = ns.ipv4.is_empty() || !net::check_connectivity4(&dev);
+                            if net6_recover_level < 1 {
+                                net6_recover_level += 1;
+                                eprintln!(
+                                    "fm350d: net_guard: IPv6 连续 {} 轮不可达，重建 v6 子接口 {}（第 1 级）",
+                                    rounds, cfg.iface_v6
+                                );
+                                let done = net::bounce_iface_v6(&cfg);
+                                eprintln!(
+                                    "fm350d: net_guard: IPv6 第 1 级恢复{}",
+                                    if done { "已执行" } else { "执行失败" }
+                                );
+                                last_net6_recover = Some(Instant::now());
+                            } else if v4_down_too {
+                                net6_recover_level += 1;
+                                eprintln!(
+                                    "fm350d: net_guard: IPv6 持续不可达且 IPv4 同样异常，去激活重拨（第 {} 级）",
+                                    net6_recover_level + 1
+                                );
+                                let _ = modem::hangup(&at, &cfg);
+                                std::thread::sleep(Duration::from_secs(3));
+                                match modem::dial(&at, &cfg) {
+                                    Ok(p) if !p.ipv4.is_empty() || !p.ipv6.is_empty() => {
+                                        let done = net::apply_after_dial(
+                                            &cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4,
+                                        )
+                                        .is_ok();
+                                        eprintln!(
+                                            "fm350d: net_guard: 双栈重拨{}",
+                                            if done { "已执行" } else { "执行失败" }
+                                        );
+                                    }
+                                    _ => eprintln!("fm350d: net_guard: 双栈重拨执行失败"),
+                                }
+                                last_net6_recover = Some(Instant::now());
+                                last_net4_recover = Some(Instant::now());
+                                net4_fail_rounds = 0;
+                                net6_fail_rounds = 0;
+                                net4_recover_level = 0;
+                            } else {
+                                // v6 独占故障：绝不重拨，重复子接口级恢复
+                                eprintln!(
+                                    "fm350d: net_guard: IPv6 独占故障（IPv4 正常），仅重建 v6 子接口 {}",
+                                    cfg.iface_v6
+                                );
+                                let done = net::bounce_iface_v6(&cfg);
+                                eprintln!(
+                                    "fm350d: net_guard: IPv6 子接口重建{}",
+                                    if done { "已执行" } else { "执行失败" }
+                                );
+                                last_net6_recover = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
             }
         }
 

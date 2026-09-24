@@ -14,11 +14,19 @@ config main 'main'
 	option data_dev 'auto'
 	option metric '30'
 	option ipv6 '1'
+	# IPv6 获取方式：dhcpv6（odhcp6c + extendprefix 前缀委派，默认）/
+	# ra（内核收 RA）/ static（模组侧地址静态 /128）/ off（不托管）
+	option v6_mode 'dhcpv6'
 	# （已废弃，仅兼容旧配置读取）IPv6 前缀委派改由后端在 v6_mode=dhcpv6 时
 	# 自动写入 network.<iface_v6>.extendprefix=1；本选项后端不再消费
 	option extendprefix '1'
 	option auto_dial '1'
 	option route_guard '1'
+	# 公网连通性保活：IPv4/IPv6 各自独立探测公网可达性（ICMP 到公共 DNS，
+	# 绑定数据网卡），连续 net_guard_rounds 轮失败才按栈恢复；
+	# v6 单独故障绝不重拨，不误杀正常栈
+	option net_guard '1'
+	option net_guard_rounds '3'
 	option poll_interval '30'
 	# 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；设为 0 可关闭独立轮询
 	option v6_poll_interval '300'

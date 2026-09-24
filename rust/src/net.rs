@@ -1252,6 +1252,98 @@ pub fn bounce_data_dev(cfg: &Config) -> bool {
     ok
 }
 
+// ---------------------------------------------------------------- 公网连通性保活
+
+/// IPv4 连通性探测目标（任一可达即判定该栈连通）。
+///
+/// 选型依据：双公共 DNS 的 ICMP 在国内蜂窝/宽带链路上基本恒可达，两者同时
+/// 失联基本可断定是本机链路问题而非目标故障；仅当全部目标在超时内无应答
+/// 才判定该栈断网，避免单目标抖动误触发恢复动作。
+pub const NET_CHECK_TARGETS_V4: &[&str] = &["223.5.5.5", "119.29.29.29"];
+
+/// IPv6 连通性探测目标（与 v4 同构的双目标设计）。
+pub const NET_CHECK_TARGETS_V6: &[&str] = &["2400:3200::1", "2402:4e00::"];
+
+/// 探测单个目标：ICMP echo，绑定数据网卡发出。
+///
+/// 为什么绑定 `-I <dev>`：多 WAN 场景下 IPv4 默认路由可能指向别的接口
+/// （metric 更优），不绑定网卡会把「别的 WAN 通」误判成蜂窝链路通。
+/// BusyBox ping 的 `-I` 接受网卡名；IPv6 目标优先走 `ping`，老固件的
+/// BusyBox 未合并 ping6 应用时回退 `ping6`。
+fn ping_iface(dev: &str, target: &str, timeout: u32) -> bool {
+    let v4 = real(&format!(
+        "ping -c 1 -W {} -I {} {} >/dev/null 2>&1",
+        timeout, dev, target
+    ));
+    if v4.0 {
+        return true;
+    }
+    if target.contains(':') {
+        // v6 目标在 ping6 分体的 BusyBox 上需要单独应用探测
+        return real(&format!(
+            "ping6 -c 1 -W {} -I {} {} >/dev/null 2>&1",
+            timeout, dev, target
+        ))
+        .0;
+    }
+    false
+}
+
+/// IPv4 公网连通性探测：全部目标不可达才返回 false。
+///
+/// 判据是「真正能出去」，而不是「模组侧有地址」——PDP 激活、CGPADDR 有值
+/// 甚至 ARP 网关可解析都不代表运营商侧会话健康（基带附着但核心网承载丢失
+/// 时模组仍会代理 ARP 应答）。该探测只判定连通性，不承担路由缺失等结构
+/// 性故障的定位——那些由 route_guard / 地址巡检负责。
+pub fn check_connectivity4(dev: &str) -> bool {
+    NET_CHECK_TARGETS_V4
+        .iter()
+        .any(|t| ping_iface(dev, t, 3))
+}
+
+/// IPv6 公网连通性探测：与 v4 完全独立，任一目标可达即判定 v6 连通。
+pub fn check_connectivity6(dev: &str) -> bool {
+    NET_CHECK_TARGETS_V6
+        .iter()
+        .any(|t| ping_iface(dev, t, 3))
+}
+
+/// 轻量重建 IPv4 侧接口：只 ifdown/ifup 主接口，不碰数据网卡链路与 v6 子接口。
+///
+/// 与 [`bounce_data_dev`] 的分工：端点 stall 需要 `ip link` 硬复位（会连带
+/// v6 失联再一并拉回）；而公网连通性丢失且 v6 独立存活时，硬复位反而会
+/// 误伤正常的 v6 —— 这里只让 netifd 重新下发 v4 地址/路由/网关，v6 子接口
+/// （device=@主接口）保持原状。返回 ifup 是否成功。
+pub fn bounce_iface_v4(cfg: &Config) -> bool {
+    let _ = real(&format!("ifdown {}", cfg.iface));
+    std::thread::sleep(Duration::from_secs(2));
+    let (ok, _) = real(&format!("ifup {}", cfg.iface));
+    ok
+}
+
+/// 轻量重建 IPv6 侧子接口：只 ifdown/ifup v6 接口，主接口与 v4 完全不受影响。
+///
+/// dhcpv6 模式下该动作等价于重启 odhcp6c —— 重新发 SOLICIT、重新请求前缀，
+/// 是「有 v6 地址但 v6 公网不可达」时最对症的恢复；ra 模式下重触发内核
+/// RS/RA 流程。返回 ifup 是否成功。
+pub fn bounce_iface_v6(cfg: &Config) -> bool {
+    if !v6_managed(cfg) {
+        return false;
+    }
+    let _ = real(&format!("ifdown {}", cfg.iface_v6));
+    std::thread::sleep(Duration::from_secs(2));
+    if v6_dhcp_mode(cfg) {
+        ensure_v6_dhcpv6_proto(cfg);
+    } else if v6_ra_mode(cfg) {
+        if let Some(dev) = detect_dev(cfg) {
+            enable_v6_ra(&dev);
+            ensure_v6_ra_proto(cfg);
+        }
+    }
+    let (ok, _) = real(&format!("ifup {}", cfg.iface_v6));
+    ok
+}
+
 /// 找出同样绑定在该数据网卡上的**非本插件** uci 接口。
 ///
 /// 典型场景：设备上另装了其它 modem 管理插件（如 ModemManager），它们也会在同一个
