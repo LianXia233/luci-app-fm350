@@ -126,13 +126,13 @@ jobs:
             || { echo "::error::rust/src/imei.rs 丢失只读路径 AT+EGMREXT=0,7"; exit 1; }
           grep -qF 'if !cfg.imei_write' rust/src/imei.rs \
             || { echo "::error::rust/src/imei.rs 丢失 imei_write 门禁"; exit 1; }
-          grep -qF 'pub fn is_imei_write' rust/src/at.rs \
-            || { echo "::error::rust/src/at.rs 丢失 is_imei_write 拦截器"; exit 1; }
+          grep -qF 'pub fn is_imei_write' rust/src/at/guard.rs \
+            || { echo "::error::rust/src/at/guard.rs 丢失 is_imei_write 拦截器"; exit 1; }
           grep -qF "option imei_write '0'" root/etc/config/fm350 \
             || { echo "::error::默认配置里 imei_write 不是 0（写入开关必须默认关闭）"; exit 1; }
           echo "IMEI 不变式检查通过（只读可用 / 写入受开关控制 / 默认关闭）"
 
-  # 后端单元测试。改动集中在 at.rs 的状态机与 IMEI 校验上，这些分支在设备上
+  # 后端单元测试。改动集中在 at/ 目录的状态机与 IMEI 校验上，这些分支在设备上
   # 几乎无法复现（需要拔插模组、制造端口占用、构造合法校验位），只能靠单测钉住。
   rust-tests:
     runs-on: ubuntu-latest

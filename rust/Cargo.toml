@@ -5,6 +5,12 @@ edition = "2021"
 description = "Fibocom FM350 modem daemon / CLI for luci-app-fm350"
 license = "GPL-3.0-only"
 
+# 产物必须是一个静态二进制：模块拆分只在源码层，不拆 crate、不加依赖。
+# lib 与 bin 共用同一份实现（bin 只转发到 lib），测试可覆盖全部代码。
+[lib]
+name = "fm350d"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fm350d"
 path = "src/main.rs"
