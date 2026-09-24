@@ -5,23 +5,29 @@
 //!   - 写入 / 更换：高风险不可逆操作，需同时满足三个准入条件才允许下发：
 //!       1. UCI `fm350.main.imei_write` 为 1（默认 0）；
 //!       2. 调用方显式传入 `confirm = true`；
-//!       3. 目标值为 15 位纯数字（`valid_format` 格式校验）。
+//!       3. 目标值为 15 位纯数字（[`valid_format`] 格式校验）。
 //!     此外会做 Luhn 校验，但**仅作为风险提示返回 warning，不阻断写入**
 //!     （部分厂商 IMEI 不严格符合 Luhn 校验位规则）。
 //!   下发前会自动读取并备份当前 IMEI 到 `/etc/fm350/imei.backup`。
 //!
 //! 命令出处：`AT+EGMREXT` **未被 Fibocom FM350 AT 手册（v2.2 / V2.10）收录**，
-//! 属社区与实机验证可用的扩展命令。
+//! 属社区与实机验证可用的扩展命令。字面量集中在 [`crate::at::at_cmd`]。
 //!
 //! 安全边界：写入仅在本模块内构造命令，**不经过通用 AT 透传路径**，以免被误触发。
-//! 拦截分两级：`/api/at` 与 CLI `at` 由 [`crate::at::is_imei_write`] **无条件**拦截
-//! 全部 IMEI / 串号写形式；`modem` 模块内部 `run()` 则走 [`guard_transparent`]，
-//! 在 `imei_write` 未开启时拦截。写入操作会记录到系统日志。
+//! 拦截分两级：`/api/at` 与 CLI `at` 由 [`crate::at::is_imei_write`] **无条件**
+//! 拦截全部 IMEI / 串号写形式；`modem` 模块内部 `run()` 则走 [`guard_transparent`]，
+//! 在 `imei_write` 未开启时拦截。
+//!
+//! ## 为什么这里不走 [`crate::log`]
+//!
+//! 写入 IMEI 是审计级操作，原实现用 `logger -t fm350d` 把痕迹落进**系统日志**
+//! （daemon 重启后仍可追溯），而 [`crate::log`] 只写 stderr。为保持行为等价，
+//! 本模块继续走 `logger`。
 
 use std::fs;
 use std::process::Command;
 
-use crate::at::{self, AtHandle, AtResult};
+use crate::at::{self, at_cmd, AtHandle, AtResult};
 use crate::config::Config;
 
 const BACKUP_DIR: &str = "/etc/fm350";
@@ -66,7 +72,7 @@ pub fn valid_format(imei: &str) -> bool {
 
 /// 读取当前 IMEI（只读，始终允许）。
 pub fn read_raw(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    let r = at.with(cfg, |p| p.command("AT+EGMREXT=0,7"))?;
+    let r = at.with(cfg, |p| p.command(at_cmd::EGMREXT_READ_IMEI))?;
     // 响应形如：+EGMREXT: "861234567890123"
     for line in r.lines() {
         let l = line.trim();
@@ -99,10 +105,9 @@ pub fn state(at: &AtHandle, cfg: &Config) -> ImeiState {
     }
 }
 
-fn log(msg: &str) {
-    let _ = Command::new("logger")
-        .args(["-t", "fm350d", msg])
-        .status();
+/// 审计日志：落系统日志（见模块头说明）。
+fn audit(msg: &str) {
+    let _ = Command::new("logger").args(["-t", "fm350d", msg]).status();
 }
 
 /// 备份当前 IMEI 到 `/etc/fm350/imei.backup`。
@@ -113,9 +118,8 @@ pub fn backup(at: &AtHandle, cfg: &Config) -> AtResult<String> {
         "imei": current,
         "note": "写入前的最后一次备份，用于恢复原始串号"
     });
-    fs::write(BACKUP_FILE, payload.to_string())
-        .map_err(|e| format!("写入备份失败: {}", e))?;
-    log(&format!("已备份当前 IMEI 到 {}", BACKUP_FILE));
+    fs::write(BACKUP_FILE, payload.to_string()).map_err(|e| format!("写入备份失败: {}", e))?;
+    audit(&format!("已备份当前 IMEI 到 {}", BACKUP_FILE));
     Ok(current)
 }
 
@@ -141,12 +145,13 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
         return Err("拒绝执行：缺少二次确认（需 confirm=1）".to_string());
     }
     if !cfg.imei_write {
-        return Err(
-            "拒绝执行：IMEI 写入功能未开启，请先在设置中开启 imei_write".to_string(),
-        );
+        return Err("拒绝执行：IMEI 写入功能未开启，请先在设置中开启 imei_write".to_string());
     }
     if !valid_format(imei) {
-        return Err(format!("IMEI 格式无效：必须为 15 位数字，收到 {} 位", imei.len()));
+        return Err(format!(
+            "IMEI 格式无效：必须为 15 位数字，收到 {} 位",
+            imei.len()
+        ));
     }
 
     // Luhn 校验：仅作提示（部分厂商 IMEI 不严格符合），不阻断写入
@@ -157,24 +162,24 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
         Some("新 IMEI 未通过 Luhn 校验位验证，多数运营商网元会据此拒绝入网，请确认输入无误".to_string())
     };
     if let Some(w) = &warning {
-        log(&format!("IMEI 写入提示: {}", w));
+        audit(&format!("IMEI 写入提示: {}", w));
     }
 
     // 备份当前值
     let previous = backup(at, cfg)?;
 
-    let cmd = format!(r#"AT+EGMREXT=1,7,"{}""#, imei);
-    log(&format!("准备写入 IMEI（原值 {}，新值 {}）", previous, imei));
+    let cmd = at_cmd::egmrext_write_imei(imei);
+    audit(&format!("准备写入 IMEI（原值 {}，新值 {}）", previous, imei));
 
     let resp = at.with(cfg, |p| p.command(&cmd))?;
     if resp.contains("ERROR") {
-        log(&format!("IMEI 写入失败: {}", resp.replace('\n', " | ")));
+        audit(&format!("IMEI 写入失败: {}", resp.replace('\n', " | ")));
         return Err(format!("模组返回错误: {}", resp.replace('\n', " | ")));
     }
 
     // 回读确认
     let current = read_raw(at, cfg).unwrap_or_default();
-    log(&format!("IMEI 写入完成，回读值 {}", current));
+    audit(&format!("IMEI 写入完成，回读值 {}", current));
 
     Ok(WriteResult {
         previous,
@@ -189,10 +194,10 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
 /// 通用 AT 透传路径的守卫：写入类 IMEI 指令在未开启 `imei_write` 时拒绝。
 ///
 /// 与 [`crate::at::is_imei_write`] 直接拦截的区别：
-///   - `api.rs`（`/api/at`）与 `main.rs`（CLI `at`）**无条件**拦截写形式，
-///     即使开启了 `imei_write` 也不放行，写操作只能走 IMEI 专用接口；
-///   - 本函数用于 `modem.rs` 内部 `run()`，在 `imei_write` 未开启时拦截，
-///     开启后放行，便于维护者在明确授权后经内部路径调试。
+///   - `api.rs`（`/api/at`）与 CLI `at` **无条件**拦截写形式，即使开启了
+///     `imei_write` 也不放行，写操作只能走 IMEI 专用接口；
+///   - 本函数用于 `modem` 内部 `run()`，在 `imei_write` 未开启时拦截，开启后
+///     放行，便于维护者在明确授权后经内部路径调试。
 pub fn guard_transparent(cmd: &str, cfg: &Config) -> Result<(), String> {
     if at::is_imei_write(cmd) && !cfg.imei_write {
         return Err(format!(
@@ -209,7 +214,6 @@ mod tests {
 
     #[test]
     fn luhn_of_valid_imei() {
-        // 标准测试 IMEI
         assert!(luhn_ok("490154203237518"));
     }
 
@@ -219,10 +223,40 @@ mod tests {
     }
 
     #[test]
+    fn luhn_requires_exactly_15_digits() {
+        assert!(!luhn_ok("49015420323751"));
+        assert!(!luhn_ok("4901542032375188"));
+        assert!(!luhn_ok("49015420323751X"));
+    }
+
+    #[test]
     fn format_check() {
         assert!(valid_format("490154203237518"));
         assert!(!valid_format("49015420323751"));
         assert!(!valid_format("49015420323751X"));
         assert!(!valid_format(""));
+    }
+
+    #[test]
+    fn imei_command_literals_are_centralized() {
+        assert_eq!(at_cmd::EGMREXT_READ_IMEI, "AT+EGMREXT=0,7");
+        assert_eq!(
+            at_cmd::egmrext_write_imei("490154203237518"),
+            "AT+EGMREXT=1,7,\"490154203237518\""
+        );
+        // 写形式必须被透传守卫识别，否则安全边界形同虚设
+        assert!(at::is_imei_write(&at_cmd::egmrext_write_imei("490154203237518")));
+        assert!(!at::is_imei_write(at_cmd::EGMREXT_READ_IMEI));
+    }
+
+    #[test]
+    fn transparent_guard_blocks_writes_until_enabled() {
+        let mut cfg = Config::default();
+        let w = at_cmd::egmrext_write_imei("490154203237518");
+        cfg.imei_write = false;
+        assert!(guard_transparent(&w, &cfg).is_err());
+        cfg.imei_write = true;
+        assert!(guard_transparent(&w, &cfg).is_ok());
+        assert!(guard_transparent(at_cmd::EGMREXT_READ_IMEI, &cfg).is_ok());
     }
 }

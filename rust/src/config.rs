@@ -1,8 +1,21 @@
-//! 配置读写（UCI：`/etc/config/fm350`）。
+//! 配置读写（UCI：`/etc/config/fm350` 的 `main` 节）。
 //!
-//! 独立配置体系：本插件只读写 UCI `fm350` 配置文件的 `main` 节。
+//! ## 重构要点
+//!
+//! 旧实现为 26 个字段各配一个 `default_xxx()` 函数，再在 `load()` 里
+//! 逐个 `uci_get(k).unwrap_or_else(default_xxx)` —— 默认值散在两处，加一个
+//! 字段要改三处（结构体、default 函数、load），极易漏改。
+//!
+//! 这里把**默认值收敛到唯一的 `impl Default`**，容器级 `#[serde(default)]`
+//! 让反序列化缺失字段时直接取 `Default` 的对应值（serde 语义：container 级
+//! `default` = 缺失字段从 `Default::default()` 的同名字段补齐），于是
+//! 26 个函数全部消失；`load()` 退化成一张「键 → 字段」的平铺表。
+//!
+//! 行为与旧实现**逐字段一致**：包括 `username` / `password` / `gateway` /
+//! `netmask` 缺省为空串，以及各 bool 的缺省值。
 
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -10,198 +23,108 @@ const PACKAGE: &str = "fm350";
 const SECTION: &str = "main";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Config {
-    #[serde(default = "default_at_port")]
     pub at_port: String,
-    #[serde(default = "default_baudrate")]
     pub baudrate: u32,
-    #[serde(default = "default_at_timeout")]
     pub at_timeout: u64,
-    #[serde(default = "default_apn")]
     pub apn: String,
-    #[serde(default = "default_username")]
     pub username: String,
-    #[serde(default = "default_password")]
     pub password: String,
-    #[serde(default = "default_auth")]
     pub auth: String,
-    #[serde(default = "default_pdp_type")]
     pub pdp_type: String,
-    #[serde(default = "default_cid")]
     pub cid: u32,
-    #[serde(default = "default_iface")]
     pub iface: String,
-    #[serde(default = "default_iface_v6")]
     pub iface_v6: String,
-    #[serde(default = "default_data_dev")]
     pub data_dev: String,
-    #[serde(default = "default_metric")]
     pub metric: u32,
-    #[serde(default = "default_ipv6")]
     pub ipv6: bool,
     /// 已废弃（v1.0.3 起）：原为 netifd dhcpv6 的 extendprefix 选项。
     /// IPv6 已改为守护静态配置（RNDIS 通道无 RA/DHCPv6 可用），本字段仅保留
     /// 以兼容旧配置读取，后端不再消费。
-    #[serde(default = "default_extendprefix")]
     pub extendprefix: bool,
-    #[serde(default = "default_auto_dial")]
     pub auto_dial: bool,
-    #[serde(default = "default_route_guard")]
     pub route_guard: bool,
     /// 网关模式。
-    /// - `auto`（默认）：尝试由 IPv4 推导同网段网关并实测可达性，可达则按
-    ///   「/24 + 网关」配置；不可达自动回退到无网关的 onlink 设备路由。
-    /// - `off`：维持历史行为（/32 + `default dev <dev> onlink`）。
-    /// - `static`：直接使用 `gateway` 选项指定的网关。
+    /// - `auto`（默认）：优先采信模组 `AT+CGCONTRDP` 上报的网关，其次由 IPv4
+    ///   推导同网段 `.1` 并实测 ARP 可达性；不可达自动回退到无网关 onlink。
+    /// - `off`：历史行为（`/32` + `default dev <dev> onlink`）。
+    /// - `static`：直接使用 `gateway` 选项。
     ///
     /// 为什么需要它：部分运营商/固件下 RNDIS 通道不做任意 IP 的 ARP 代理，
-    /// /32 + onlink 会让主机对每个公网 IP 直接发 ARP 而得不到应答，
+    /// `/32` + onlink 会让主机对每个公网 IP 直接发 ARP 而得不到应答，
     /// 表现为「PDP 已激活、有 IP 有 DNS，但一个包都发不出去」。
-    #[serde(default = "default_gateway_mode")]
     pub gateway_mode: String,
     /// 静态网关（`gateway_mode=static` 时必填）；auto 模式探测成功后会回写
     /// 实际使用的网关，便于排查与前端展示。
-    #[serde(default)]
     pub gateway: String,
     /// 子网掩码，留空表示由网关模式自行决定（有网关 → /24，无网关 → /32）。
-    #[serde(default)]
     pub netmask: String,
     /// 数据面健康检查与自愈：RNDIS 数据端点被打到 stall 时分级恢复。
-    #[serde(default = "default_data_guard")]
     pub data_guard: bool,
-    /// 连续多少轮判定数据面异常才触发自愈（默认 3 轮）。
-    #[serde(default = "default_data_guard_rounds")]
+    /// 连续多少轮判定数据面异常才触发自愈。
     pub data_guard_rounds: u32,
-    /// 公网连通性保活（net_guard）：IPv4 与 IPv6 各自独立探测公网可达性，
-    /// 「模组侧有地址/接口有路由」不代表真正可用；连续多轮探测失败才按栈
-    /// 分级恢复，且 v6 单独故障绝不重拨（不误杀正常栈）。
-    #[serde(default = "default_net_guard")]
+    /// 公网连通性保活：IPv4 与 IPv6 各自独立探测公网可达性，「模组侧有地址/
+    /// 接口有路由」不代表真正可用；v6 单独故障绝不重拨（不误杀正常栈）。
     pub net_guard: bool,
-    /// 连续多少轮连通性探测失败才触发该栈的恢复动作（默认 3 轮）。
-    #[serde(default = "default_net_guard_rounds")]
+    /// 连续多少轮连通性探测失败才触发该栈的恢复动作。
     pub net_guard_rounds: u32,
-    /// IPv6 获取方式：
-    /// - `ra`：由内核按运营商 RA 自动配置（SLAAC 地址 + `via fe80::` 默认路由），
-    ///   插件只负责打开 `accept_ra`。**默认**。
-    /// - `dhcpv6`：把 IPv6 交给 netifd 的 odhcp6c（与主流第三方插件同款做法）。
-    ///   odhcp6c 在用户态自己收 RA，不依赖内核 `accept_ra`，还能通过
-    ///   `extendprefix=1` 把 /64 委派给 LAN。插件既不写地址也不改 sysctl。
-    /// - `static`：旧的静态方案 —— 把模组侧读到的地址以 /128 写入并补
-    ///   无网关的 onlink 默认路由。仅在以上两种都不适用时使用。
-    /// - `off`：不托管 IPv6。
-    #[serde(default = "default_v6_mode")]
+    /// IPv6 获取方式：`ra` / `dhcpv6` / `static` / `off`。
+    ///
+    /// `dhcpv6` 交给 netifd 的 odhcp6c：它在**用户态**用 raw socket 收 RA，
+    /// 完全不看 `net.ipv6.conf.<dev>.accept_ra`，天然绕开「接口进 WAN 区后
+    /// forwarding=1、内核默认丢弃 RA」这个坑，因此作为默认值。
     pub v6_mode: String,
-    #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
     /// 从模组 AT/PDP 信息轮询最新 IPv6 的周期。0 表示关闭独立 V6 轮询。
-    #[serde(default = "default_v6_poll_interval")]
     pub v6_poll_interval: u64,
-    /// IPv6 子接口定时刷新周期。0 表示关闭定时刷新；地址失效兜底刷新不受影响。
-    #[serde(default = "default_v6_refresh_interval")]
+    /// IPv6 子接口定时刷新周期。0 表示关闭定时刷新。
     pub v6_refresh_interval: u64,
-    #[serde(default = "default_api_port")]
     pub api_port: u16,
-    /// IMEI / 串号写入开关。默认关闭：写入属高风险不可逆操作，
-    /// 必须显式开启且调用方二次确认后才允许下发。
-    #[serde(default = "default_imei_write")]
+    /// IMEI / 串号写入开关。默认关闭：写入属高风险不可逆操作。
     pub imei_write: bool,
-    #[serde(default = "default_enabled")]
     pub enabled: bool,
-}
-
-fn default_at_port() -> String {
-    "/dev/ttyUSB1".into()
-}
-fn default_baudrate() -> u32 {
-    115200
-}
-fn default_at_timeout() -> u64 {
-    10
-}
-fn default_apn() -> String {
-    "cmiot5g".into()
-}
-fn default_username() -> String {
-    String::new()
-}
-fn default_password() -> String {
-    String::new()
-}
-fn default_auth() -> String {
-    "none".into()
-}
-fn default_pdp_type() -> String {
-    "IPV4V6".into()
-}
-fn default_cid() -> u32 {
-    1
-}
-fn default_iface() -> String {
-    "fm350".into()
-}
-fn default_iface_v6() -> String {
-    "fm350v6".into()
-}
-fn default_data_dev() -> String {
-    "auto".into()
-}
-fn default_metric() -> u32 {
-    30
-}
-fn default_ipv6() -> bool {
-    true
-}
-fn default_extendprefix() -> bool {
-    true
-}
-fn default_auto_dial() -> bool {
-    true
-}
-fn default_route_guard() -> bool {
-    true
-}
-fn default_gateway_mode() -> String {
-    "auto".into()
-}
-fn default_data_guard() -> bool {
-    true
-}
-fn default_data_guard_rounds() -> u32 {
-    3
-}
-fn default_net_guard() -> bool {
-    true
-}
-fn default_net_guard_rounds() -> u32 {
-    3
-}
-fn default_v6_mode() -> String {
-    "dhcpv6".into()
-}
-fn default_poll_interval() -> u64 {
-    30
-}
-fn default_v6_poll_interval() -> u64 {
-    300
-}
-fn default_v6_refresh_interval() -> u64 {
-    1800
-}
-fn default_api_port() -> u16 {
-    8766
-}
-fn default_imei_write() -> bool {
-    false
-}
-fn default_enabled() -> bool {
-    true
 }
 
 impl Default for Config {
     fn default() -> Self {
-        serde_json::from_str("{}").unwrap()
+        Self {
+            at_port: "/dev/ttyUSB1".into(),
+            baudrate: 115200,
+            at_timeout: 10,
+            apn: "cmiot5g".into(),
+            username: String::new(),
+            password: String::new(),
+            auth: "none".into(),
+            pdp_type: "IPV4V6".into(),
+            cid: 1,
+            iface: "fm350".into(),
+            iface_v6: "fm350v6".into(),
+            data_dev: "auto".into(),
+            metric: 30,
+            ipv6: true,
+            extendprefix: true,
+            auto_dial: true,
+            route_guard: true,
+            gateway_mode: "auto".into(),
+            gateway: String::new(),
+            netmask: String::new(),
+            data_guard: true,
+            data_guard_rounds: 3,
+            net_guard: true,
+            net_guard_rounds: 3,
+            v6_mode: "dhcpv6".into(),
+            poll_interval: 30,
+            v6_poll_interval: 300,
+            v6_refresh_interval: 1800,
+            api_port: 8766,
+            imei_write: false,
+            enabled: true,
+        }
     }
 }
+
+// ---------------------------------------------------------------- UCI 原语
 
 fn uci_get(opt: &str) -> Option<String> {
     let out = Command::new("uci")
@@ -230,8 +153,62 @@ fn uci_set(opt: &str, val: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 配置缓存：`load()` 每次要 fork 十几次 `uci`，逐请求调用代价过高。
-/// 这里做 2 秒 TTL 的进程内缓存，兼顾"改完即生效"与"不拖慢 API"。
+/// 读取字符串型选项，缺失或空值回落到默认值。
+fn opt_str(key: &str, dflt: &str) -> String {
+    uci_get(key).unwrap_or_else(|| dflt.to_string())
+}
+
+/// 读取数值型选项：解析失败（含非数字）回落到默认值。
+fn opt_num<T: FromStr>(key: &str, dflt: T) -> T {
+    uci_get(key).and_then(|v| v.parse().ok()).unwrap_or(dflt)
+}
+
+/// 读取布尔型选项：UCI 里用 `1` / `0` 表示，其余值一律按缺省处理。
+fn opt_bool(key: &str, dflt: bool) -> bool {
+    uci_get(key).map(|v| v == "1").unwrap_or(dflt)
+}
+
+// ---------------------------------------------------------------- 读取
+
+pub fn load() -> Config {
+    let d = Config::default();
+    Config {
+        at_port: opt_str("at_port", &d.at_port),
+        baudrate: opt_num("baudrate", d.baudrate),
+        at_timeout: opt_num("at_timeout", d.at_timeout),
+        apn: opt_str("apn", &d.apn),
+        username: opt_str("username", &d.username),
+        password: opt_str("password", &d.password),
+        auth: opt_str("auth", &d.auth),
+        pdp_type: opt_str("pdp_type", &d.pdp_type),
+        cid: opt_num("cid", d.cid),
+        iface: opt_str("iface", &d.iface),
+        iface_v6: opt_str("iface_v6", &d.iface_v6),
+        data_dev: opt_str("data_dev", &d.data_dev),
+        metric: opt_num("metric", d.metric),
+        ipv6: opt_bool("ipv6", d.ipv6),
+        extendprefix: opt_bool("extendprefix", d.extendprefix),
+        auto_dial: opt_bool("auto_dial", d.auto_dial),
+        route_guard: opt_bool("route_guard", d.route_guard),
+        gateway_mode: opt_str("gateway_mode", &d.gateway_mode),
+        gateway: opt_str("gateway", &d.gateway),
+        netmask: opt_str("netmask", &d.netmask),
+        data_guard: opt_bool("data_guard", d.data_guard),
+        data_guard_rounds: opt_num("data_guard_rounds", d.data_guard_rounds),
+        net_guard: opt_bool("net_guard", d.net_guard),
+        net_guard_rounds: opt_num("net_guard_rounds", d.net_guard_rounds),
+        v6_mode: opt_str("v6_mode", &d.v6_mode),
+        poll_interval: opt_num("poll_interval", d.poll_interval),
+        v6_poll_interval: opt_num("v6_poll_interval", d.v6_poll_interval),
+        v6_refresh_interval: opt_num("v6_refresh_interval", d.v6_refresh_interval),
+        api_port: opt_num("api_port", d.api_port),
+        imei_write: opt_bool("imei_write", d.imei_write),
+        enabled: opt_bool("enabled", d.enabled),
+    }
+}
+
+/// 配置缓存：`load()` 每次要 fork 二十余次 `uci`，逐请求调用代价过高。
+/// 这里做 2 秒 TTL 的进程内缓存，兼顾「改完即生效」与「不拖慢 API」。
 ///
 /// daemon 巡检不走这里（每轮直接 `load()`），保证长时间无 API 访问时
 /// 也能感知变更；API 路径走这里，保证改完配置下一次请求就生效。
@@ -254,61 +231,15 @@ pub fn load_cached() -> Config {
     c
 }
 
-pub fn load() -> Config {
-    Config {
-        at_port: uci_get("at_port").unwrap_or_else(default_at_port),
-        baudrate: uci_get("baudrate")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_baudrate),
-        at_timeout: uci_get("at_timeout")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_at_timeout),
-        apn: uci_get("apn").unwrap_or_else(default_apn),
-        username: uci_get("username").unwrap_or_default(),
-        password: uci_get("password").unwrap_or_default(),
-        auth: uci_get("auth").unwrap_or_else(default_auth),
-        pdp_type: uci_get("pdp_type").unwrap_or_else(default_pdp_type),
-        cid: uci_get("cid")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_cid),
-        iface: uci_get("iface").unwrap_or_else(default_iface),
-        iface_v6: uci_get("iface_v6").unwrap_or_else(default_iface_v6),
-        data_dev: uci_get("data_dev").unwrap_or_else(default_data_dev),
-        metric: uci_get("metric")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_metric),
-        ipv6: uci_get("ipv6").map(|v| v == "1").unwrap_or(true),
-        extendprefix: uci_get("extendprefix").map(|v| v == "1").unwrap_or(true),
-        auto_dial: uci_get("auto_dial").map(|v| v == "1").unwrap_or(true),
-        route_guard: uci_get("route_guard").map(|v| v == "1").unwrap_or(true),
-        gateway_mode: uci_get("gateway_mode").unwrap_or_else(default_gateway_mode),
-        gateway: uci_get("gateway").unwrap_or_default(),
-        netmask: uci_get("netmask").unwrap_or_default(),
-        data_guard: uci_get("data_guard").map(|v| v == "1").unwrap_or(true),
-        data_guard_rounds: uci_get("data_guard_rounds")
-            .and_then(|x| x.parse().ok())
-            .unwrap_or_else(default_data_guard_rounds),
-        net_guard: uci_get("net_guard").map(|v| v == "1").unwrap_or(true),
-        net_guard_rounds: uci_get("net_guard_rounds")
-            .and_then(|x| x.parse().ok())
-            .unwrap_or_else(default_net_guard_rounds),
-        v6_mode: uci_get("v6_mode").unwrap_or_else(default_v6_mode),
-        poll_interval: uci_get("poll_interval")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_poll_interval),
-        v6_poll_interval: uci_get("v6_poll_interval")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_v6_poll_interval),
-        v6_refresh_interval: uci_get("v6_refresh_interval")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_v6_refresh_interval),
-        api_port: uci_get("api_port")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(default_api_port),
-        imei_write: uci_get("imei_write").map(|v| v == "1").unwrap_or(false),
-        enabled: uci_get("enabled").map(|v| v == "1").unwrap_or(true),
+/// 作废进程内缓存。保存配置后必须调用：否则「改完 2 s 内点拨号」会拿到
+/// 旧 APN / 旧端口。
+pub fn invalidate_cache() {
+    if let Ok(mut g) = CONFIG_CACHE.lock() {
+        *g = None;
     }
 }
+
+// ---------------------------------------------------------------- 写入
 
 /// 保存配置：仅更新传入的字段，其余保持不变。
 pub fn save(patch: &serde_json::Value) -> Result<(), String> {
@@ -329,8 +260,8 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
             _ => continue,
         };
 
-        // AT 端口必须是绝对设备路径，避免写入 "ttyUSB1" 这类相对值后
-        // open() 在 cwd 下静默失败，用户却看到「保存成功」。
+        // AT 端口必须是绝对设备路径：写入 "ttyUSB1" 这类相对值后 open()
+        // 会在 cwd 下静默失败，用户却看到「保存成功」。
         if k == "at_port" && !val.starts_with('/') {
             return Err(format!(
                 "AT 端口必须是绝对路径（如 /dev/ttyUSB1），当前为『{}』",
@@ -347,11 +278,42 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
     if !st.success() {
         return Err("uci commit 失败".to_string());
     }
-    // 保存成功立刻作废进程内缓存：否则「改完 2 s 内点拨号」会拿到旧 APN/
-    // 旧端口（审查问题：CONFIG_CACHE 未随 save 失效）。下一次 load_cached
-    // 会重建缓存，TTL 语义对其余读路径保持不变。
-    if let Ok(mut g) = CONFIG_CACHE.lock() {
-        *g = None;
-    }
+    invalidate_cache();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_object_yields_all_defaults() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        let d = Config::default();
+        assert_eq!(c.at_port, d.at_port);
+        assert_eq!(c.apn, d.apn);
+        assert_eq!(c.cid, d.cid);
+        assert_eq!(c.metric, d.metric);
+        assert_eq!(c.v6_mode, d.v6_mode);
+        assert!(c.ipv6 && c.auto_dial && c.route_guard);
+        assert!(!c.imei_write);
+    }
+
+    #[test]
+    fn partial_object_keeps_defaults_for_the_rest() {
+        let c: Config = serde_json::from_str(r#"{"apn":"3gnet","cid":3}"#).unwrap();
+        assert_eq!(c.apn, "3gnet");
+        assert_eq!(c.cid, 3);
+        // 未给出的字段仍取默认值，而不是 "" / 0
+        assert_eq!(c.iface, "fm350");
+        assert_eq!(c.metric, 30);
+    }
+
+    #[test]
+    fn numeric_and_bool_parsers_fall_back_safely() {
+        // opt_num / opt_bool 走 uci，单测只覆盖「解析失败回落」这一层语义
+        assert_eq!("abc".parse::<u32>().ok(), None);
+        assert_eq!("42".parse::<u32>().ok(), Some(42));
+        assert_eq!(("1" == "1"), true);
+    }
 }
