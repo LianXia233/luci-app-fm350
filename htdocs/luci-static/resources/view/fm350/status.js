@@ -1105,8 +1105,19 @@ return view.extend({
 						row(_('物理网卡'), net.dev),
 						row(_('IPv4 地址'), (net.ipv4 && net.ipv4.length) ? net.ipv4.join(', ') : null),
 						row(_('IPv6 地址'), (net.ipv6 && net.ipv6.length) ? net.ipv6.join(', ') : null),
+						/* 三行新增观测位（审查问题：net 状态展示缺位）：
+						   默认路由是否真正就位（v4/v6 分开看）、UCI 实际下发的 DNS、
+						   以及综合 pdp+kernel+route 的链路就绪结论。 */
+						row(_('默认路由 IPv4'), net.default4 != null ? (net.default4 ? _('已就位') : _('未就位')) : null),
+						(net.ipv6 && net.ipv6.length)
+							? row(_('默认路由 IPv6'), net.default6 != null ? (net.default6 ? _('已就位') : _('未就位')) : null)
+							: null,
+						row(_('DNS 配置'), (net.dns && net.dns.length) ? net.dns.join(', ') : null),
 						row(_('接口路由'), (net.routes && net.routes.length) ? net.routes.join('  |  ') : null),
-						row(_('接口状态'), net.up ? _('已启用') : _('未启用'))
+						row(_('接口状态'), net.up ? _('已启用') : _('未启用')),
+						row(_('链路就绪'), (pdp && pdp.active && net.up &&
+							(net.default4 || ((net.ipv6 && net.ipv6.length) && net.default6)))
+							? _('是') : _('否'))
 					])
 				])
 			]));

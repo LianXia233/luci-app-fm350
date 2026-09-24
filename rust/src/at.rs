@@ -592,7 +592,7 @@ pub struct PortCandidate {
 ///
 /// `/sys/class/tty/ttyUSB1/device` 是指向 interface 目录的符号链接，
 /// 必须先 `canonicalize` 解析，否则文本层面的 `..` 会退回 `/sys/class/tty`。
-fn find_usb_attr(start: &Path, attr: &str) -> Option<String> {
+pub fn find_usb_attr(start: &Path, attr: &str) -> Option<String> {
     let base = std::fs::canonicalize(start).ok()?;
     let mut cur: Option<PathBuf> = Some(base);
     for _ in 0..6 {
@@ -700,6 +700,63 @@ pub fn list_ports(cfg: &crate::config::Config, probe: bool) -> Vec<PortCandidate
 
     sort_ports(&mut out);
     out
+}
+
+/// 当前配置的 AT 口路径已消失时，寻找能应答 `AT` 的 Fibocom 串口。
+///
+/// 仅在调用方**确认当前路径不存在**后使用：同一模组会导出多个 2cb7 口
+/// （DIAG/GNSS/AT），只有真正应答 `OK`/`ERROR` 的才是 AT 口；路径仍在时
+/// 不切换，宁可等待模组重新枚举（审查问题 #8）。
+/// 找到则返回新路径（由调用方写入配置），否则返回 None。
+pub fn identify_at_port(cfg: &crate::config::Config) -> Option<String> {
+    let ports = list_ports(cfg, false);
+    for p in &ports {
+        if !p.likely_fm350 || p.path == cfg.at_port {
+            continue;
+        }
+        if probe_at_ok(&p.path, cfg.baudrate) {
+            return Some(p.path.clone());
+        }
+    }
+    None
+}
+
+/// 独占打开候选口，发一条 `AT` 并在限时内等待结果码。
+///
+/// `OK` / `ERROR` / `+CME ERROR` 任一都算「这是 AT 口」（口本身状态不佳
+/// 不代表选错了设备）；超时无应答则判否。二进制垃圾里恰好撞出 `OK` 的
+/// 概率可忽略 —— 该探测只在路径已消失的罕见场景触发。
+fn probe_at_ok(path: &str, baudrate: u32) -> bool {
+    let mut port = match serialport::new(path, baudrate)
+        .timeout(Duration::from_millis(100))
+        .exclusive(true)
+        .open()
+    {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let _ = port.write_all(b"\rAT\r");
+    let _ = port.flush();
+    let deadline = Instant::now() + Duration::from_millis(800);
+    let mut buf = String::new();
+    let mut chunk = [0u8; 64];
+    while Instant::now() < deadline {
+        match port.read(&mut chunk) {
+            Ok(0) => std::thread::sleep(Duration::from_millis(50)),
+            Ok(n) => {
+                buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                if buf.contains("OK")
+                    || buf.contains("ERROR")
+                    || buf.contains("+CME")
+                    || buf.contains("+CMS")
+                {
+                    return true;
+                }
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    false
 }
 
 /// 从响应中提取首个 `+XXX: ` 之后的字段列表。
