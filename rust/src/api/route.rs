@@ -60,6 +60,9 @@ pub fn dispatch(
         "/api/net" => ok(serde_json::json!({ "net": crate::net::status(cfg) })),
         "/api/cell" => ok(serde_json::json!({ "cell": crate::modem::cell_info(at, cfg) })),
         "/api/lock" => ok(serde_json::json!({ "lock": crate::modem::lock_status(at, cfg) })),
+        // EIF 兜底通道状态（f22-atproxy 的 +GT* URC 消费情况）。
+        // 未刷修改 rootfs 的设备上 events 恒为 0，前端据此显示「未启用」。
+        "/api/eif" => ok(serde_json::json!({ "eif": crate::at::urc::snapshot() })),
 
         // ---- 拨号 / 挂断 ----
         "/api/dial" => dial(at, cfg, payload),
