@@ -825,6 +825,12 @@ pub struct PdpState {
     pub ipv4: String,
     pub ipv6: String,
     pub dns: Vec<String>,
+    /// 模组侧 `AT+CGCONTRDP` 字段位 4 上报的 IPv4 网关（未激活/未上报为空）。
+    /// 下发链路在 auto 模式下优先采信该值，见 `net::plan_gateway`（审查问题 #5）。
+    pub gw4: String,
+    /// 同字段位的 IPv6 网关（点分十进制已解码；当前仅透出展示，
+    /// v6 默认路由仍由 RA / 设备路由方案接管）。
+    pub gw6: String,
     pub raw: Vec<(String, String)>,
 }
 
@@ -834,7 +840,7 @@ pub struct PdpState {
 ///
 /// FM350 在 IPv6 未分配时会回形如 `0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1` 的伪地址，
 /// 段数为 16，会被本函数正确判为无效。
-fn is_valid_ipv4(s: &str) -> bool {
+pub fn is_valid_ipv4(s: &str) -> bool {
     if s.is_empty() || s.contains(':') {
         return false;
     }
@@ -930,21 +936,67 @@ fn format_ipv6_groups(g: &[u16]) -> String {
 
 /// 把 AT 上报的 IPv6 归一化为标准冒号表示；非法或占位返回 `None`。
 ///
-/// 两条通路：标准冒号形式直接采信；FM350 的点分十进制形式先解码。
+/// 两条通路：
+///   * 标准冒号形式 —— 先做**结构校验**（至多一个 `::`、每组 1~4 位十六进制、
+///     无 `::` 时恰好 8 组），再排除全零占位。旧版只要含十六进制字符就采信，
+///     `gg::1`、`2409::8::1`（两个 `::`）这类脏值会被原样写进 UCI
+///     （审查问题：normalize_ipv6 过宽）；
+///   * FM350 的点分十进制形式 —— 走 [`decode_dotted_ipv6`]。
+///
 /// 返回值统一为标准写法，前端可直接展示，不必再感知模组方言。
+/// zone id（`%eth2`）与方括号展示形态（`[2409::1]`）在此剥掉。
 pub fn normalize_ipv6(s: &str) -> Option<String> {
     if s.contains(':') {
-        if s.is_empty() {
+        let core = s
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split('%')
+            .next()
+            .unwrap_or("");
+        if core.is_empty() || !well_formed_colon_v6(core) {
             return None;
         }
-        let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let hex: String = core.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         if hex.is_empty() || hex.chars().all(|c| c == '0') {
             return None;
         }
-        Some(s.to_string())
+        Some(core.to_string())
     } else {
         decode_dotted_ipv6(s)
     }
+}
+
+/// 冒号形式的结构校验：至多一个 `::`，每组 1~4 位十六进制；
+/// 无 `::` 时必须恰好 8 组，有 `::` 时显式组数必须 < 8。
+fn well_formed_colon_v6(core: &str) -> bool {
+    let mut split = core.splitn(2, "::");
+    let head = split.next().unwrap_or("");
+    match split.next() {
+        None => count_v6_groups(head) == Some(8),
+        Some(tail) => match (count_v6_groups(head), count_v6_groups(tail)) {
+            (Some(a), Some(b)) => a + b < 8,
+            _ => false,
+        },
+    }
+}
+
+/// 统计一段冒号分隔文本中的合法组数（空串 = 0 组；任一组非法返回 None）。
+///
+/// 尾段若还含 `::`，`split(':')` 会产生空组，同样判非法 —— 这正是
+/// 「两个 `::`」被拒绝的机制。
+fn count_v6_groups(part: &str) -> Option<usize> {
+    if part.is_empty() {
+        return Some(0);
+    }
+    let mut n = 0usize;
+    for g in part.split(':') {
+        if g.is_empty() || g.len() > 4 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        n += 1;
+    }
+    Some(n)
 }
 
 /// IPv6 有效性：标准冒号形式（非全零），或 FM350 的点分十进制形式（非占位）。
@@ -1042,6 +1094,8 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     let mut contr_present = false;
     let mut contr_ipv4 = String::new();
     let mut contr_ipv6 = String::new();
+    let mut contr_gw4 = String::new();
+    let mut contr_gw6 = String::new();
     if let Ok(r) = run(at, cfg, &format!("AT+CGCONTRDP={}", cfg.cid)) {
         for line in r.lines() {
             let l = line.trim();
@@ -1059,6 +1113,19 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
                 if let Some(x) = v.get(3) {
                     if is_valid_ipv4(x) {
                         contr_ipv4 = x.clone();
+                    }
+                }
+            }
+            // 字段位 4：实机字段表标注为 <gw>（模组方言；空串 = 未下发）。
+            // auto 模式现在优先采信这里，而不是再靠「同网段 .1」猜
+            // （审查问题 #5：该字段此前被整个忽略）。同一位置在 IPv6 会话
+            // 下给点分十进制 IPv6 网关，一并解码到 gw6。
+            if contr_gw4.is_empty() && contr_gw6.is_empty() {
+                if let Some(x) = v.get(4) {
+                    if is_valid_ipv4(x) {
+                        contr_gw4 = x.clone();
+                    } else if let Some(a6) = normalize_ipv6(x) {
+                        contr_gw6 = a6;
                     }
                 }
             }
@@ -1129,16 +1196,29 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
             // CGPADDR 没给过 IPv6 位（老固件）时才用 CGCONTRDP 兜底。
             st.ipv6 = contr_ipv6;
         }
+        // 模组侧网关（CGCONTRDP 字段位 4）：仅在激活时采信 —— 未激活时
+        // CGCONTRDP 返回的是上一轮残留，与死地址同理一律不采信。
+        st.gw4 = contr_gw4;
+        st.gw6 = contr_gw6;
     }
     st.active = active;
 
     // DNS：优先 AT+GTDNS，其次 CGCONTRDP 自带
     if st.active {
         if let Ok(r) = run(at, cfg, &format!("AT+GTDNS={}", cfg.cid)) {
+            // 保留 IPv6 DNS：GTDNS 同时给 v4/v6 服务器，旧版把 v6 全部丢掉，
+            // v6-only / 双栈场景下 resolver 拿不到任何 v6 DNS（审查问题 #9）。
+            // 点分占位（0.0....1）会被 normalize_ipv6 判为占位自动滤除。
             st.dns = f(&r, "+GTDNS")
                 .into_iter()
                 .skip(1)
-                .filter(|x| is_valid_ipv4(x))
+                .filter_map(|x| {
+                    if is_valid_ipv4(&x) {
+                        Some(x)
+                    } else {
+                        normalize_ipv6(&x)
+                    }
+                })
                 .collect();
         }
         if st.dns.is_empty() {
@@ -1185,6 +1265,39 @@ mod cgact_tests {
     }
 }
 
+/// 3GPP TS27.007 <auth_type>：0=none，1=PAP，2=CHAP，3=PAP+CHAP。
+fn auth_code(auth: &str) -> u8 {
+    match auth {
+        "pap" => 1,
+        "chap" => 2,
+        "both" => 3,
+        _ => 0,
+    }
+}
+
+/// 下发鉴权参数（`AT+CGAUTH=<cid>,<auth>[,<username>,<password>]`）。
+///
+/// LuCI 页面一直提供 auth/username/password 三项配置，但此前从未真正
+/// 下发到模组 —— 需要 PAP/CHAP 的 APN 会在 `AT+CGACT=1` 阶段因鉴权缺失
+/// 而激活失败，用户只看到「拨号失败」无从排查（审查问题 #8）。
+/// `auth=none` 时显式清零，避免模组记住上一次会话的凭据。
+/// 与 [`set_apn`] 一样由调用方 best-effort 调用：个别固件对 `CGAUTH=0`
+/// 回 ERROR，不应因此阻断拨号主流程。
+pub fn apply_auth(at: &AtHandle, cfg: &Config) -> AtResult<String> {
+    let code = auth_code(&cfg.auth);
+    if code == 0 {
+        return run(at, cfg, &format!("AT+CGAUTH={},0", cfg.cid));
+    }
+    run(
+        at,
+        cfg,
+        &format!(
+            "AT+CGAUTH={},{},\"{}\",\"{}\"",
+            cfg.cid, code, cfg.username, cfg.password
+        ),
+    )
+}
+
 /// 写入 APN（`AT+CGDCONT=<cid>,"<type>","<apn>"`）。
 pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResult<String> {
     if apn.is_empty() {
@@ -1196,15 +1309,18 @@ pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResu
 
 /// 拨号：确保 APN 正确 → 激活 PDP → 读取地址。
 ///
-/// 幂等：上下文已激活且已取得地址时直接返回，不重复下发 `AT+CGACT=1`。
+/// 幂等：上下文已激活且已取得**任一地址族**的地址时直接返回，不重复下发
+/// `AT+CGACT=1`（v6-only 也是合法会话，审查问题 #1）。
 /// 若模组回 `+CME ERROR: 5847`（重复激活 PDP）等激活类错误，
 /// 不再直接判失败，而是重新读取上下文状态：只要拿到有效地址即视为成功。
 pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     let _ = set_apn(at, cfg, &cfg.apn, &cfg.pdp_type);
+    // 鉴权必须在 CGACT 之前就位（审查问题 #8：UI 的 PAP/CHAP 此前从未下发）
+    let _ = apply_auth(at, cfg);
 
     // 已激活且已取得地址时直接返回，避免重复激活（模组会回 +CME ERROR: 5847）
     let before = pdp(at, cfg);
-    if before.active && !before.ipv4.is_empty() {
+    if before.active && (!before.ipv4.is_empty() || !before.ipv6.is_empty()) {
         return Ok(before);
     }
 
@@ -1213,7 +1329,7 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
         // 重复激活（+CME ERROR: 5847）等：以「是否取到地址」为准，轮询若干次
         let mut st = pdp(at, cfg);
         for _ in 0..5 {
-            if !st.ipv4.is_empty() {
+            if !st.ipv4.is_empty() || !st.ipv6.is_empty() {
                 return Ok(st);
             }
             std::thread::sleep(std::time::Duration::from_millis(600));
@@ -1225,17 +1341,18 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
         return Err(format!("激活 PDP 失败: {}", r.replace('\n', " ")));
     }
 
-    // PDP 激活后地址可能晚一步就绪，轮询几次
+    // PDP 激活后地址可能晚一步就绪，轮询几次（任一地址族到位即可；
+    // 只有全部落空才算失败 —— v6-only 是合法会话，审查问题 #1）
     let mut st = pdp(at, cfg);
     for _ in 0..5 {
-        if !st.ipv4.is_empty() {
+        if !st.ipv4.is_empty() || !st.ipv6.is_empty() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(600));
         st = pdp(at, cfg);
     }
-    if !st.active && st.ipv4.is_empty() {
-        return Err("PDP 激活后未取得 IPv4 地址".to_string());
+    if !st.active && st.ipv4.is_empty() && st.ipv6.is_empty() {
+        return Err("PDP 激活后未取得任何地址（IPv4/IPv6）".to_string());
     }
     Ok(st)
 }
@@ -1607,6 +1724,40 @@ mod is_valid_tests {
         );
         // 全零组（16 段全 0）属占位，判无效
         assert_eq!(normalize_ipv6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0"), None);
+    }
+
+    #[test]
+    fn ipv6_colon_structure_enforced() {
+        // 旧版把任何含十六进制字符的冒号串都当合法值（审查问题）
+        assert_eq!(normalize_ipv6("gg::1"), None);
+        assert_eq!(normalize_ipv6("2409::8::1"), None); // 两个 ::
+        assert_eq!(normalize_ipv6("2409:8057:2000:4:0:0:0:8:1"), None); // 9 组
+        assert_eq!(normalize_ipv6("fe80:1:2:3:4:5:6"), None); // 7 组缺 ::
+        assert_eq!(normalize_ipv6(":2409::1"), None); // 头部空组
+        assert_eq!(normalize_ipv6("2409:8057:2000:4:0:0:0:80000"), None); // 组过长
+        // zone id 与方括号展示形态
+        assert_eq!(normalize_ipv6("fe80::1%eth2").as_deref(), Some("fe80::1"));
+        assert_eq!(
+            normalize_ipv6("[2409:8057::8]").as_deref(),
+            Some("2409:8057::8")
+        );
+        // 恰好 8 组、无 ::
+        assert_eq!(
+            normalize_ipv6("2409:8057:2000:4:0:0:0:8").as_deref(),
+            Some("2409:8057:2000:4:0:0:0:8")
+        );
+    }
+
+    #[test]
+    fn auth_code_matches_27007() {
+        use super::auth_code;
+        assert_eq!(auth_code("none"), 0);
+        assert_eq!(auth_code("pap"), 1);
+        assert_eq!(auth_code("chap"), 2);
+        assert_eq!(auth_code("both"), 3);
+        // 未知值保守按 none 处理，不下发半吊子鉴权
+        assert_eq!(auth_code(""), 0);
+        assert_eq!(auth_code("PAP"), 0); // UCI 里只有小写枚举，按字面匹配
     }
 }
 

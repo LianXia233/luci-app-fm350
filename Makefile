@@ -140,6 +140,9 @@ define Package/$(PKG_NAME)/prerm
 #!/bin/sh
 [ -n "$$$${IPKG_INSTROOT}" ] || {
 	/etc/init.d/fm350d stop 2>/dev/null
+	# stop 不再 hangup（见 init.d stop_service 注释）：卸载时补一次显式
+	# 断链与接口拆除，避免包移除后残留路由/接口 section。
+	/usr/sbin/fm350d hangup >/dev/null 2>&1 || true
 	/etc/init.d/fm350d disable 2>/dev/null
 	rm -f /tmp/luci-indexcache*
 	exit 0
