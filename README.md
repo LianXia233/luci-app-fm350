@@ -8,6 +8,7 @@
 [![ImmortalWrt](https://img.shields.io/badge/ImmortalWrt-24.x%20%7C%2025.x-ff6600.svg?style=flat-square)](https://immortalwrt.org/)
 [![Rust](https://img.shields.io/badge/Backend-Rust%202021-dea584.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![LuCI JS](https://img.shields.io/badge/Frontend-LuCI%20JS%20(No%20Lua)-brightgreen.svg?style=flat-square)](https://github.com/openwrt/luci)
+[![Status](https://img.shields.io/badge/Status-Under%20Development-orange.svg?style=flat-square)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blueviolet.svg?style=flat-square)](LICENSE)
 
 **Rust 单静态二进制** • **无 Python / Lua 后端依赖** • **串口排他持久持有** • **纯原生 LuCI JS**
@@ -15,6 +16,16 @@
 ---
 
 </div>
+
+> [!CAUTION]
+> ### ⚠️ 开发中预警与免责声明 (Under Active Development)
+>
+> **本项目当前仍处于高频开发与实机验证阶段，暂不保证功能的完整性、稳定性与可用性。**
+> - 部分功能与命令可能存在未预期 Bug，且底层接口可能随开发推进发生破坏性变更；
+> - **强烈建议勿直接用于关键生产环境或主干业务网关**；
+> - 欢迎在测试环境中试用，若遇到异常问题，请提交 Issue 并附带 `logread` 与 `fm350d status` 调试回执。
+
+---
 
 ## 目录
 
@@ -275,20 +286,20 @@ luci-app-fm350/
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                      Web 浏览器 (LuCI)                      │
-│            resources/fm350/api.js (统一 RPC 调度)           │
+│                       Web 浏览器 (LuCI)                     │
+│             resources/fm350/api.js (统一 RPC 调度)          │
 └──────────────────────────────┬──────────────────────────────┘
                                │  uhttpd / ubus JSON-RPC
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│            rpcd 代理插件 (/usr/share/rpcd/ucode/fm350.uc)   │
-│             - 负责参数检验与单引号指令转义                  │
-│             - 桥接并分发给后台 CLI 工具                     │
+│             rpcd 代理插件 (/usr/share/rpcd/ucode/fm350.uc)  │
+│              - 负责参数检验与单引号指令转义                  │
+│              - 桥接并分发给后台 CLI 工具                     │
 └──────────────────────────────┬──────────────────────────────┘
                                │  exec: fm350d <cmd>
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                 fm350d (Rust 高性能守护服务)                │
+│                  fm350d (Rust 高性能守护服务)               │
 │  - 维持 127.0.0.1:8766 本地高速 API 通信通道                │
 │  - 串口持久持有 + 半双工 AT 互斥队列调度                    │
 │  - Linux 系统默认路由守护检测                               │
@@ -296,7 +307,7 @@ luci-app-fm350/
                                │  /dev/ttyUSBx (ioctl + flock 独占持有)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               Fibocom FM350-GL 硬件模组                     │
+│                Fibocom FM350-GL 硬件模组                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
