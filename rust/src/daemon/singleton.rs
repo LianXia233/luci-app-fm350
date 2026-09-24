@@ -29,7 +29,16 @@ pub struct Singleton {
 /// 调用方拿到 `None` 必须**直接退出，绝不触碰 AT 口** —— 与其两个实例互相
 /// 打断，不如什么都不做。
 pub fn acquire() -> Option<Singleton> {
-    let f = open_lock_file()?;
+    acquire_at(LOCK_FILE)
+}
+
+/// 以指定路径抢占锁。
+///
+/// 生产代码固定走 [`acquire`]（[`LOCK_FILE`]）；此入口的存在是为了让单测
+/// 能在**无特权的临时目录**里验证 flock 语义 —— `/var/run` 需要 root 才能
+/// 建文件，CI runner 是非特权用户，直接测生产路径必然失败。
+pub fn acquire_at(path: &str) -> Option<Singleton> {
+    let f = open_lock_file(path)?;
     if !try_flock(&f)? {
         return None;
     }
@@ -37,19 +46,20 @@ pub fn acquire() -> Option<Singleton> {
 }
 
 #[cfg(unix)]
-fn open_lock_file() -> Option<File> {
+fn open_lock_file(path: &str) -> Option<File> {
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(LOCK_FILE)
+        .open(path)
         .ok()
 }
 
-/// 非 Unix 主机（仅本机 `cargo check` / `cargo test` 用）落在临时目录，
-/// 且不做加锁：目标平台始终是 Linux，该分支不会进入实际部署。
+/// 非 Unix 主机（仅本机 `cargo check` / `cargo test` 用）不做路径区分，
+/// 且不加锁：目标平台始终是 Linux，该分支不会进入实际部署。
 #[cfg(not(unix))]
-fn open_lock_file() -> Option<File> {
+fn open_lock_file(path: &str) -> Option<File> {
+    let _ = path;
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -87,15 +97,24 @@ mod tests {
 
     /// 连续抢占两次：第二次必须失败（同一进程内 flock 也会互相排斥，
     /// 因为两次 open 得到的是不同的文件描述附表条目）。
+    ///
+    /// 走 `acquire_at` + 临时目录：CI runner 无权写 `/var/run`，用生产
+    /// 路径测 flock 语义会先死在 open 上，而不是死在锁语义上。
     #[cfg(unix)]
     #[test]
     fn second_acquire_is_rejected() {
-        let a = acquire();
+        let path = std::env::temp_dir().join("fm350d-test-singleton.lock");
+        let p = path.to_str().expect("临时路径必须是合法 UTF-8");
+        let _ = std::fs::remove_file(&path);
+
+        let a = acquire_at(p);
         assert!(a.is_some());
-        let b = acquire();
+        let b = acquire_at(p);
         assert!(b.is_none(), "同一进程重复抢占应当失败");
         drop(a);
         // 原锁释放后应可再次抢占
-        assert!(acquire().is_some());
+        assert!(acquire_at(p).is_some());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
