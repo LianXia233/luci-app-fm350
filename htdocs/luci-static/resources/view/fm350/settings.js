@@ -860,9 +860,13 @@ return view.extend({
 
 		var info = (data[1] && data[1].ok && data[1].value) || {};
 		var imei = (data[2] && data[2].ok && data[2].value) || {};
-		var pdata = (data[3] && data[3].ok && data[3].value) || {};
+		var portsRes = data[3] || {};
+		var pdata = (portsRes.ok && portsRes.value) || {};
 		var portList = pdata.ports || [];
 		var atStats = pdata.stats || {};
+		/* 端口扫描失败原因：用于在 AT 串口管理区给出显式诊断，
+		   而不是让用户面对一个静默的空下拉框 */
+		var portsError = portsRes.ok ? '' : (portsRes.error || _('后端无响应'));
 		var curPort = pdata.current
 			|| uci.get('fm350', 'main', 'at_port')
 			|| '/dev/ttyUSB1';
@@ -996,6 +1000,24 @@ return view.extend({
 			+ '其它申请排他锁的程序将无法并发争抢；若有进程绕过锁强开，下方状态栏将直接列出其 PID。'
 			+ '请选择模组实际导出的 AT 口，通常为 /dev/ttyUSB1 或 /dev/ttyUSB2；更改端口保存即生效。');
 
+		/* 扫描失败或未发现候选端口时，给出显式诊断与操作指引，
+		   而不是只留下一个空下拉框让用户无从下手 */
+		if (portsError || portList.length === 0) {
+			o = s.option(form.DummyValue, '_port_scan_warn', _('端口扫描状态'));
+			o.rawhtml = true;
+			o.cfgvalue = function() {
+				var msg = portsError
+					? _('后端扫描失败：') + portsError
+						+ _('。请确认 /usr/sbin/fm350d 已安装且可由 rpcd 执行'
+							+ '（重装后执行 /etc/init.d/rpcd reload），'
+							+ '或直接使用下方「手动输入其他路径…」。')
+					: _('未发现任何候选串口（/dev/ttyUSB*、/dev/ttyACM*）。'
+						+ '请确认模组已正确枚举（在终端执行 ls /dev/ttyUSB* 核对），'
+						+ '或直接使用下方「手动输入其他路径…」。');
+				return E('div', { 'class': 'fm350-hold-badge is-warn' }, msg);
+			};
+		}
+
 		function portLabel(p) {
 			var parts = [];
 			if (p.driver) parts.push(p.driver);
@@ -1019,7 +1041,8 @@ return view.extend({
 		}
 
 		o = s.option(form.ListValue, 'at_port', _('AT 端口选择'),
-			_('候选端口来自后端扫描 /dev/ttyUSB* 与 /dev/ttyACM*，带内核驱动标识与占用探测'));
+			_('候选端口来自后端扫描 /sys/class/tty（内核注册表，权威）与 /dev/ttyUSB*、'
+				+ '/dev/ttyACM*，带内核驱动标识与占用探测'));
 		o.default = '/dev/ttyUSB1';
 		o.rmempty = false;
 		o.cfgvalue = function(section_id) {

@@ -22,6 +22,13 @@
 
 import * as fs from 'fs';
 
+/* 后端可执行文件绝对路径。
+ * 不能写相对名：rpcd 由 procd 拉起，其环境 PATH 不一定包含 /usr/sbin，
+ * 相对调用在部分固件上会静默失败（fs.popen 返回 null 或空输出），
+ * 前端看到的就是「端口扫描不到 / 全部接口无输出」。绝对路径消除这一依赖。
+ */
+const FM350D = '/usr/sbin/fm350d';
+
 /* 单引号包裹，内部单引号转义为 '\'' —— POSIX shell 安全的强引用 */
 function quote(s) {
 	return "'" + replace(s, "'", "'\\''") + "'";
@@ -29,9 +36,9 @@ function quote(s) {
 
 /* 执行后端 CLI，把标准输出原样返回（不做 JSON 解析） */
 function exec(cmd) {
-	let f = fs.popen(cmd + ' 2>/dev/null');
+	let f = fs.popen(FM350D + ' ' + cmd + ' 2>/dev/null');
 	if (!f)
-		return { ok: false, error: '无法执行命令' };
+		return { ok: false, error: '无法执行 ' + FM350D + '（二进制缺失或不可执行）' };
 
 	let data = f.read(4194304);
 	f.close();
