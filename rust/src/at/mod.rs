@@ -32,6 +32,7 @@ pub mod cmd;
 pub mod guard;
 pub mod parse;
 pub mod port;
+pub mod urc;
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -45,6 +46,7 @@ pub use parse::{field, first, first_ipv4, has_error, is_ok, raw_lines, rows, sca
 pub use port::{
     find_usb_attr, identify_at_port, is_candidate_tty, list_ports, looks_like_fm350, PortCandidate,
 };
+pub use urc::{snapshot as gt_snapshot, GtEvent};
 
 /// 旧代码里 `at::fields(resp, prefix)` 的等价物，保留这个名字以减小调用点改动。
 pub fn fields(resp: &str, prefix: &str) -> Vec<String> {
@@ -118,6 +120,9 @@ pub struct AtPort {
     timeout: Duration,
     /// 上一条命令的发出时刻，用于落实 `MIN_CMD_GAP`。
     last_cmd_at: Option<Instant>,
+    /// URC 行过滤器：所有下行字节先过这里，`+GT*` 行被截流入事件队列
+    /// （见 [`urc`]），其余行原样进入命令响应数据流。
+    gate: urc::LineGate,
 }
 
 impl AtPort {
@@ -136,6 +141,7 @@ impl AtPort {
             path: path.to_string(),
             timeout: Duration::from_secs(timeout_secs),
             last_cmd_at: None,
+            gate: urc::LineGate::default(),
         };
         p.handshake();
         Ok(p)
@@ -158,14 +164,21 @@ impl AtPort {
     ///
     /// 每条命令前调用一次。临时把超时压到 1 ms 做非阻塞排空，读完立即恢复
     /// 原超时值（不改构造时的配置，避免影响 `command()` 的轮询节拍）。
+    /// 排空的数据同样过 URC 过滤器：巡检间隔期间插进来的 `+GT*` 行在这里
+    /// 被截流入队，其余数据本来就要丢弃。
     fn drain(&mut self) -> AtResult<()> {
         let orig = self.port.timeout();
         let _ = self.port.set_timeout(DRAIN_TIMEOUT);
         let mut buf = [0u8; 512];
+        let mut sink = Vec::new();
         loop {
             match self.port.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => continue,
+                Ok(n) => {
+                    self.gate.feed(&buf[..n], &mut sink);
+                    sink.clear();
+                    continue;
+                }
             }
         }
         let _ = self.port.set_timeout(orig);
@@ -199,11 +212,15 @@ impl AtPort {
         let deadline = Instant::now() + self.timeout;
         let mut raw = String::new();
         let mut buf = [0u8; 256];
+        let mut chunk = Vec::new();
         while Instant::now() < deadline {
             match self.port.read(&mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(10)),
                 Ok(n) => {
-                    raw.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    // URC 行在此被截流入队，只有业务响应进入 raw
+                    self.gate.feed(&buf[..n], &mut chunk);
+                    raw.push_str(&String::from_utf8_lossy(&chunk));
+                    chunk.clear();
                     if finished(&raw) {
                         break;
                     }
@@ -227,11 +244,14 @@ impl AtPort {
         let deadline = Instant::now() + timeout;
         let mut raw = String::new();
         let mut buf = [0u8; 256];
+        let mut chunk = Vec::new();
         while Instant::now() < deadline {
             match self.port.read(&mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(10)),
                 Ok(n) => {
-                    raw.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    self.gate.feed(&buf[..n], &mut chunk);
+                    raw.push_str(&String::from_utf8_lossy(&chunk));
+                    chunk.clear();
                     if raw.contains(needle) {
                         return Ok(raw);
                     }

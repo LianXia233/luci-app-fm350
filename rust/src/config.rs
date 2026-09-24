@@ -75,6 +75,14 @@ pub struct Config {
     /// 完全不看 `net.ipv6.conf.<dev>.accept_ra`，天然绕开「接口进 WAN 区后
     /// forwarding=1、内核默认丢弃 RA」这个坑，因此作为默认值。
     pub v6_mode: String,
+    /// EIF 兜底加速（f22-atproxy 的 `+GT*` URC 消费）。
+    ///
+    /// 开启后，守护在 AT 口下行流里被动捕获 `+GTIFADDR: ipadd` 等事件，
+    /// 缩短下一次巡检的等待 —— 让「模组侧地址变化 → 本机核对/下发 V4」
+    /// 从最长一个巡检周期缩短到秒级。**这是纯加速，不是依赖**：未刷
+    /// atproxy rootfs 的设备上永远没有 `+GT*` 事件，主线轮询照常工作。
+    /// 巡检动作本身完全复用拨号巡检，不引入新的写路径。
+    pub eif_guard: bool,
     pub poll_interval: u64,
     /// 从模组 AT/PDP 信息轮询最新 IPv6 的周期。0 表示关闭独立 V6 轮询。
     pub v6_poll_interval: u64,
@@ -114,6 +122,7 @@ impl Default for Config {
             net_guard: true,
             net_guard_rounds: 3,
             v6_mode: "dhcpv6".into(),
+            eif_guard: true,
             poll_interval: 30,
             v6_poll_interval: 300,
             v6_refresh_interval: 1800,
@@ -198,6 +207,7 @@ pub fn load() -> Config {
         net_guard: opt_bool("net_guard", d.net_guard),
         net_guard_rounds: opt_num("net_guard_rounds", d.net_guard_rounds),
         v6_mode: opt_str("v6_mode", &d.v6_mode),
+        eif_guard: opt_bool("eif_guard", d.eif_guard),
         poll_interval: opt_num("poll_interval", d.poll_interval),
         v6_poll_interval: opt_num("v6_poll_interval", d.v6_poll_interval),
         v6_refresh_interval: opt_num("v6_refresh_interval", d.v6_refresh_interval),

@@ -22,6 +22,7 @@
 //! | 公网连通 | [`guard::NetGuard`] | 双栈各自能否出公网 |
 //! | 接口冲突 | [`guard::ConflictWatch`] | 同一数据网卡上是否有别的插件也在建接口 |
 //! | AT 口 | [`port`] | 配置热切换、端口消失改选、独占事实 |
+//! | EIF 兜底 | [`gt`] | `+GT*` URC 消费、地址事件触发巡检加速（可选增强） |
 //!
 //! ## 顺序为什么是这个顺序
 //!
@@ -31,7 +32,6 @@
 //! AT 访问都变成重新打开，白白多一次串口握手。
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::at::AtHandle;
 use crate::config;
@@ -39,6 +39,7 @@ use crate::infof;
 use crate::net;
 
 pub mod dial;
+pub mod gt;
 pub mod guard;
 pub mod port;
 pub mod sig;
@@ -47,6 +48,7 @@ pub mod v6;
 
 pub use dial::{redial, DialWatch, NO_ADDR_REDIAL_ROUNDS};
 pub use guard::{ConflictWatch, DataGuard, NetGuard};
+pub use gt::GtWatch;
 pub use port::PortWatch;
 pub use singleton::{acquire, Singleton, LOCK_FILE};
 pub use v6::V6Watch;
@@ -80,11 +82,16 @@ pub fn run(cfg_initial: config::Config) -> Result<(), String> {
     let mut netg = NetGuard::new();
     let mut conflict = ConflictWatch::new();
     let mut port = PortWatch::new();
+    let mut gt = GtWatch::new();
 
     loop {
         // 每轮重新读配置：用户在 LuCI 改的参数下一轮即生效，无需重启服务。
         let cfg = config::load();
         let interval = cfg.poll_interval.max(MIN_POLL_INTERVAL);
+
+        // EIF 兜底加速：消费上一轮巡检期间被截流的 URC 事件。地址类事件
+        // 会置起加速标志，让本轮末尾的睡眠压到秒级，下一轮尽快复核地址。
+        gt.tick(&cfg);
 
         dial.tick(&at, &cfg, &mut v6);
         sig::reapply_on_change(&cfg);
@@ -101,6 +108,9 @@ pub fn run(cfg_initial: config::Config) -> Result<(), String> {
         port.reselect_if_down(&at, &cfg);
         port.observe_exclusivity(&at, &cfg);
 
-        std::thread::sleep(Duration::from_secs(interval));
+        // 加速标志在取走睡眠时长之后才清零，保证「事件 → 短睡眠」链路生效
+        let sleep = gt.sleep_interval(interval);
+        gt.consume_accel();
+        std::thread::sleep(sleep);
     }
 }
