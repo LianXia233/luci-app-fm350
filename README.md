@@ -180,7 +180,7 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 | 硬件控制 | 软件重启模组、飞行模式与在线模式切换、实体双 SIM 卡槽软件倒换、USB 复合模式调整 |
 | IMEI 管理 | 串号读取、出厂原始数据镜像备份、受控安全写入（15 位格式校验与双重确认锁，Luhn 仅提示） |
 | 交互终端 | 网页端内置交互式 AT 透传终端，安全半双工通信，拦截越权破坏性指令 |
-| 智能串口 | 自动枚举探测 `/dev/ttyUSB*` 与 `/dev/ttyACM*`，呈现驱动内核信息、VID:PID，高亮识别 Fibocom 候选口 |
+| 智能串口 | 三源合并枚举（`/sys/class/tty` 内核注册表 + `/dev` + `/dev/serial/by-id|by-path`）探测 `/dev/ttyUSB*` 与 `/dev/ttyACM*`，呈现驱动内核信息、VID:PID，高亮识别 Fibocom 候选口；节点暂缺时如实标注「等待重枚举」 |
 
 ## 状态仪表盘与派生算法
 
@@ -245,12 +245,21 @@ SIGNAL = 0.40 x SINR_norm + 0.35 x RSRP_norm + 0.25 x RSRQ_norm
 ```text
 luci-app-fm350/
 ├── Makefile                                 # 打包与 Rust 交叉编译集成配方
-├── README.md / CHANGELOG.md                 # 项目文档与版本日志
+├── README.md / CHANGELOG.md / LICENSE       # 项目文档、版本日志与许可
+├── .gitattributes / .gitignore              # LF 行尾强制、忽略规则
 ├── .github/workflows/
 │   ├── ci.yml                               # 静态门禁 + Rust 单测（推送 / PR 触发）
 │   └── release.yml                          # 自动化发布流水线（tag 或手动触发）
+├── docs/
+│   ├── preview/                             # 各页面实机截图（README 界面预览引用）
+│   └── REFACTOR.md                          # 1.0.11 后端模块化重构说明（模块职责图）
+├── f22-atproxy/                             # 可选增强：F22 语义代理（随修改 rootfs 提供）
+│   ├── Makefile / README.md                 # 构建与 URC 输出协议说明
+│   ├── src/atproxy.c                        # 订阅 EIF_IND、降维输出 +GT* URC 的守护
+│   └── files/atproxy.init                   # procd init 脚本
 ├── scripts/
-│   └── build-release.sh                     # 基于官方 SDK 的发布构建脚本
+│   ├── build-release.sh                     # 基于官方 SDK 的发布构建脚本
+│   └── clean-release-assets.sh              # 发布前清理同 Release 内旧版本安装包
 ├── htdocs/luci-static/resources/
 │   ├── fm350/api.js                         # 前端统一 RPC 客户端
 │   ├── fm350/css/fm350.css                  # 独立样式表（严禁内联 CSS）
@@ -268,11 +277,33 @@ luci-app-fm350/
 │           ├── acl.d/luci-app-fm350.json    # RPCD 鉴权 ACL
 │           └── ucode/fm350.uc               # ucode 代理层（UBUS 桥接 fm350d CLI）
 └── rust/                                    # fm350d 核心后端 (Rust 2021)
-    ├── Cargo.toml / .cargo/config.toml      # 依赖声明与交叉链接器配置
-    └── src/
-        ├── at.rs / config.rs                # 串口持有与 AT 通道 / UCI 读写（2s 缓存）
-        ├── modem.rs / sms.rs / imei.rs      # 信号与温度 / PDU 编解码 / IMEI 防护
-        ├── net.rs / api.rs / main.rs        # 网络同步与路由自愈 / 本地 JSON-RPC / 守护主循环
+    ├── Cargo.toml / Cargo.lock              # 依赖声明与锁文件
+    ├── .cargo/config.toml                   # musl 交叉链接器配置
+    └── src/                                 # 模块树（职责划分详见 docs/REFACTOR.md）
+        ├── main.rs / lib.rs                 # 二进制入口 / crate 根（分层图与硬约束）
+        ├── cli.rs / config.rs / log.rs      # 命令行派发 / UCI 读写（2s 缓存）/ 日志
+        ├── addr.rs / imei.rs                # 地址解析工具 / IMEI 读写备份防护
+        ├── api/                             # 本地 JSON API（仅 127.0.0.1）
+        │   ├── mod.rs / http.rs / route.rs  # serve 主循环 / 报文与信封 / 路由表
+        ├── daemon/                          # 守护：一轮巡检的编排与各巡检器
+        │   ├── mod.rs / singleton.rs        # 编排 / flock 单实例守卫
+        │   ├── dial.rs / v6.rs / sig.rs     # PDP 状态机 / IPv6 维护 / 参数签名
+        │   ├── guard.rs / port.rs           # 数据面自愈+连通保活 / AT 口看护
+        │   └── gt.rs                        # EIF 兜底加速巡检（1.0.12 起）
+        ├── at/                              # AT 层：独占持有 + 协议 + 命令字面量
+        │   ├── mod.rs / port.rs / parse.rs  # AtPort/AtHandle / 端口探测识别 / 解析原语
+        │   ├── cmd.rs / guard.rs            # AT 命令唯一出处 / IMEI 写入拦截
+        │   └── urc.rs                       # URC 行门与事件队列（+GT*，1.0.12 起）
+        ├── modem/                           # 模组状态与动作（AT 的业务语义）
+        │   ├── mod.rs / info.rs / signal.rs # 公共入口 / 模组信息 / 信号解析
+        │   ├── pdp.rs / bind.rs / lock.rs   # PDP 状态机 / EMBIND 体检 / 锁频锁小区
+        │   ├── band.rs / temp.rs            # 频段换算 / 传感器温度
+        ├── net/                             # 主机侧网络：把模组地址变成能上网的接口
+        │   ├── mod.rs / shell.rs / iface.rs # 边界说明 / 外部命令出口 / UCI 接口骨架
+        │   ├── gateway.rs / v6.rs           # 网关规划与 ARP 实测 / IPv6 取址
+        │   ├── heal.rs / probe.rs           # 路由自愈 / 网卡与连通性探测
+        └── sms/                             # 短信（PDU 模式）
+            ├── mod.rs / pdu.rs / gsm7.rs    # AT 交互 / PDU 编解码 / GSM 03.38
 ```
 
 > [!IMPORTANT]
@@ -418,7 +449,7 @@ fm350d info                # 固件版本、SN、ICCID 等识别信息
 fm350d signal              # 实时信号（RSRP/RSRQ/SINR）与来源分支
 fm350d pdp                 # PDP 上下文激活状态与 IP 分配
 fm350d net                 # 接口与内核默认路由状态
-fm350d ports               # 扫描候选串口并探测占用（--no-probe 仅读 sysfs）
+fm350d ports               # 三源扫描候选串口（sysfs + /dev + udev 链接）并探测占用（--no-probe 仅读 sysfs）
 
 # 拨号与网络
 fm350d dial                # 触发拨号并配置静态/路由参数

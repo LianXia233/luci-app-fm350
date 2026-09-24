@@ -2,7 +2,47 @@
 
 本项目遵循语义化版本号。
 
-## 1.0.12
+## 1.0.12-r2
+
+**串口枚举与 CI 修复**：修复「LuCI 设置页 AT 端口选择扫描不到系统已有
+`/dev/ttyUSB*` / `/dev/ttyACM*`」问题，并把 CI 恢复到全绿。
+
+### 修复
+
+- **三源合并枚举（`at::port`）**：候选串口来源由单一 `read_dir("/dev")`
+  升级为 `/sys/class/tty`（内核注册表，权威）+ `/dev` + `/dev/serial/by-id`、
+  `/dev/serial/by-path`（udev 链接）三源合并去重（BTreeSet，字典序）。
+  设备只要被内核注册就一定能被枚举到，不再受 devtmpfs 节点滞后/缺失影响；
+  任一来源异常（目录不可读 / 链接悬空）不影响其余来源。
+- **sysfs 属性读取加固（`at::port::find_usb_attr`）**：`/sys/class/tty/<name>/device`
+  链接缺失或悬空（`canonicalize` 失败）时回退到 class 目录自身解析；
+  向上遍历深度 6 → 8，兼容深嵌套平台设备树。保证 VID/PID/厂商描述在任何
+  内核布局下都能取到，Fibocom 端口识别与排序不再失真。
+- **节点缺失如实标注**：sysfs 已注册但 `/dev` 节点暂缺（热插拔瞬间）时，
+  跳过独占探测并标注「设备节点缺失（等待模组重新枚举）」，不再误报为
+  「被占用」。
+- **daemon 代理短超时（`cli`）**：`via_daemon` 增加显式 `read_timeout`
+  参数；`fm350d ports` 改走 2 秒短超时，daemon 存在但不响应时本地扫描
+  立即接管，消除最长 60 秒白等导致的「扫描不到/页面转圈」。
+- **rpcd 绝对路径（`fm350.uc`）**：后端调用统一改为
+  `/usr/sbin/fm350d` 绝对路径，消除 rpcd 环境 PATH 不含 /usr/sbin 时
+  全部接口静默失败的问题；失败时返回明确错误文本。
+- **前端诊断横幅（`settings.js`）**：端口扫描失败或为空时，在 AT 串口管理
+  区显示显式诊断与排查指引，不再静默留下空下拉框。
+- **构建依赖收敛（`Cargo.toml` / `Cargo.lock`）**：`serialport` 关闭默认
+  `libudev` 特性（本项目端口枚举走自研 sysfs 扫描，从不调用
+  `available_ports()`），移除 `libudev` / `libudev-sys` / `pkg-config`
+  系统库依赖，无 libudev 环境（OpenWrt musl 等）可直接编译。
+- **CI 修复**：移除 `daemon::gt` 未使用的 `SystemTime` / `UNIX_EPOCH`
+  导入（`RUSTFLAGS=-D warnings` 下编译失败）；补齐 1.0.12-r1 版本段，
+  恢复「版本号与 CHANGELOG 一致」门禁。
+
+### 新增
+
+- `at::port` 新增 3 项单元测试：多来源合并去重与过滤、空来源不 panic、
+  悬空 `device` 链接回退读取。
+
+## 1.0.12-r1
 
 **EIF 兜底增强**：适配 F22 语义代理（f22-atproxy，随修改版 root.squashfs 提供）的
 `+GT*` URC。**这是纯增强，不是依赖** —— 未刷修改 rootfs 的设备上永远没有

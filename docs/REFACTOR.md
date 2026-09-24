@@ -23,13 +23,15 @@ rust/src/
 │   ├── v6.rs          IPv6 维护工位：模组轮询、刷新时机、恢复分级
 │   ├── sig.rs         参数签名巡检（uci set 热生效）
 │   ├── guard.rs       数据面自愈 + 双栈连通性保活 + 接口冲突告警
-│   └── port.rs        AT 口看护：热切换、消失改选、独占事实巡检
+│   ├── port.rs        AT 口看护：热切换、消失改选、独占事实巡检
+│   └── gt.rs          EIF 兜底加速巡检（1.0.12 起）：消费 +GT* URC，请求巡检提前
 ├── at/                AT 层：独占持有 + 协议 + 命令字面量
 │   ├── mod.rs         AtPort / AtHandle（进程内串行、TIOCEXCL）
-│   ├── port.rs        端口探测与识别（sysfs vid/pid/driver）
+│   ├── port.rs        端口探测与识别（sysfs vid/pid/driver；1.0.12-r2 起三源合并枚举）
 │   ├── parse.rs       响应解析原语
 │   ├── cmd.rs         全部 AT 命令字面量的唯一出处
-│   └── guard.rs       IMEI 写入拦截
+│   ├── guard.rs       IMEI 写入拦截
+│   └── urc.rs         URC 行门与事件队列（+GT* 截流，1.0.12 起）
 ├── modem/             模组状态与动作（AT 的业务语义）
 │   ├── mod.rs         status / run / f 等公共入口
 │   ├── info.rs        模组信息（厂商/型号/固件/IMSI/ICCID）
