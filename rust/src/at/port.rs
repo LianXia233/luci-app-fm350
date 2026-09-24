@@ -82,10 +82,20 @@ pub struct PortCandidate {
 ///
 /// `/sys/class/tty/ttyUSB1/device` 是指向 interface 目录的符号链接，
 /// 必须先 `canonicalize` 解析，否则文本层面的 `..` 会退回 `/sys/class/tty`。
+///
+/// 兼容性回退：个别内核/裁剪固件上该 `device` 链接可能缺失或悬空
+/// （`canonicalize` 失败）。此时从 `/sys/class/tty/<name>` 自身解析——
+/// class 目录本身就是指向设备目录的符号链接，同样能向上走到 USB
+/// 描述符层（idVendor / manufacturer / product 在设备层，接口层只有
+/// idVendor / idProduct，向上走两级都能取到）。
 pub fn find_usb_attr(start: &std::path::Path, attr: &str) -> Option<String> {
-    let base = std::fs::canonicalize(start).ok()?;
+    let base = std::fs::canonicalize(start)
+        .ok()
+        .or_else(|| start.parent().and_then(|p| std::fs::canonicalize(p).ok()))?;
     let mut cur: Option<PathBuf> = Some(base);
-    for _ in 0..6 {
+    // 深度放宽到 8：平台设备树（platform/soc/.../usb1/1-1/1-1:1.0/ttyUSB0）
+    // 的嵌套可达 6 层以上，6 层在某些 SoC 布局下会差一级取不到描述符。
+    for _ in 0..8 {
         let dir = cur?;
         if let Ok(s) = std::fs::read_to_string(dir.join(attr)) {
             let t = s.trim().to_string();
@@ -96,6 +106,61 @@ pub fn find_usb_attr(start: &std::path::Path, attr: &str) -> Option<String> {
         cur = dir.parent().map(|p| p.to_path_buf());
     }
     None
+}
+
+/// 把多个来源的名称合并去重，仅保留候选 tty 前缀（纯函数，便于单测）。
+fn merge_candidate_names(sources: impl IntoIterator<Item = Vec<String>>) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for names in sources {
+        for n in names {
+            if is_candidate_tty(&n) {
+                set.insert(n);
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// 收集系统里全部候选 tty 名称，三个来源合并（去重、字典序）：
+///
+/// 1. `/sys/class/tty`：**内核注册表，权威来源**。只要驱动注册了 tty
+///    类设备就一定在此，与 `/dev` 节点是否已创建无关（devtmpfs 在
+///    热插拔瞬间可能滞后，某些精简固件甚至不建节点）；
+/// 2. `/dev`：设备节点；
+/// 3. `/dev/serial/by-id` / `/dev/serial/by-path`：udev 符号链接
+///    （桌面发行版常见），解析目标文件名后按同样规则过滤。
+///
+/// 任一来源异常（目录不存在 / 不可读 / 链接悬空）都不影响其它来源，
+/// 保证「系统已有的串口」只要被内核识别就一定能枚举到。
+fn collect_candidate_names() -> Vec<String> {
+    let mut sys = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/class/tty") {
+        for e in rd.flatten() {
+            sys.push(e.file_name().to_string_lossy().to_string());
+        }
+    }
+
+    let mut dev = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/dev") {
+        for e in rd.flatten() {
+            dev.push(e.file_name().to_string_lossy().to_string());
+        }
+    }
+
+    let mut link = Vec::new();
+    for dir in ["/dev/serial/by-id", "/dev/serial/by-path"] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if let Ok(t) = std::fs::read_link(e.path()) {
+                    if let Some(f) = t.file_name() {
+                        link.push(f.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    merge_candidate_names([sys, dev, link])
 }
 
 /// 尝试独占打开一次以判断端口是否空闲。不发送任何数据，随即释放。
@@ -130,59 +195,58 @@ fn sort_ports(v: &mut [PortCandidate]) {
 pub fn list_ports(cfg: &Config, probe: bool) -> Vec<PortCandidate> {
     let mut out: Vec<PortCandidate> = Vec::new();
 
-    if let Ok(rd) = std::fs::read_dir("/dev") {
-        let mut names: Vec<String> = rd
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| is_candidate_tty(n))
-            .collect();
-        names.sort(); // readdir 顺序不稳定，排序保证同构环境行为可复现
+    // 从「内核注册表 + 设备节点 + udev 链接」三个来源合并出候选名：
+    // 只要设备已被内核识别，就一定能被枚举到（不再只依赖 /dev readdir）。
+    for name in collect_candidate_names() {
+        let path = format!("/dev/{}", name);
+        let sysobj = PathBuf::from(format!("/sys/class/tty/{}", name)).join("device");
+        let driver = std::fs::read_link(sysobj.join("driver"))
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let vid = find_usb_attr(&sysobj, "idVendor").unwrap_or_default();
+        let pid = find_usb_attr(&sysobj, "idProduct").unwrap_or_default();
+        let vendor = find_usb_attr(&sysobj, "manufacturer").unwrap_or_default();
+        let product = find_usb_attr(&sysobj, "product").unwrap_or_default();
+        let current = path == cfg.at_port;
 
-        for name in names {
-            let path = format!("/dev/{}", name);
-            let sysobj = PathBuf::from(format!("/sys/class/tty/{}", name)).join("device");
-            let driver = std::fs::read_link(sysobj.join("driver"))
-                .map(|p| {
-                    p.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .unwrap_or_default();
-            let vid = find_usb_attr(&sysobj, "idVendor").unwrap_or_default();
-            let pid = find_usb_attr(&sysobj, "idProduct").unwrap_or_default();
-            let vendor = find_usb_attr(&sysobj, "manufacturer").unwrap_or_default();
-            let product = find_usb_attr(&sysobj, "product").unwrap_or_default();
-            let current = path == cfg.at_port;
-
-            let (busy, note) = if probe {
-                let (b, n) = probe_busy(&path, cfg.baudrate);
-                let n = if current {
-                    format!("{}（当前配置端口）", n)
-                } else {
-                    n
-                };
-                (b, n)
-            } else if current {
-                (None, "当前配置端口".to_string())
+        // 节点不存在时不做独占探测（open 必然失败，报「被占用」反而误导），
+        // 如实标注「等待重枚举」—— 这正对应「sysfs 已注册但 devtmpfs 节点
+        // 尚未创建」的热插拔瞬间，前端可据此区分。
+        let dev_exists = std::fs::metadata(&path).is_ok();
+        let (busy, note) = if probe && dev_exists {
+            let (b, n) = probe_busy(&path, cfg.baudrate);
+            let n = if current {
+                format!("{}（当前配置端口）", n)
             } else {
-                (None, String::new())
+                n
             };
+            (b, n)
+        } else if probe && !dev_exists {
+            (None, "设备节点缺失（等待模组重新枚举）".to_string())
+        } else if current {
+            (None, "当前配置端口".to_string())
+        } else {
+            (None, String::new())
+        };
 
-            out.push(PortCandidate {
-                likely_fm350: looks_like_fm350(&vid, &vendor, &product),
-                path,
-                name,
-                driver,
-                vid,
-                pid,
-                vendor,
-                product,
-                current,
-                busy,
-                note,
-            });
-        }
+        out.push(PortCandidate {
+            likely_fm350: looks_like_fm350(&vid, &vendor, &product),
+            path,
+            name,
+            driver,
+            vid,
+            pid,
+            vendor,
+            product,
+            current,
+            busy,
+            note,
+        });
     }
 
     sort_ports(&mut out);
@@ -297,6 +361,52 @@ mod tests {
         assert_eq!(find_usb_attr(&deeper, "notExist"), None);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `/sys/class/tty/<name>/device` 悬空（canonicalize 失败）时，
+    /// 必须回退到 class 目录自身并仍能读到 USB 描述符。
+    #[cfg(unix)]
+    #[test]
+    fn find_usb_attr_falls_back_when_device_link_is_dangling() {
+        let root = std::env::temp_dir().join(format!("fm350-attr-fb-{}", std::process::id()));
+        let class = root.join("ttyUSB0");
+        std::fs::create_dir_all(&class).unwrap();
+        std::fs::write(class.join("idVendor"), "2cb7\n").unwrap();
+        std::fs::write(class.join("product"), "FM350-GL\n").unwrap();
+        // 悬空符号链接：canonicalize(device) 必然失败，走 class 目录回退
+        std::os::unix::fs::symlink("/nonexistent-fm350-target", class.join("device")).unwrap();
+
+        let start = class.join("device");
+        assert_eq!(find_usb_attr(&start, "idVendor"), Some("2cb7".to_string()));
+        assert_eq!(
+            find_usb_attr(&start, "product"),
+            Some("FM350-GL".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 多来源合并：去重、过滤非候选名（ttyS0 / sda）、字典序输出。
+    #[test]
+    fn merge_candidate_names_dedupes_and_filters() {
+        let merged = merge_candidate_names(vec![
+            vec![
+                "ttyUSB0".into(),
+                "ttyUSB1".into(),
+                "ttyS0".into(),
+                "sda".into(),
+                "tty".into(),
+            ],
+            vec!["ttyUSB1".into(), "ttyACM3".into(), "ttyUSBa".into()],
+        ]);
+        assert_eq!(merged, vec!["ttyACM3", "ttyUSB0", "ttyUSB1"]);
+    }
+
+    /// 三个来源全部为空时返回空，不 panic。
+    #[test]
+    fn merge_candidate_names_handles_empty_sources() {
+        assert!(merge_candidate_names(Vec::<Vec<String>>::new()).is_empty());
+        assert!(merge_candidate_names(vec![Vec::<String>::new()]).is_empty());
     }
 
     #[test]

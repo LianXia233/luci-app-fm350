@@ -67,12 +67,20 @@ fm350d —— FM350 模组后端守护与命令行工具
 ";
 
 /// 通过 daemon 的本地 API 执行（daemon 未运行时返回 None）。
-fn via_daemon(cfg: &Config, method: &str, path: &str, payload: Option<&Json>) -> Option<Json> {
+///
+/// `read_timeout` 由调用方按语义决定：AT 类命令需要覆盖命令往返时间
+/// （最长 at_timeout），而 `ports` 这类纯枚举命令给短超时 —— daemon
+/// 无响应时快速回落到本地扫描，避免 LuCI 页面长时间转圈。
+fn via_daemon(
+    cfg: &Config,
+    method: &str,
+    path: &str,
+    payload: Option<&Json>,
+    read_timeout: Duration,
+) -> Option<Json> {
     let addr = format!("127.0.0.1:{}", cfg.api_port);
     let mut stream = TcpStream::connect_timeout(&addr.parse().ok()?, DAEMON_CONNECT_TIMEOUT).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(cfg.at_timeout.max(60))))
-        .ok()?;
+    stream.set_read_timeout(Some(read_timeout)).ok()?;
 
     let body = payload.map(|p| p.to_string()).unwrap_or_default();
     let req = format!(
@@ -119,7 +127,13 @@ fn run_cli<F>(cfg: &Config, method: &str, path: &str, payload: Option<&Json>, lo
 where
     F: FnOnce(&AtHandle, &Config) -> Json,
 {
-    if let Some(j) = via_daemon(cfg, method, path, payload) {
+    if let Some(j) = via_daemon(
+        cfg,
+        method,
+        path,
+        payload,
+        Duration::from_secs(cfg.at_timeout.max(60)),
+    ) {
         print_json(&j);
         return;
     }
@@ -184,7 +198,11 @@ pub fn run() {
             } else {
                 "/api/ports?probe=0"
             };
-            match via_daemon(&cfg, "GET", path, None) {
+            // 关键：这里用 2 秒短读超时。daemon 存在但无响应（巡检阻塞 /
+            // 单实例锁竞争 / 半死状态）时，若沿用 run_cli 的最长 60 秒
+            // 超时，`fm350d ports` 会白等一分钟，LuCI 页面表现为
+            // 「扫描不到任何端口」。短超时让本地扫描立即接管。
+            match via_daemon(&cfg, "GET", path, None, Duration::from_secs(2)) {
                 Some(j) => print_json(&j),
                 None => print_json(&serde_json::json!({
                     "ok": true,

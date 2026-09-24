@@ -16,7 +16,12 @@ name = "fm350d"
 path = "src/main.rs"
 
 [dependencies]
-serialport = "4"
+# serialport 的默认特性只有 libudev，且仅服务于它自带的 available_ports()
+# 端口枚举。本项目端口枚举走 at::port 自己的 sysfs 扫描（/sys/class/tty +
+# /dev + /dev/serial/by-*），从不调用该枚举 API，因此显式关闭默认特性：
+# 移除了 pkg-config / libudev 系统库依赖（OpenWrt musl 与精简系统通常没有
+# libudev），open/read/write/timeout/exclusive 等核心 API 不受影响。
+serialport = { version = "4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
