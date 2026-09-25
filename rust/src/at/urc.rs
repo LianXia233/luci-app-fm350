@@ -180,12 +180,15 @@ struct FeedInner {
     dropped: u64,
     /// 形态非法被吞掉的 `+GT` 行数。
     malformed: u64,
+    /// 最近一条被拒的原始行（截断到 160 字符）。
+    last_malformed: String,
 }
 
 static FEED: Mutex<FeedInner> = Mutex::new(FeedInner {
     queue: VecDeque::new(),
     dropped: 0,
     malformed: 0,
+    last_malformed: String::new(),
 });
 
 /// 守护消费的跨轮状态快照（`/api/eif` 暴露）。
@@ -197,6 +200,8 @@ pub struct GtState {
     pub dropped: u64,
     /// 畸形 `+GT` 行数。
     pub malformed: u64,
+    /// 最近一条被拒的原始行（截断到 160 字符，用于适配真实输出格式）。
+    pub last_malformed: String,
     /// 最近事件动词（空 = 从未收到）。
     pub last_reason: String,
     pub last_cause: i64,
@@ -214,6 +219,7 @@ static STATE: Mutex<GtState> = Mutex::new(GtState {
     events: 0,
     dropped: 0,
     malformed: 0,
+    last_malformed: String::new(),
     last_reason: String::new(),
     last_cause: 0,
     last_at: 0,
@@ -277,8 +283,17 @@ fn push_event(ev: GtEvent) {
 
 /// 读取路径统一入口：整行已按 `\n` 切好。
 /// 返回 `true` 表示该行已被 URC 层吞掉（不进命令响应数据流）。
+///
+/// 前缀必须**精确匹配**已知的 5 类 EIF URC，不能用 `+GT` 宽匹配：
+/// 这台模组的原生固件自己也会发 `+GT` 前缀的 URC（实测 `+GTDNS`——
+/// DNS 变化通知，解码为 `240e:1f:1::1` 之类电信 DNS），而且
+/// `AT+GTDNS` **查询的响应行**同样以 `+GTDNS:` 开头 —— 宽匹配会把
+/// 查询响应一并吞掉，导致巡检的 DNS 解析永远为空。
 pub fn capture_line(line: &str) -> bool {
-    if !line.starts_with("+GT") {
+    const GT_URC_PREFIXES: &[&str] = &[
+        "+GTNORA", "+GTIFMTU", "+GTIFST", "+GTIFADDR", "+GTIFEVT",
+    ];
+    if !GT_URC_PREFIXES.iter().any(|p| line.starts_with(p)) {
         return false;
     }
     match parse_line(line) {
@@ -287,9 +302,13 @@ pub fn capture_line(line: &str) -> bool {
             true
         }
         None => {
-            // 畸形 +GT 行：吞掉并计数，绝不透传
+            // 畸形 +GT 行：吞掉并计数，绝不透传；保留最近一条原文供
+            // /api/eif 诊断 —— atproxy / 原厂固件的输出格式可能随固件
+            // 版本变化，这是适配格式差异的唯一观测窗口。
+            let snippet: String = line.chars().take(160).collect();
             if let Ok(mut g) = FEED.lock() {
                 g.malformed += 1;
+                g.last_malformed = snippet;
             }
             true
         }
@@ -310,6 +329,7 @@ pub fn snapshot() -> GtState {
     if let Ok(g) = FEED.lock() {
         s.dropped = g.dropped;
         s.malformed = g.malformed;
+        s.last_malformed = g.last_malformed.clone();
     }
     s
 }
@@ -417,7 +437,9 @@ mod tests {
     #[test]
     fn capture_line_swallows_gt_and_passes_normal_lines() {
         assert!(capture_line("+GTNORA: initial"));
-        assert!(capture_line("+GTRUBBISH")); // 畸形 +GT 也吞
+        // +GTDNS 是模组原生 URC / AT+GTDNS 查询响应，绝不能被吞
+        // （+GT 宽匹配回归测试：实测曾吞掉 75+ 条导致巡检 DNS 恒为空）
+        assert!(!capture_line("+GTDNS: 1,\"240e:1f:1::1\""));
         assert!(!capture_line("+CSQ: 99,99"));
         assert!(!capture_line("OK"));
     }

@@ -16,10 +16,16 @@ use super::run;
 use crate::addr::{is_valid_ipv4, looks_v6, normalize_ipv6};
 use crate::at::{at_cmd, AtHandle, AtResult};
 use crate::config::Config;
+use std::time::Duration;
 
 /// PDP 激活后地址可能晚一步就绪，这里轮询若干次（每次 600 ms）。
 const ADDR_POLL_ROUNDS: u32 = 5;
 const ADDR_POLL_INTERVAL_MS: u64 = 600;
+
+/// 飞行模式自恢复后的注册等待：12 × 5 s = 60 s 上限。
+/// 超时后仍继续走原拨号路径 —— 失败信息自带前置体检，不会静默。
+const RECOVER_REG_POLLS: u32 = 12;
+const RECOVER_REG_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct PdpState {
@@ -355,6 +361,29 @@ pub struct DialOutcome {
 /// 只要拿到有效地址即视为成功；彻底失败时才做一次前置体检，把
 /// 「SIM 未就绪 / 未注册」这类真实原因写进错误信息。
 pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
+    // 在线自恢复：模组重启（换 IMEI / usbmode / CFUN=1,1 等维修操作之后）
+    // 或异常掉电后可能停留在飞行模式（CFUN=4）。此前只在拨号失败后报告、
+    // 从不恢复 —— 守护每轮拨号都会死循环在「前置体检：模组未在线」。这里
+    // 发现未在线时主动 CFUN=1 并限时等待注册，再继续后续拨号动作。
+    let pre = readiness(at, cfg);
+    if pre.cfun == Some(4) {
+        let _ = run(at, cfg, &at_cmd::set_cfun(1));
+        for _ in 0..RECOVER_REG_POLLS {
+            std::thread::sleep(RECOVER_REG_POLL_INTERVAL);
+            if let Ok(r) = run(at, cfg, at_cmd::CEREG_READ) {
+                let row = crate::at::rows(&r, "+CEREG").next().unwrap_or_default();
+                if matches!(
+                    row.get(1)
+                        .or_else(|| row.first())
+                        .and_then(|x| x.parse::<u32>().ok()),
+                    Some(1) | Some(5)
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+
     let _ = set_apn(at, cfg, &cfg.apn, &cfg.pdp_type);
     // 鉴权必须在 CGACT 之前就位
     let _ = apply_auth(at, cfg);
