@@ -1,10 +1,14 @@
 #!/bin/sh /etc/rc.common
-# atproxy —— F22 AP 侧 EIF 语义代理（只读 URC 注入）
+# atproxy —— F22 AP 侧 EIF 语义代理 + USB 通道强制绑定
 #
-# 订阅 MIPC EIF_IND 并降维输出 +GT* URC 到 /dev/ttyGS1。
+# 订阅 MIPC EIF_IND 并降维输出 +GT* URC 到 /dev/ttyGS1；
+# 同时由模组自身在内部通过 MIPC 下发 AT+EMBIND=1,"M-RNDIS",<cid>，
+# 把 RNDIS 数据通道强制绑定到激活的 PDN（主机侧发同一条 AT 不生效）。
 # 依赖：/usr/bin/atproxy（本固件 libmipc_msg.so/libmipc_api.so 动态链接）。
 # 注意：必须在 usb.init（START=99）配置完 USB gadget 之后启动，
 #       因此取 START=99 且本脚本自身用 procd respawn 保活。
+#
+# 现场排查：绑定 cid 默认 1，可导出 EMBIND_CID=2 等方式覆盖（1..16）。
 
 USE_PROCD=1
 NAME=atproxy
