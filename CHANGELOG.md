@@ -2,6 +2,23 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.14-r3
+
+**APN 保存页报错修复**（rpcd ucode 层，无需更新 daemon）。
+
+### 修复
+
+- **保存 APN 后页面报错（`fm350.uc` dial 方法）**：前端拨号总是携带
+  UCI 中的 APN（`api.dial(uci.get(...))`），代理层把命令拼成
+  `fm350d set apn X && fm350d dial` —— `set` 与 `dial` 各自输出一段
+  JSON，两段直排后前端 `JSON.parse` 直接抛错，页面表现为保存失败。
+  现拆开执行：先单独 `set apn`（失败立即返回、不带旧 APN 继续拨），
+  成功后只回传 `dial` 的单段 JSON。
+- **UCI/daemon APN 一致性定案（无需修复）**：daemon 主循环每轮重新
+  `config::load()` 读 UCI（源码注释明示「用户在 LuCI 改的参数下一轮
+  即生效」），`set apn` 落盘后巡检自动跟上；CLI `dial` 亦按调用时
+  最新 UCI 组装 payload。不存在快照漂移路径。
+
 ## 1.0.14-r2
 
 **空 IMEI 模组写入修复 + 拨号在线自恢复**（实机维修场景验证）。
