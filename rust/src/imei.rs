@@ -70,13 +70,20 @@ pub fn valid_format(imei: &str) -> bool {
     imei.len() == 15 && imei.chars().all(|c| c.is_ascii_digit())
 }
 
-/// 读取当前 IMEI（只读，始终允许）。
-pub fn read_raw(at: &AtHandle, cfg: &Config) -> AtResult<String> {
+/// 读取 +EGMREXT 的原始值（引号内内容，可能为空串）。
+///
+/// 与 [`read_raw`] 的区别：空 IMEI 在维修场景是真实存在的状态
+/// （这正是最需要写入的模组），备份路径必须能读到「明确的空」，
+/// 不能把空值当解析失败 —— 否则空 IMEI 模组永远无法写入。
+/// 响应里没有 +EGMREXT 行也找不到 15 位数字时才报错（带原始响应）。
+fn read_raw_text(at: &AtHandle, cfg: &Config) -> AtResult<String> {
     let r = at.with(cfg, |p| p.command(at_cmd::EGMREXT_READ_IMEI))?;
     // 响应形如：+EGMREXT: "861234567890123"
+    let mut saw_ext = false;
     for line in r.lines() {
         let l = line.trim();
         if l.starts_with("+EGMREXT") {
+            saw_ext = true;
             if let Some(pos) = l.find(':') {
                 let v = l[pos + 1..].trim().trim_matches('"').to_string();
                 if !v.is_empty() {
@@ -93,7 +100,21 @@ pub fn read_raw(at: &AtHandle, cfg: &Config) -> AtResult<String> {
             }
         }
     }
+    if saw_ext {
+        // 模组明确应答了 +EGMREXT: "" —— 空值是合法状态，如实返回
+        return Ok(String::new());
+    }
     Err(format!("未能解析 IMEI，原始响应: {}", r.replace('\n', " | ")))
+}
+
+/// 读取当前 IMEI（只读，始终允许）。模组未写入 IMEI 时返回明确错误。
+pub fn read_raw(at: &AtHandle, cfg: &Config) -> AtResult<String> {
+    let v = read_raw_text(at, cfg)?;
+    if v.is_empty() {
+        Err("模组未写入 IMEI（+EGMREXT: \"\"）".to_string())
+    } else {
+        Ok(v)
+    }
 }
 
 /// 读取状态（IMEI + 写入开关 + 已有备份）。
@@ -111,15 +132,22 @@ fn audit(msg: &str) {
 }
 
 /// 备份当前 IMEI 到 `/etc/fm350/imei.backup`。
+///
+/// 当前值为空同样合法（空 IMEI 正是维修写入场景，备份空值本身就是
+/// 有效的状态记录）；只有模组完全无响应/响应无法识别才报错。
 pub fn backup(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    let current = read_raw(at, cfg)?;
+    let current = read_raw_text(at, cfg)?;
     let _ = fs::create_dir_all(BACKUP_DIR);
     let payload = serde_json::json!({
         "imei": current,
-        "note": "写入前的最后一次备份，用于恢复原始串号"
+        "note": if current.is_empty() {
+            "写入前的备份：原值为空（模组出厂/维修状态）"
+        } else {
+            "写入前的最后一次备份，用于恢复原始串号"
+        }
     });
     fs::write(BACKUP_FILE, payload.to_string()).map_err(|e| format!("写入备份失败: {}", e))?;
-    audit(&format!("已备份当前 IMEI 到 {}", BACKUP_FILE));
+    audit(&format!("已备份当前 IMEI（原值 {}）到 {}", if current.is_empty() { "<空>" } else { &current }, BACKUP_FILE));
     Ok(current)
 }
 
@@ -177,9 +205,19 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
         return Err(format!("模组返回错误: {}", resp.replace('\n', " | ")));
     }
 
-    // 回读确认
-    let current = read_raw(at, cfg).unwrap_or_default();
-    audit(&format!("IMEI 写入完成，回读值 {}", current));
+    // 回读确认（读不到/为空不算失败：部分固件写入后需重启模组才可读）
+    let current = read_raw_text(at, cfg).unwrap_or_default();
+    audit(&format!("IMEI 写入完成，回读值 {}", if current.is_empty() { "<空>" } else { &current }));
+
+    let warning = if current.is_empty() {
+        let tip = "写入命令已下发且模组未报错误，但回读仍为空 —— 请重启模组（fm350d reboot）后重新查询确认是否生效".to_string();
+        Some(match warning {
+            Some(w) => format!("{}；{}", w, tip),
+            None => tip,
+        })
+    } else {
+        warning
+    };
 
     Ok(WriteResult {
         previous,
