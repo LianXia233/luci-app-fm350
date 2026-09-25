@@ -1,14 +1,63 @@
-# f22-atproxy — F22 AP 侧 EIF 语义代理
+# f22-atproxy — F22 AP 侧 EIF 语义代理 + USB 通道强制绑定
 
-FM350-F22 固件（root.squashfs）内的用户态守护进程。订阅 MIPC `EIF_IND(0x4205)`，
-把网络事件降维成告知性 `+GT*` URC 写到 `/dev/ttyGS1`（主机侧对应 `/dev/ttyUSB1`），
-供 luci-app-fm350 被动消费。**不透传原始 AT，不发写命令，不暴露 NetIF id。**
+FM350-F22 固件（root.squashfs）内的用户态守护进程。两件事：
+
+1. 订阅 MIPC `EIF_IND(0x4205)`，把网络事件降维成告知性 `+GT*` URC 写到
+   `/dev/ttyGS1`（主机侧对应 `/dev/ttyUSB1`），供 luci-app-fm350 被动消费。
+2. 由模组自身在内部下发 `AT+EMBIND=1,"M-RNDIS",<cid>`，把 RNDIS 数据通道
+   强制绑定到激活 PDN（主机侧发同一条 AT 不生效，见下节）。
+
+**透传原始 AT：否。** 唯一的下行写命令是 EMBIND；不碰 APN（CGDCONT）、
+不碰 IMEI（EGMREXT）相关命令，不暴露 NetIF id。
 
 ## 设计边界
 
-- 只订阅 IND（`mipc_msg_register_ind_api(0x10, 0x4205, cb, NULL, NULL)`），不调用任何写命令 API。
+- 只订阅 IND（`mipc_msg_register_ind_api(0x10, 0x4205, cb, NULL, NULL)`）。
+- 下行仅一条白名单命令 `AT+EMBIND=1,"M-RNDIS",<cid>`，经 `mipc_sys_at_sync` 走 MIPC 内部通道。
 - 输出全部为告知性 URC，reason 字段剥离 CR/LF 防注入。
 - 仅链接固件自带库：`libmipc_msg.so` / `libmipc_api.so` + musl libc，rpath `/usr/lib`。
+
+## USB 通道（M-RNDIS）强制绑定
+
+### 为什么必须由模组自己做
+
+主机侧实测（2026-09-25，192.168.10.1 / FM350-GL）：
+
+| 现象 | 证据 |
+|---|---|
+| 绑定表为空 | `AT+EMBIND?` 只回 `OK`，无 `+EMBIND:` 行 |
+| 主机侧写入不生效 | `AT+EMBIND=1,"M-RNDIS",1` 首次回 `OK`、再次回**空响应**，回读依旧为空 |
+| 数据面全哑 | eth2 上全目的 IP ARP 均 `FAILED`；DHCP Discover 无任何应答；memset 静态邻居后 ICMP 仍 100% 丢包 |
+| 模组不给主机 DHCP/RA | 无 DHCPv4 应答；无 RA（主机侧 `Icmp6InRouterAdvertisements=0`） |
+
+结论：RNDIS 通道的绑定必须由**模组内部**在正确的时机（PDN 就绪）下发。
+
+### 实现
+
+- 通道：`mipc_sys_at_sync(ps_id=0, &st, cmd)` —— `libmipc_api.so` 导出符号。
+  反汇编实证：`@0x1a6b4` 校验参数后跳公共调用器 `@0x186e0`，
+  流程为 `mipc_msg_init` → `mipc_msg_add_tlv(msg, 0x8100, len(cmd), cmd)` → `sync_timeout`，
+  结果写回 `st`（首 4 字节为结果码）。
+- **C++ ABI 坑**：`libmipc_api.so` 符号带 Itanium mangling，`libmipc_msg.so` 是 C ABI。
+  C 源码须用 asm label 绑定 mangled 名，否则链接期 `undefined reference`：
+
+```c
+extern int mipc_sys_at_sync(int ps_id, void *at_st, const char *cmd)
+    __asm__("_Z16mipc_sys_at_sync19mipc_sim_ps_id_enumP18mipc_sys_at_structPKc");
+```
+
+- 触发时机：启动后 20s（等 gadget 与 PDN 就绪）、每次 EIF `ifst`/`ipadd`/`ipdel`
+  事件、以及 120s 周期保活；事件触发受 15s 最小间隔约束防风暴。
+- **线程安全**：EIF 回调运行在 MIPC 接收线程内，回调里再调同步 API 有自锁风险，
+  因此回调只置标志，真正的下发由主循环执行。
+- 绑定结果以 `+GTEMBIND: rc=<n>,cid=<n>,why=<startup|eif-event|keepalive>` 吐给主机侧。
+- 现场可调：导出 `EMBIND_CID`（1..16）覆盖默认 cid=1；非法值回落默认。
+
+### 红线
+
+命令字符串只含 EMBIND。**不下发 CGDCONT（APN）**（换卡场景下会把模组 APN 改写错，
+直接断数据），**不下发任何 IMEI 相关命令**。
+
 
 ## URC 输出表（EIF reason 降维映射）
 
@@ -22,6 +71,7 @@ FM350-F22 固件（root.squashfs）内的用户态守护进程。订阅 MIPC `EI
 | （随附）              | `+GTIFADDR4: <a.b.c.d>`（每个 V4 地址一行）        | 具体地址       |
 | （随附）              | `+GTIFADDR6: <v6addr>`（每个 V6 地址一行）         | 具体地址       |
 | 其他                  | `+GTIFEVT: <reason>,cause=<n>`                    | 兜底原始 reason|
+| （强制绑定）          | `+GTEMBIND: rc=<n>,cid=<n>,why=<...>`             | 每次下发绑定后的结果 |
 
 地址行自带完整信息，不依赖与汇总行的行序归属；URC 流被 atcid 插行也不破坏解析。
 
@@ -39,16 +89,34 @@ FM350-F22 固件（root.squashfs）内的用户态守护进程。订阅 MIPC `EI
 ## 构建（云服务器，musl 交叉编译）
 
 ```sh
-# 依赖: /opt/aarch64-linux-musl-cross/ 工具链 + 固件 .so 副本（放 ../libs-f22/）
-make MIPC_DIR=../libs-f22
-aarch64-linux-musl-readelf -d f22-atproxy   # 确认 NEEDED 仅 libmipc_msg/libmipc_api/libc
+CC=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+$CC -O2 -Wall -Wextra -o atproxy.new atproxy.c \
+    -L<rootfs>/usr/lib -lmipc_api -lmipc_msg -Wl,-rpath,/usr/lib
+aarch64-linux-musl-readelf -d atproxy.new   # 确认 NEEDED 仅 libmipc_api/libmipc_msg/libc
 ```
+
+也可用仓库内 Makefile：`make MIPC_DIR=../libs-f22`。
 
 ## 部署（rootfs 注入）
 
-- 二进制 → `/usr/bin/f22-atproxy`
+- 二进制 → `/usr/bin/atproxy`
 - init 脚本 → `/etc/init.d/atproxy`（`START=99`，晚于 usb.init；`respawn 3600 5 0`）
-- 重打包参数见解包报告 §8：`mksquashfs` xz / 256K / `-all-root` / `-no-xattrs` / `-fixed-time 1679908397`
+- 重打包（与出厂参数对齐，产物见 `outputs/fm350-f22-root-embind.squashfs`）：
+
+```sh
+mksquashfs rootfs fm350-f22-root-embind.squashfs \
+    -noappend -comp xz -b 262144 -no-xattrs -all-root -no-exports -no-progress
+```
+
+### 刷入后验证（adb shell，免认证 root）
+
+```sh
+logread | grep -E 'atproxy|EMBIND'     # 期望见 EMBIND(...) rc=... resp="...OK..."
+cat /dev/ttyGS1 &                      # 观察 +GTEMBIND URC（主机侧 /dev/ttyUSB1）
+# 主机侧（OpenWrt）：
+#   AT+EMBIND? 应开始返回 +EMBIND: <n>[,"M-RNDIS",<cid>]
+#   eth2 上 ARP/DHCP 应开始有应答，默认路由可解析网关
+```
 
 ## 实机验证前置条件：adbd_usb 逆向结论（已定案）
 

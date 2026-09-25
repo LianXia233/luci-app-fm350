@@ -1,5 +1,5 @@
 /*
- * atproxy —— F22 AP 侧 EIF 语义代理（只读）
+ * atproxy —— F22 AP 侧 EIF 语义代理 + USB 通道强制绑定
  *
  * 订阅 MIPC EIF_IND (msg id 0x4205，与 mtk_netagent 同源)，把 MD 上报的
  * 内部接口事件降维成不含 NetIF id、只读、语义明确的 +GT* 形态，写到
@@ -11,6 +11,15 @@
  *     mtk_netagent 的状态机，no_ra 回调甚至可能去激活数据呼叫）。
  *   - 不输出 MD 内部 trans_intf_id，主机无从误用。
  *   - 全部输出为告知性 URC，主机不依赖它们也能正常工作。
+ *
+ * 本版新增：USB 通道（M-RNDIS）强制绑定
+ *   - 背景：主机侧实测 `AT+EMBIND?` 读回为空（绑定表 0），RNDIS 数据面
+ *     无任何响应（ARP/DHCP/ICMP 全丢）；主机侧发 `AT+EMBIND=1,"M-RNDIS",1`
+ *     响应不稳定且不生效。
+ *   - 做法：由模组自身在内部通过 MIPC 下发同一条 AT（`mipc_sys_at_sync`，
+ *     libmipc_api.so 导出符号，反汇编实证其 TLV tag 0x8100 携带命令串），
+ *     触发时机为「启动后延时」+「每次 EIF ifst/ipadd/ipdel 事件」+「周期保活」。
+ *   - 红线：只碰数据通道绑定，**不下发任何 CGDCONT（APN）与 IMEI 相关命令**。
  *
  * 依赖（全部为 F22 root.squashfs 自带）：
  *   libmipc_msg.so / libmipc_api.so   MIPC 客户端库（与 atcid/netagent 同款）
@@ -30,6 +39,7 @@
 #include <string.h>
 #include <syslog.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ------------------------------------------------------------------ */
@@ -47,6 +57,21 @@ extern int mipc_msg_register_ind_api(int arg1, uint16_t msg_id,
  * 正值加载，0x8101..0x810e 一律 MOVN 符号扩展加载（w1=0xFFFF810C）。
  * 本处常量全部按 netagent 同形书写，保证与官方消费者字节级一致。 */
 extern void *mipc_msg_get_val_ptr(void *msg, int tag, int arg3);
+
+/* mipc_sys_at_sync(mipc_sim_ps_id_enum, mipc_sys_at_struct *, const char *cmd)
+ * —— libmipc_api.so 导出符号（mangled: _Z16mipc_sys_at_sync19mipc_sim_ps_id_enumP18mipc_sys_at_structPKc），
+ * 反汇编实证：
+ *   @0x1a6b4: 校验 (struct, cmd) 非空后跳公共调用器
+ *   @0x186e0: mipc_msg_init -> mipc_msg_add_tlv(msg, 0x8100, len(cmd), cmd)
+ *             -> sync_timeout -> 结果写回 struct（首 4 字节为结果码）
+ * 即：AP 域向 MD 发任意 AT 命令的正规内部通道。cmd 不得带尾部 CR/LF。
+ * ps_id 取 0（MIPC_SIM_PS_ID_0）——本模组单卡单栈。
+ *
+ * 注意：libmipc_api.so 是 **C++ ABI**（符号带 Itanium mangling），
+ * libmipc_msg.so 是 C ABI。本文件用 C 编译器编译，因此必须用 asm label
+ * 把声明直接绑到 mangled 名上，否则链接期找不到符号（undefined reference）。 */
+extern int mipc_sys_at_sync(int ps_id, void *at_st, const char *cmd)
+    __asm__("_Z16mipc_sys_at_sync19mipc_sim_ps_id_enumP18mipc_sys_at_structPKc");
 
 /* EIF_IND 消息号：netagent 以 0x4205/0x4206 成对注册，其中 0x4205 的
  * 回调提取 9+ 个 TLV（含 %02x 地址处理）且下游日志即 [MEH] EIF_IND *；
@@ -88,9 +113,43 @@ extern void *mipc_msg_get_val_ptr(void *msg, int tag, int arg3);
 #define TTY_OUT       "/dev/ttyGS1"
 
 /* ------------------------------------------------------------------ */
+/* USB 通道强制绑定参数 */
+
+/* 绑定目标：L2P 名与 cid。cid 合法区间 1..16（MD 固件 +EMBIND=? 测试响应）。
+ * 可用环境变量 EMBIND_CID 覆盖，便于现场排查；非法值回落 1。 */
+#define EMBIND_L2P_DEFAULT "M-RNDIS"
+#define EMBIND_CID_DEFAULT 1
+#define EMBIND_CID_MIN     1
+#define EMBIND_CID_MAX     16
+
+/* 首次绑定延时（秒）：等 usb.init 建好 gadget、MD 侧 PDN 激活事件到达。 */
+#define EMBIND_FIRST_DELAY_SEC  20
+/* 周期保活（秒）：绑定可能随 USB 重枚举 / 制式切换丢失，定期补一次。 */
+#define EMBIND_KEEPALIVE_SEC   120
+/* 同一原因的最小重发间隔（秒），防事件风暴刷屏。 */
+#define EMBIND_MIN_GAP_SEC      15
+
+/* sync AT 的结果缓冲。mipc_sys_at_struct 的完整布局未在固件中导出，
+ * 反汇编只确认「首 4 字节为结果码、其后为回显/响应区」，故按保守的
+ * 大缓冲零初始化传入，避免库写入越界。 */
+#define AT_ST_BUF_SZ 2048
+/* 解析回显时最多取这么多可见字符（防二进制噪声刷屏）。 */
+#define AT_RESP_SNIPPET_MAX 96
+
+/* ------------------------------------------------------------------ */
 
 static volatile sig_atomic_t g_run = 1;
 static int g_tty = -1;
+
+/* 回调线程 -> 主循环的「请求绑定」标志。
+ * 关键：EIF 回调运行在 MIPC 接收线程内，而 mipc_sys_at_sync 内部同样要
+ * 走 MIPC 的收发通道 —— 在回调里直接调用存在自锁风险，因此回调只置位，
+ * 真正的下发动作统一由主循环执行。 */
+static volatile sig_atomic_t g_embind_pending = 0;
+static volatile sig_atomic_t g_embind_pending_prio = 0; /* 事件触发（非保活） */
+
+static time_t g_last_embind_ts = 0;
+static int    g_last_embind_rc = -999;
 
 static void on_signal(int sig)
 {
@@ -129,6 +188,70 @@ static int eif_addr_to_str(const unsigned char *ent, int is_v6,
     return (int)strlen(out);
 }
 
+/* 从 sync AT 的结果缓冲里抠出可读回显：只保留可打印字符并截断长度，
+ * 避免把二进制结果整段写进 URC/日志。 */
+static void at_resp_snippet(const unsigned char *buf, size_t len,
+                            char *out, size_t outlen)
+{
+    size_t j = 0;
+
+    if (outlen == 0)
+        return;
+    for (size_t i = 0; i < len && j + 1 < outlen && j < AT_RESP_SNIPPET_MAX; i++) {
+        unsigned char c = buf[i];
+        if (c == 0 && j > 0)
+            break;
+        if (c >= 0x20 && c < 0x7f)
+            out[j++] = (char)c;
+        else if (c == '\r' || c == '\n')
+            out[j++] = ' ';
+    }
+    out[j] = '\0';
+}
+
+/* 解析绑定 cid：环境变量优先，非法值一律回落默认。 */
+static int embind_cid(void)
+{
+    const char *s = getenv("EMBIND_CID");
+    long v;
+
+    if (s == NULL || *s == '\0')
+        return EMBIND_CID_DEFAULT;
+    v = strtol(s, NULL, 10);
+    if (v < EMBIND_CID_MIN || v > EMBIND_CID_MAX)
+        return EMBIND_CID_DEFAULT;
+    return (int)v;
+}
+
+/* 强制绑定 M-RNDIS 到指定 cid。
+ * 红线：命令只含 EMBIND，绝不含 CGDCONT（APN）或 IMEI 相关指令。 */
+static void enforce_embind(const char *why)
+{
+    static unsigned char st[AT_ST_BUF_SZ];
+    char cmd[64];
+    char snippet[AT_RESP_SNIPPET_MAX + 1];
+    char line[192];
+    int cid = embind_cid();
+    int rc;
+
+    snprintf(cmd, sizeof(cmd), "AT+EMBIND=1,\"%s\",%d", EMBIND_L2P_DEFAULT, cid);
+
+    memset(st, 0, sizeof(st));
+    rc = mipc_sys_at_sync(0, st, cmd);
+
+    at_resp_snippet(st, sizeof(st), snippet, sizeof(snippet));
+    /* 上一轮 rc 只作观测（mipc_sys_at_sync 的返回码语义未在固件中导出，
+     * 成功判据以回显内的 OK 为准），一并写入日志便于对比。 */
+    syslog(LOG_INFO, "EMBIND(%s): cmd=\"%s\" rc=%d prev_rc=%d resp=\"%s\"",
+           why, cmd, rc, g_last_embind_rc, snippet);
+
+    snprintf(line, sizeof(line), "+GTEMBIND: rc=%d,cid=%d,why=%s\r\n", rc, cid, why);
+    emit(line);
+
+    g_last_embind_ts = time(NULL);
+    g_last_embind_rc = rc;
+}
+
 /* reason 动词 -> 降维 URC。分类主键是 MD 侧的 reason 词根（F22 MD 域
  * 逆向确认的 AT+EIF set 形态），而不是 netagent 的内部事件码表 ——
  * 后者是版本相关的实现细节，前者才是协议语义。 */
@@ -163,6 +286,14 @@ static void on_eif_ind(void *msg)
     syslog(LOG_DEBUG,
            "EIF_IND transid=%d evtype=%u cause=%d mtu=%d v4=%d v6=%d reason=%s",
            transid, evtype, cause, mtu, v4, v6, reason);
+
+    /* 数据面状态变化 -> 请求重新绑定（在主循环里执行，见 g_embind_pending 注释） */
+    if (strstr(reason, "ifst") != NULL ||
+        strstr(reason, "ipadd") != NULL ||
+        strstr(reason, "ipdel") != NULL) {
+        g_embind_pending_prio = 1;
+        g_embind_pending = 1;
+    }
 
     if (strstr(reason, "no_ra_initial") != NULL) {
         emit("+GTNORA: initial\r\n");
@@ -235,8 +366,31 @@ static void open_tty(void)
     syslog(LOG_INFO, "URC sink ready: %s", TTY_OUT);
 }
 
+/* 主循环里的绑定调度：事件优先触发（受最小间隔约束），另有周期保活。 */
+static void embind_tick(time_t now, time_t start)
+{
+    int is_event = (int)g_embind_pending_prio;
+
+    if (g_embind_pending) {
+        g_embind_pending = 0;
+        g_embind_pending_prio = 0;
+        /* 事件触发时，若距上次下发过近则丢弃这一轮，避免风暴 */
+        if (is_event && g_last_embind_ts != 0 &&
+            now - g_last_embind_ts < EMBIND_MIN_GAP_SEC)
+            return;
+        enforce_embind(is_event ? "eif-event" : "startup");
+        return;
+    }
+    /* 保活 */
+    if (now - start >= EMBIND_FIRST_DELAY_SEC &&
+        (g_last_embind_ts == 0 || now - g_last_embind_ts >= EMBIND_KEEPALIVE_SEC))
+        enforce_embind("keepalive");
+}
+
 int main(void)
 {
+    time_t start;
+
     openlog("atproxy", LOG_PID | LOG_NDELAY, LOG_DAEMON);
 
     signal(SIGTERM, on_signal);
@@ -254,12 +408,26 @@ int main(void)
         mipc_deinit();
         return 1;
     }
-    syslog(LOG_INFO, "atproxy started: EIF_IND(0x4205) -> +GT* on %s", TTY_OUT);
+    syslog(LOG_INFO, "atproxy started: EIF_IND(0x4205) -> +GT* on %s, embind cid=%d",
+           TTY_OUT, embind_cid());
 
+    /* 启动后延时一次绑定：等 gadget 与 PDN 就绪 */
+    g_embind_pending = 1;
+    g_embind_pending_prio = 0;
+
+    start = time(NULL);
     while (g_run) {
+        time_t now;
+
         sleep(2);
         if (g_tty < 0)
             open_tty(); /* USB 重枚举后自愈 */
+
+        now = time(NULL);
+        if (g_last_embind_ts == 0 && now - start < EMBIND_FIRST_DELAY_SEC)
+            continue; /* 首次绑定延时窗口内不动作 */
+
+        embind_tick(now, start);
     }
 
     syslog(LOG_INFO, "atproxy stopping");
