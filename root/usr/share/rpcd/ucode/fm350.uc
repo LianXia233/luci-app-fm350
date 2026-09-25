@@ -45,9 +45,17 @@ function quote(s) {
 
 /* 执行后端 CLI，把标准输出原样返回（不做 JSON 解析）。
  * to：timeout 上限（秒），缺省读类 20；被 timeout 杀掉时输出为空，
- * 走下方「后端无输出」错误分支，前端得到明确错误而非无限转圈。 */
+ * 走下方「后端无输出」错误分支，前端得到明确错误而非无限转圈。
+ *
+ * 历史坑：本文件多数调用点写的是 exec('fm350d xxx')，而下方已拼接
+ * FM350D 前缀，实际执行变成 `/usr/sbin/fm350d fm350d xxx` —— CLI 把
+ * "fm350d" 当成未知子命令，打印 usage 以退出码 2 结束。前端拿到的是
+ * usage 文本而非 JSON，JSON.parse 失败后所有字段显示为空。这里在
+ * 拼接前剥掉重复前缀，两种写法都兼容。 */
 function exec(cmd, to) {
 	let t = (to != null) ? to : TMO_READ;
+	if (substr(cmd, 0, 7) == 'fm350d ')
+		cmd = substr(cmd, 7);
 	let f = fs.popen('timeout ' + t + ' ' + FM350D + ' ' + cmd + ' 2>/dev/null');
 	if (!f)
 		return { ok: false, error: '无法执行 ' + FM350D + '（二进制缺失或不可执行）' };

@@ -419,7 +419,20 @@ impl AtHandle {
         match result {
             Ok(v) => {
                 if silent >= SILENT_RESELECT_THRESHOLD {
-                    self.reselect_on_silent(&mut slot, cfg);
+                    // 哑口确认。无论本次是否成功改选，旧口上的响应都是垃圾：
+                    // 立即报错终止当前操作，让上层（巡检/拨号）尽快结束本轮，
+                    // 下一轮重新 load 配置 —— 若已改选则直接用上新口。
+                    let reselected = self.reselect_on_silent(&mut slot, cfg);
+                    return Err(match reselected {
+                        Some(newp) => format!(
+                            "AT 口已自动改选 {} → {}，本次操作中止，请重试",
+                            cfg.at_port, newp
+                        ),
+                        None => format!(
+                            "AT 口 {} 连续 {} 条命令无应答（哑口或模组离线）",
+                            cfg.at_port, SILENT_RESELECT_THRESHOLD
+                        ),
+                    });
                 }
                 Ok(v)
             }
@@ -465,16 +478,21 @@ impl AtHandle {
     /// 哑口改选：当前端口连续零应答，探测仍应答 `AT` 的替代口并写回 UCI。
     ///
     /// 探测在锁内执行（逐候选口独占打开 + 发 `AT`，最多约 6 s），不会递归
-    /// 进入 [`AtHandle::with`]。找到新口后写入 UCI 并失效配置缓存；找不到
-    /// 则进入 [`RESELECT_COOLDOWN`] 冷却，避免模组整体离线时每轮都白探测。
-    fn reselect_on_silent(&self, slot: &mut Slot, cfg: &crate::config::Config) {
+    /// 进入 [`AtHandle::with`]。找到新口后写入 UCI 并失效配置缓存，返回
+    /// `Some(新口路径)`；找不到则进入 [`RESELECT_COOLDOWN`] 冷却（避免模组
+    /// 整体离线时每轮白探测），返回 `None`。
+    fn reselect_on_silent(
+        &self,
+        slot: &mut Slot,
+        cfg: &crate::config::Config,
+    ) -> Option<String> {
         if let Some(t) = slot.reselect_failed_at {
             if t.elapsed() < RESELECT_COOLDOWN {
                 crate::warnf!(format_args!(
                     "AT 口 {} 连续 {} 条命令无应答，冷却期内不重复改选探测",
                     cfg.at_port, SILENT_RESELECT_THRESHOLD
                 ));
-                return;
+                return None;
             }
         }
         crate::warnf!(format_args!(
@@ -488,11 +506,12 @@ impl AtHandle {
         slot.releases += 1;
         match identify_at_port(cfg) {
             Some(newp) => {
-                crate::infof!(format_args!("AT 口自动改选 {} → {}", cfg.at_port, newp));
+                crate::warnf!(format_args!("AT 口自动改选 {} → {}", cfg.at_port, newp));
                 if let Err(e) = crate::config::save(&serde_json::json!({ "at_port": newp })) {
                     crate::warnf!(format_args!("写入新 AT 口失败: {}", e));
                 }
                 slot.reselect_failed_at = None;
+                Some(newp)
             }
             None => {
                 crate::warnf!(format_args!(
@@ -500,6 +519,7 @@ impl AtHandle {
                     RESELECT_COOLDOWN.as_secs()
                 ));
                 slot.reselect_failed_at = Some(Instant::now());
+                None
             }
         }
     }
