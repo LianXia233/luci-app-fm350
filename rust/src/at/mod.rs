@@ -98,6 +98,28 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(1);
 /// 握手阶段的等待（下发 ATE0 后给模组一点时间）。
 const HANDSHAKE_WAIT: Duration = Duration::from_millis(120);
 
+/// 哑口判定阈值：**连续**多少条 AT 命令零字节应答，判定当前端口失联。
+///
+/// 适用场景：FM350 会导出 7 个 ttyUSB（DIAG / GNSS / AT / MODEM / log ...），
+/// 只有真正的 AT 口才会应答；USB 重枚举后 tty 编号漂移，配置里指向的口
+/// 可能变成一个「存在但永不说话」的哑口。此时每条命令都会等满
+/// `at_timeout`（默认 10 s），一轮巡检 20+ 条即数分钟，整个后端表现为瘫痪。
+/// 连续 3 条零应答（约 30 s）足以与「模组短暂重启」区分开。
+const SILENT_RESELECT_THRESHOLD: u32 = 3;
+
+/// 哑口改选的冷却时间：自动探测失败后多久内不重复探测。
+///
+/// 探测本身要对每个候选口独占打开 + 发 `AT` 等 0.8 s（7 个口最多约 6 s），
+/// 若模组整体离线，每次巡检都探测会拖垮巡检节奏；冷却期内先如实报错。
+const RESELECT_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// 获取 AT 互斥锁的等待上限。
+///
+/// 锁被巡检（或一条慢拨号流程）持有时，API 侧请求在此等待；超过后立即
+/// 返回明确错误而不是无限排队。这是 LuCI 卡死防御的第二层：rpcd ucode 是
+/// 同步转发，后端锁住多久，rpcd 主循环就堵多久。
+const LOCK_WAIT: Duration = Duration::from_secs(3);
+
 /// 把底层打开串口的错误翻译成可读中文，便于用户在 LuCI 上定位问题。
 fn friendly_open_err(path: &str, e: &str) -> String {
     let low = e.to_lowercase();
@@ -123,6 +145,9 @@ pub struct AtPort {
     /// URC 行过滤器：所有下行字节先过这里，`+GT*` 行被截流入事件队列
     /// （见 [`urc`]），其余行原样进入命令响应数据流。
     gate: urc::LineGate,
+    /// 连续零应答计数：`command()` 全程未收到任何字节则 +1，收到数据清零。
+    /// 供哑口判定（[`SILENT_RESELECT_THRESHOLD`]）使用。
+    silent_streak: u32,
 }
 
 impl AtPort {
@@ -142,6 +167,7 @@ impl AtPort {
             timeout: Duration::from_secs(timeout_secs),
             last_cmd_at: None,
             gate: urc::LineGate::default(),
+            silent_streak: 0,
         };
         p.handshake();
         Ok(p)
@@ -213,10 +239,12 @@ impl AtPort {
         let mut raw = String::new();
         let mut buf = [0u8; 256];
         let mut chunk = Vec::new();
+        let mut received = 0usize;
         while Instant::now() < deadline {
             match self.port.read(&mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(10)),
                 Ok(n) => {
+                    received += n;
                     // URC 行在此被截流入队，只有业务响应进入 raw
                     self.gate.feed(&buf[..n], &mut chunk);
                     raw.push_str(&String::from_utf8_lossy(&chunk));
@@ -228,7 +256,19 @@ impl AtPort {
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
+        // 哑口观测：整条命令一个字节都没回来（连 URC 都没有）→ 计数 +1；
+        // 任何数据到达都说明端口是活的，清零重计。
+        if received == 0 {
+            self.silent_streak = self.silent_streak.saturating_add(1);
+        } else {
+            self.silent_streak = 0;
+        }
         Ok(normalize(&raw, cmd))
+    }
+
+    /// 连续零应答计数（哑口判定依据）。
+    pub fn silent_streak(&self) -> u32 {
+        self.silent_streak
     }
 
     /// 发送原始数据（用于 `AT+CMGS` 的 PDU 阶段）。
@@ -310,6 +350,8 @@ struct Slot {
     opened_at: Option<Instant>,
     opens: u64,
     releases: u64,
+    /// 上一次哑口自动改选探测失败的时刻（冷却期内不重复探测）。
+    reselect_failed_at: Option<Instant>,
 }
 
 /// 全局 AT 端口句柄（daemon 单点持有，进程内串行，全程独占）。
@@ -325,11 +367,21 @@ impl AtHandle {
                 opened_at: None,
                 opens: 0,
                 releases: 0,
+                reselect_failed_at: None,
             }),
         }
     }
 
     /// 在锁内执行闭包，保证一问一答串行。
+    ///
+    /// 两层卡死防御：
+    ///
+    /// 1. **锁获取上限** [`LOCK_WAIT`]：锁被巡检/慢拨号持有时，最多等 3 s
+    ///    就返回明确错误，绝不让 API 请求无限排队（rpcd 是同步转发，这里
+    ///    堵多久，整个 LuCI 的 ubus 通道就堵多久）；
+    /// 2. **哑口自动改选**：闭包正常返回但 [`AtPort::silent_streak`] 达到
+    ///    [`SILENT_RESELECT_THRESHOLD`]（连续 3 条命令零应答），判定当前
+    ///    端口失联，自动探测仍应答 `AT` 的 Fibocom 口并写回 UCI。
     ///
     /// 端口**持久独占**：首次访问时惰性打开，此后一直持有，不做空闲释放。
     /// 只有串口异常（读写失败）才丢弃句柄，下次调用重新独占打开。
@@ -337,7 +389,7 @@ impl AtHandle {
     where
         F: FnOnce(&mut AtPort) -> AtResult<R>,
     {
-        let mut slot = self.inner.lock().map_err(|e| format!("锁失败: {}", e))?;
+        let mut slot = self.lock_slot()?;
 
         // 配置里的端口变了就立刻换：丢弃旧句柄，下面按新端口重新独占打开。
         // 放在这里（而不是只靠 daemon 巡检）是为了让"改完即生效"，
@@ -355,15 +407,99 @@ impl AtHandle {
             slot.opens += 1;
         }
 
-        let port = slot.port.as_mut().expect("端口已在上面确保打开");
-        match f(port) {
-            Ok(v) => Ok(v),
+        // 先取出执行结果与静默计数，结束对 slot.port 的可变借用，
+        // 后面的哑口改选需要 &mut slot。
+        let (result, silent) = {
+            let port = slot.port.as_mut().expect("端口已在上面确保打开");
+            let r = f(port);
+            let s = port.silent_streak();
+            (r, s)
+        };
+
+        match result {
+            Ok(v) => {
+                if silent >= SILENT_RESELECT_THRESHOLD {
+                    self.reselect_on_silent(&mut slot, cfg);
+                }
+                Ok(v)
+            }
             Err(e) => {
                 // 串口异常：丢弃句柄，下次调用重建（重新独占打开）
                 slot.port = None;
                 slot.opened_at = None;
                 slot.releases += 1;
                 Err(e)
+            }
+        }
+    }
+
+    /// 限时获取 AT 互斥锁（[`LOCK_WAIT`]），超时返回明确错误。
+    fn lock_slot(&self) -> AtResult<std::sync::MutexGuard<'_, Slot>> {
+        self.lock_slot_until(Instant::now() + LOCK_WAIT)
+    }
+
+    /// [`lock_slot`] 的可注入 deadline 形态（单测用极短超时验证超时路径）。
+    fn lock_slot_until(
+        &self,
+        deadline: Instant,
+    ) -> AtResult<std::sync::MutexGuard<'_, Slot>> {
+        loop {
+            match self.inner.try_lock() {
+                Ok(g) => return Ok(g),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err("AT 会话锁已损坏（此前发生 panic），请重启 fm350d 服务".into());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "AT 会话忙：串口被另一操作占用超过 {} 秒（端口可能无应答），请稍后重试",
+                            LOCK_WAIT.as_secs()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
+    /// 哑口改选：当前端口连续零应答，探测仍应答 `AT` 的替代口并写回 UCI。
+    ///
+    /// 探测在锁内执行（逐候选口独占打开 + 发 `AT`，最多约 6 s），不会递归
+    /// 进入 [`AtHandle::with`]。找到新口后写入 UCI 并失效配置缓存；找不到
+    /// 则进入 [`RESELECT_COOLDOWN`] 冷却，避免模组整体离线时每轮都白探测。
+    fn reselect_on_silent(&self, slot: &mut Slot, cfg: &crate::config::Config) {
+        if let Some(t) = slot.reselect_failed_at {
+            if t.elapsed() < RESELECT_COOLDOWN {
+                crate::warnf!(format_args!(
+                    "AT 口 {} 连续 {} 条命令无应答，冷却期内不重复改选探测",
+                    cfg.at_port, SILENT_RESELECT_THRESHOLD
+                ));
+                return;
+            }
+        }
+        crate::warnf!(format_args!(
+            "AT 口 {} 连续 {} 条命令无应答（疑似哑口/编号漂移），开始自动改选探测",
+            cfg.at_port, SILENT_RESELECT_THRESHOLD
+        ));
+        // 先释放旧句柄，否则其它候选口的探测不受影响、但旧句柄残留会
+        // 让「改选成功后下一轮打开」变成又一次无谓的释放。
+        slot.port = None;
+        slot.opened_at = None;
+        slot.releases += 1;
+        match identify_at_port(cfg) {
+            Some(newp) => {
+                crate::infof!(format_args!("AT 口自动改选 {} → {}", cfg.at_port, newp));
+                if let Err(e) = crate::config::save(&serde_json::json!({ "at_port": newp })) {
+                    crate::warnf!(format_args!("写入新 AT 口失败: {}", e));
+                }
+                slot.reselect_failed_at = None;
+            }
+            None => {
+                crate::warnf!(format_args!(
+                    "未探测到可应答 AT 的替代口，{} 秒内不重复探测",
+                    RESELECT_COOLDOWN.as_secs()
+                ));
+                slot.reselect_failed_at = Some(Instant::now());
             }
         }
     }
@@ -508,5 +644,37 @@ mod tests {
     #[test]
     fn other_openers_never_reports_self() {
         assert!(other_openers("/dev/fm350-no-such-port-xyz").is_empty());
+    }
+
+    /// 卡死防御第一层：锁被长期持有时，`lock_slot_until` 必须在 deadline
+    /// 后返回明确错误，而不是无限等待。
+    #[test]
+    fn lock_slot_times_out_when_held() {
+        let h = AtHandle::new();
+        let guard = h.inner.lock().unwrap();
+        let r = h.lock_slot_until(Instant::now() + Duration::from_millis(60));
+        drop(guard);
+        // 不用 expect_err：Slot 未实现 Debug，改用模式匹配断言
+        let err = match r {
+            Err(e) => e,
+            Ok(_) => panic!("锁被占用时必须超时失败"),
+        };
+        assert!(err.contains("AT 会话忙"), "错误信息: {}", err);
+        // 释放后应能立即拿到
+        assert!(h.lock_slot_until(Instant::now()).is_ok());
+    }
+
+    /// 常量关系守护：锁等待必须小于 rpcd 读类兜底超时（fm350.uc 的 20 s），
+    /// 否则 API 侧慢失败会顶穿 rpcd 的 timeout，LuCI 依然会被拖住。
+    #[test]
+    fn lock_wait_below_rpcd_read_budget() {
+        assert!(LOCK_WAIT < Duration::from_secs(20));
+    }
+
+    /// 哑口阈值含义守护：3 条命令 × at_timeout(默认 10 s) ≈ 30 s，必须
+    /// 远小于一轮巡检的总耗时，否则改选永远轮不到。
+    #[test]
+    fn silent_threshold_is_small() {
+        assert!(SILENT_RESELECT_THRESHOLD <= 5);
     }
 }

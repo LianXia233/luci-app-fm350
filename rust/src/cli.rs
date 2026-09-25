@@ -123,17 +123,22 @@ fn print_json(v: &Json) {
 }
 
 /// CLI 执行：优先转发给 daemon，否则本地直连 AT 口。
+///
+/// 读类（GET）命令的 daemon 转发读超时收敛到 [`CLI_READ_TIMEOUT`]：
+/// daemon 存在但 AT 会话被长期占用时（如哑口每条命令等满 at_timeout），
+/// 60 s 的等待会让 rpcd ucode 的同步 popen 一起挂住，LuCI 页面随之卡死；
+/// 15 s 内失败后回落本地直连，快速给出「端口已被独占」类明确错误。
+/// 写类（POST，如 dial 全流程含 PDP 激活）保留长超时，避免正常慢操作被掐断。
 fn run_cli<F>(cfg: &Config, method: &str, path: &str, payload: Option<&Json>, local: F)
 where
     F: FnOnce(&AtHandle, &Config) -> Json,
 {
-    if let Some(j) = via_daemon(
-        cfg,
-        method,
-        path,
-        payload,
-        Duration::from_secs(cfg.at_timeout.max(60)),
-    ) {
+    let read_timeout = if method == "GET" {
+        Duration::from_secs(CLI_READ_TIMEOUT.max(cfg.at_timeout))
+    } else {
+        Duration::from_secs(cfg.at_timeout.max(60))
+    };
+    if let Some(j) = via_daemon(cfg, method, path, payload, read_timeout) {
         print_json(&j);
         return;
     }
@@ -141,6 +146,10 @@ where
     let j = local(&handle, cfg);
     print_json(&j);
 }
+
+/// 读类命令经 daemon 转发的读超时下限（秒）。
+/// 必须小于 rpcd ucode 读类兜底 timeout（fm350.uc 的 20 s），留出余量。
+const CLI_READ_TIMEOUT: u64 = 15;
 
 /// 守护模式入口：单实例守卫 + 主循环。
 fn run_daemon(cfg: Config) {
