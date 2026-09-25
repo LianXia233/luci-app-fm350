@@ -1,24 +1,27 @@
-# f22-atproxy — F22 AP 侧 EMBIND 强制绑定守护 + USB 通道 ADB 启用补丁（v2）
+# f22-atproxy — F22 AP 侧 EMBIND 强制绑定守护 + USB 通道 ADB 启用 + dropbear SSH（v3）
 
-FM350-F22 固件（root.squashfs）改造包。两个部件：
+FM350-F22 固件（root.squashfs）改造包。三个部件：
 
 1. **atproxy v2**（`/usr/bin/atproxy`）：由模组自身在内部下发
    `AT+EMBIND=1,"M-RNDIS",<cid>`，把 RNDIS 数据通道强制绑定到激活 PDN
    （主机侧发同一条 AT 不生效，见下节）。**v2 起不再订阅 EIF_IND**，原因见下。
 2. **usb.init ADB 补丁**：三个 boot_mode 分支统一启用 `adbd_usb`，
    使 AP 域免认证 root ADB 在任何启动模式下可用。
+3. **dropbear SSH**（v3 新增，embind4）：静态编译 dropbear 2024.86 +
+   空密码放行补丁 + procd init，经 `adb forward` 隧道转出 AP 域 SSH。
 
 **透传原始 AT：否。** atproxy 唯一的下行写命令是 EMBIND；不碰 APN（CGDCONT）、
 不碰 IMEI（EGMREXT）相关命令，不暴露 NetIF id。
 
-## v2 变更摘要（相对 v1）
+## v2/v3 变更摘要（相对 v1）
 
-| 项 | v1 | v2 | 原因 |
-|---|---|---|---|
-| EIF_IND(0x4205) 订阅 | 开启，转发为 `+GT*` URC | **关闭**（`ENABLE_EIF_SUBSCRIBE 0`） | MIPC IND 疑似单注册者：atproxy 与 mtk_netagent 注册同一 msg_id 时互顶，atproxy（START=99，晚启动）抢注导致 netagent 失聪，RNDIS 数据面装配流程死（1.0.11 无 atproxy 正常，刷 atproxy 后 eth2 tx=3/rx=0 全哑，时间线吻合） |
-| EMBIND 强制绑定 | 事件 + 保活 | **保留**（启动 20s 首绑 + 120s 保活 + 15s 最小间隔） | 数据面恢复主路径 |
-| usb.init | 原厂（仅 boot_mode 0000 启动 adbd_usb） | **三分支统一启用 adbd_usb**；0001 分支补 `ffs.adb` function | 调试通道随固件常开 |
-| 产物 | `fm350-f22-root-embind.squashfs` | `fm350-f22-root-embind3.squashfs` | — |
+| 项 | v1 | v2 | v3 | 原因 |
+|---|---|---|---|---|
+| EIF_IND(0x4205) 订阅 | 开启，转发为 `+GT*` URC | **关闭**（`ENABLE_EIF_SUBSCRIBE 0`） | 同 v2 | MIPC IND 疑似单注册者：atproxy 与 mtk_netagent 注册同一 msg_id 时互顶，atproxy（START=99，晚启动）抢注导致 netagent 失聪，RNDIS 数据面装配流程死（1.0.11 无 atproxy 正常，刷 atproxy 后 eth2 tx=3/rx=0 全哑，时间线吻合） |
+| EMBIND 强制绑定 | 事件 + 保活 | **保留**（启动 20s 首绑 + 120s 保活 + 15s 最小间隔） | 同 v2 | 数据面恢复主路径 |
+| usb.init | 原厂（仅 boot_mode 0000 启动 adbd_usb） | **三分支统一启用 adbd_usb**；0001 分支补 `ffs.adb` function | 同 v2 | 调试通道随固件常开 |
+| SSH 服务 | 无 | 无 | **植入 dropbear**（静态 2024.86 + `-B` 空密码补丁） | AP 域 shell 经 USB 转出（SSH 协议） |
+| 产物 | `fm350-f22-root-embind.squashfs` | `fm350-f22-root-embind3.squashfs` | `fm350-f22-root-embind4.squashfs` | — |
 
 v2 下 URC 输出仅剩 `+GTEMBIND: rc=<n>,cid=<n>,why=<startup|keepalive>`；
 v1 的 `+GTNORA/+GTIFST/+GTIFADDR` 系列（EIF 事件降维）随订阅一并停用。
@@ -124,6 +127,10 @@ F22 固件自带 `/sbin/adbd_usb`（aarch64，静态链接 musl），反汇编�
    - `adb root` 命令处理（`restart_root_service` @0x40b670）与 AOSP 原版一致：
      `getuid()==0` 时直接回写 `adbd is already running as root`。
 3. 二进制自包含：打开 `/dev/usb-ffs/adb/ep0..ep2`，日志走 `/tmp/adb.log`。
+4. **完整 AOSP service 面**（v3 补充静态确认）：`shell:` / `forward:` / `reverse:` /
+   `tcp:` / `localabstract:` / `sync:` / `exec:` / `root:` / `dev:` / `framebuffer:` /
+   `jdwp:` 全在，shell 落地 `/bin/sh`，另有 `persist.adb.tcp.port`（网络监听能力，
+   RNDIS 修好前无路径）。`adb shell` / `adb push|pull` / `adb forward` 均可用。
 
 ### 刷入后验证
 
@@ -142,7 +149,113 @@ adb shell                     # MD 侧 shell
 主机侧（OpenWrt/ImmortalWrt）需安装 adb 客户端（`apk add adb` / `opkg install adb`）；
 ADB 走用户态 usbfs，无需内核驱动，接口 `ff/42/01` 显示未绑定内核驱动属正常。
 
-## 构建（云服务器，musl 交叉编译）
+## SSH 服务植入（dropbear，v3 / embind4）
+
+### 定位与通道
+
+AP 域 rootfs 原本没有任何 SSH 组件（`etc/init.d/` 与 `usr/sbin/` 无 dropbear，
+仅 LuCI 前端 `dropbear.js`/`sshkeys.js` 静态资源残留——工厂裁掉了服务端、留了页面；
+用户体系则完整：`etc/passwd` root 无哈希 shell=/bin/ash、shadow/group/inittab/
+ttyS0 login.sh/urngd 熵源全在）。embind4 植入静态 dropbear，经 ADB 隧道转出：
+
+```sh
+adb forward tcp:2222 tcp:22     # ADB 隧道 → AP 域 127.0.0.1:22
+ssh -p 2222 root@127.0.0.1      # 空密码回车，直接进入 AP root shell
+adb forward tcp:8080 tcp:80     # 附带能力：LuCI(uhttpd) 同法转出
+```
+
+为什么必须走 ADB 隧道：AP 内核（4.19.205）gadget 网络类零编译
+（无 u_ether/usb_f_ncm/usb_f_ecm/usb_f_rndis/libcomposite）且 MODVERSIONS=y
+拒自编 ko，「USB 网口 + SSH」路不通（详见逆向与移植方案报告三道墙定案）；
+ADB forward 是唯一 TCP-over-USB 用户态隧道。
+
+### dropbear 构建（云服务器，musl 静态交叉）
+
+- 版本：dropbear 2024.86（tag `DROPBEAR_2024.86`）
+- 注意：GitHub release 无 tarball 附件，源码经 `git clone --branch` 获取；
+  **必须在 Linux 侧 clone**（Windows `core.autocrlf` 检出的 CRLF 会让
+  `./configure` 报 `cannot execute: required file not found`）
+- 编译：
+
+```sh
+cd dropbear-src
+CC=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
+  ./configure --host=aarch64-linux-musl --disable-zlib --disable-pam
+make PROGRAMS='dropbear' STATIC=1 -j4
+aarch64-linux-musl-strip dropbear
+```
+
+- 产物：347280 B，ELF64/AArch64，readelf -d 无 NEEDED（纯静态，
+  bundled libtomcrypt/libtommath，零 rootfs 新依赖），
+  md5 `9a2da24b56dd338dc2572bcf5023d7da`（含下述补丁）。
+
+### 空密码补丁（`scripts/patch_dropbear_blankpass.py`）
+
+上游两个事实：
+
+1. `svr_auth_password()`（`src/svr-authpasswd.c`）对空 shadow 哈希
+   （`passwdcrypt[0] == '\0'`）**无条件拒绝**；
+2. `-B`（`svr_opts.allowblankpass`）只作用于 SSH `none` 方法
+   （`src/svr-auth.c:127`），而 OpenSSH 客户端不会主动发 none。
+
+两者叠加 = 即使加 `-B`，空哈希的 root 依然无法用 OpenSSH 登录。
+补丁把 password 方法的空哈希分支改为「`-B` 开启时放行、否则维持拒绝」，
+与 OpenWrt 出厂空密码直登行为对齐：
+
+```c
+	if (passwdcrypt[0] == '\0') {
+		if (!svr_opts.allowblankpass) {
+			/* 原行为：rejected */
+			return;
+		}
+		/* F22: blank shadow hash + -B allows login. USB-only surface,
+		 * same trust level as the always-on adbd root shell. */
+		send_msg_userauth_success();
+		return;
+	}
+```
+
+补丁脚本为行级精确替换（`count==1` 断言 + 落盘复核），已随源码重编译验证。
+
+### 安全模型
+
+| 项 | 说明 |
+|---|---|
+| 空密码登录 | root 在 shadow 中无哈希（`root::`），`-B` 放行——暴露面与 adbd_usb 免认证 root 完全一致（仅 USB 可达），不新增攻击面 |
+| 设密码后 | `passwd` 设置 root 密码后空哈希条件消失，`-B` 自动失效，密码校验接管，init 脚本无需改动 |
+| host key | `-R` 首连接自动生成于 `/etc/dropbear/`（tmpfs，重启重生成，known_hosts 提示变更属预期） |
+| 监听 | `-p 22` 绑 0.0.0.0；USB 隧道之外无可达路径（AP 域无下行网络口） |
+
+### 植入清单与运行参数
+
+| 文件 | 权限 | 说明 |
+|---|---|---|
+| `/usr/sbin/dropbear` | 755 | 静态二进制（见上） |
+| `/etc/init.d/dropbear` | 755 | procd init（START=95，`respawn 3600 5 0`） |
+| `/etc/config/dropbear` | 644 | UCI 占位（LuCI dropbear 页读取） |
+
+运行参数：`dropbear -F -E -p 22 -B -R -T 3`（前台交 procd、stderr 日志、
+端口 22、允许空密码、自动生成 host key、认证尝试限 3 次）。
+
+### 刷入后验证（SSH 通道）
+
+```sh
+# 0) 前置：adb shell（路 A）确认 dropbear 已被 procd 拉起
+adb shell
+ps | grep dropbear                 # 应见 /usr/sbin/dropbear -F -E ...
+netstat -lnt | grep ':22 '         # 0.0.0.0:22 LISTEN
+
+# 1) 隧道 + 登录（主机侧）
+adb forward tcp:2222 tcp:22
+ssh -p 2222 root@127.0.0.1         # 密码提示直接回车
+id                                 # uid=0(root)
+
+# 2) 兜底
+#    SSH 不通时 adb shell 永远可用；
+#    /etc/init.d/dropbear restart && logread | grep dropbear 排查
+```
+
+## 构建（atproxy，云服务器，musl 交叉编译）
 
 ```sh
 CC=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
@@ -158,18 +271,24 @@ aarch64-linux-musl-readelf -d atproxy.new   # 确认 NEEDED 仅 libmipc_api/libm
 - 二进制 → `/usr/bin/atproxy`
 - init 脚本 → `/etc/init.d/atproxy`（`START=99`，晚于 usb.init；`respawn 3600 5 0`）
 - usb.init → `scripts/patch_usbinit_adb.py`（行级精准插入，`sh -n` 校验）
+- dropbear 三件套 → `files/dropbear.init`、`files/dropbear.config` +
+  静态二进制（补丁编译，见上节；`scripts/patch_dropbear_blankpass.py`）
 - 重打包（与出厂参数对齐）：
 
 ```sh
-mksquashfs rootfs fm350-f22-root-embind3.squashfs \
+mksquashfs rootfs fm350-f22-root-embind4.squashfs \
     -noappend -comp xz -b 262144 -no-xattrs -all-root -no-exports -no-progress
 ```
 
 产物链：`fm350-f22-root-embind.squashfs`（v1）→ `embind2`（atproxy v2）→
-**`embind3`（atproxy v2 + ADB 三分支启用，本次交付）**，
-md5 `b8e6a8a62c468b11a06439219ab8d3af`（20738048 B）。
-抽包校验：atproxy md5 `b0ea125a82a536130f2ab00557dd345a`（v2 不变）、
-usb.init md5 `d43fbe5fbd3b878a5a8d726dc3475f92`、文件清单与基线 identical。
+`embind3`（atproxy v2 + ADB 三分支启用）→
+**`embind4`（+ dropbear SSH，本次交付）**，
+md5 `40bb5171630564154664b64431d10a5a`（20889600 B）。
+抽包校验：dropbear md5 `9a2da24b56dd338dc2572bcf5023d7da`、
+atproxy md5 `b0ea125a82a536130f2ab00557dd345a`（v2 不变）、
+adbd_usb `9ee3e4396b0f831f1356f4adbfdbd9b6`（不变）、
+usb.init md5 `d43fbe5fbd3b878a5a8d726dc3475f92`（不变）、
+文件清单 = 基线 2129 + 3 植入（2132）。
 
 ### 已知问题
 
@@ -178,3 +297,5 @@ usb.init md5 `d43fbe5fbd3b878a5a8d726dc3475f92`、文件清单与基线 identica
   EMBIND 生效以 `AT+EMBIND?` 回读与 eth2 数据面为准。
 - EIF_IND 互顶为最强嫌疑假设（时间线与症状吻合），`ENABLE_EIF_SUBSCRIBE=1`
   的复现开关保留在源码中，供后续刷入对照实验。
+- dropbear host key 重启重生成（tmpfs），strict host key checking 的客户端
+  每次刷机后首次连接需确认或用 `-o UserKnownHostsFile=/dev/null`。
