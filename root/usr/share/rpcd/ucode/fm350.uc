@@ -111,8 +111,17 @@ return {
 			'args': { 'apn': '' },
 			'call': function(req) {
 			let apn = s(get_arg(req, 'apn', ''));
-			if (apn != '')
-				return exec('fm350d set apn ' + quote(apn) + ' && fm350d dial', TMO_WRITE);
+			if (apn != '') {
+				/* 先单独落盘 APN：set 与 dial 各自输出一段 JSON，
+				 * 若用 'set apn X && dial' 拼接执行，两段 JSON 直排
+				 * 会让前端 JSON.parse 抛错（APN 保存页报错的根因）。
+				 * 拆开执行：set 失败立即返回、不带旧 APN 继续拨；
+				 * 成功则只回传 dial 的单段 JSON。daemon 巡检每轮
+				 * 重读配置，落盘后下一轮自动生效。 */
+				let r1 = exec('fm350d set apn ' + quote(apn), TMO_WRITE);
+				if (!r1.ok)
+					return r1;
+			}
 			return exec('fm350d dial', TMO_WRITE);
 			}
 		},
