@@ -1,9 +1,16 @@
 /*
- * atproxy —— F22 AP 侧 EIF 语义代理 + USB 通道强制绑定
+ * atproxy —— F22 AP 侧 USB 通道强制绑定（v2：去除 EIF_IND 订阅）
  *
- * 订阅 MIPC EIF_IND (msg id 0x4205，与 mtk_netagent 同源)，把 MD 上报的
- * 内部接口事件降维成不含 NetIF id、只读、语义明确的 +GT* 形态，写到
- * /dev/ttyGS1（主机看到的 /dev/ttyUSB1，luci-app-fm350 的 AT 口）。
+ * v2 关键变更（2026-09-25 数据面死锁定界后的修正）：
+ *   - 不再订阅 MIPC EIF_IND (0x4205)。实测定界表明：本进程与 mtk_netagent
+ *     注册同一 msg_id 时，MIPC hub 的 IND 分发与 netagent 的数据面装配
+ *     流程冲突——绑定表可写但 RNDIS 转发面永不装配（ARP/DHCP/ICMP 全丢）。
+ *     netagent 必须独占 EIF_IND 订阅才能驱动数据面，故本进程彻底退出该
+ *     消息源的竞争。
+ *   - 保留：EMBIND 强制绑定（20s 首绑 + 120s 周期保活），此功能不依赖
+ *     EIF 事件，仍可修正「绑定表为空导致的 RNDIS 无转发」。
+ *   - 事件触发重绑（g_embind_pending 的 prio 路径）随订阅一并停用，仅剩
+ *     启动首绑与周期保活。
  *
  * 设计依据：outputs/FM350-F22-AP侧AT命令透传可行性.md §3。
  * 铁律：
@@ -75,7 +82,11 @@ extern int mipc_sys_at_sync(int ps_id, void *at_st, const char *cmd)
 
 /* EIF_IND 消息号：netagent 以 0x4205/0x4206 成对注册，其中 0x4205 的
  * 回调提取 9+ 个 TLV（含 %02x 地址处理）且下游日志即 [MEH] EIF_IND *；
- * 0x4206 回调仅取 2 个小字段，为另一简单指示。 */
+ * 0x4206 回调仅取 2 个小字段，为另一简单指示。
+ *
+ * v2：本进程不再注册该消息源（见文件头 v2 说明）。如需临时恢复订阅
+ * （仅排查用，会重新威胁 netagent 的数据面装配），把下面的值改为 1。 */
+#define ENABLE_EIF_SUBSCRIBE 0
 #define MIPC_IND_EIF 0x4205
 
 /* EIF_IND TLV 标签（自 onEifIndCallback 工作函数 0x407c74 起的反汇编恢复）：
@@ -174,6 +185,7 @@ static void emit(const char *line)
 
 /* 地址块条目 -> 文本。V4 直接按 netagent 同款逐字节 sprintf（大端显示序），
  * V6 用 musl 自带 inet_ntop（无新增依赖）。返回写入长度，失败返回 -1。 */
+#if ENABLE_EIF_SUBSCRIBE
 static int eif_addr_to_str(const unsigned char *ent, int is_v6,
                            char *out, size_t outlen)
 {
@@ -187,6 +199,7 @@ static int eif_addr_to_str(const unsigned char *ent, int is_v6,
         return -1;
     return (int)strlen(out);
 }
+#endif /* ENABLE_EIF_SUBSCRIBE */
 
 /* 从 sync AT 的结果缓冲里抠出可读回显：只保留可打印字符并截断长度，
  * 避免把二进制结果整段写进 URC/日志。 */
@@ -255,6 +268,7 @@ static void enforce_embind(const char *why)
 /* reason 动词 -> 降维 URC。分类主键是 MD 侧的 reason 词根（F22 MD 域
  * 逆向确认的 AT+EIF set 形态），而不是 netagent 的内部事件码表 ——
  * 后者是版本相关的实现细节，前者才是协议语义。 */
+#if ENABLE_EIF_SUBSCRIBE
 static void on_eif_ind(void *msg)
 {
     int transid = -1, cause = -1, mtu = -1, v4 = -1, v6 = -1;
@@ -354,6 +368,7 @@ static void on_eif_ind(void *msg)
     snprintf(line, sizeof(line), "+GTIFEVT: unknown,cause=%d\r\n", cause);
     emit(line);
 }
+#endif /* ENABLE_EIF_SUBSCRIBE */
 
 /* 打开（或重开）URC 注入口。raw 无所谓 —— 只写不读。 */
 static void open_tty(void)
@@ -403,13 +418,15 @@ int main(void)
         syslog(LOG_ERR, "mipc_init failed, exit");
         return 1;
     }
+#if ENABLE_EIF_SUBSCRIBE
     if (mipc_msg_register_ind_api(0x10, MIPC_IND_EIF, on_eif_ind, NULL, NULL) != 0) {
         syslog(LOG_ERR, "register EIF_IND failed, exit");
         mipc_deinit();
         return 1;
     }
-    syslog(LOG_INFO, "atproxy started: EIF_IND(0x4205) -> +GT* on %s, embind cid=%d",
-           TTY_OUT, embind_cid());
+#endif
+    syslog(LOG_INFO, "atproxy started: eif-subscribe=%d, embind cid=%d (URC on %s)",
+           ENABLE_EIF_SUBSCRIBE, embind_cid(), TTY_OUT);
 
     /* 启动后延时一次绑定：等 gadget 与 PDN 就绪 */
     g_embind_pending = 1;
