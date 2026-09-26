@@ -46,7 +46,7 @@ pub mod sig;
 pub mod singleton;
 pub mod v6;
 
-pub use dial::{redial, DialWatch, NO_ADDR_REDIAL_ROUNDS};
+pub use dial::{redial, DialWatch, NO_ADDR_REDIAL_ROUNDS, NO_SERVICE_RETRY_INTERVAL};
 pub use guard::{ConflictWatch, DataGuard, NetGuard};
 pub use gt::GtWatch;
 pub use port::PortWatch;
@@ -102,7 +102,9 @@ pub fn run(cfg_initial: config::Config) -> Result<(), String> {
 
         conflict.tick(&cfg);
         data.tick(&at, &cfg);
-        netg.tick(&at, &cfg);
+        if netg.tick(&at, &cfg) {
+            dial.defer_after_external_purification();
+        }
 
         port.release_on_change(&at, &cfg);
         port.reselect_if_down(&at, &cfg);

@@ -88,6 +88,71 @@ pub fn status(cfg: &Config) -> NetStatus {
     st
 }
 
+/// 清理拨号会话遗留的地址参数，但保留 netifd 接口骨架。
+///
+/// 主接口以 `proto=static` 开机，因此拨号失败时只让 PDP 失活并不足够：
+/// netifd 仍会按 UCI 中上次成功会话的地址把接口拉起。这里先关闭主/IPv6
+/// 接口，再删除会话地址、DNS 与插件生成的路由段，最后持久化 network。
+/// `proto`、`device`、`auto`、`metric` 等骨架配置刻意保留，后续拨号成功后
+/// `ensure_iface()` 会重新写入当前会话参数。
+pub fn clear_session_addresses(cfg: &Config) -> Result<(), String> {
+    let commands = session_address_cleanup_commands(cfg);
+    let script = commands.join("; ");
+    let (ok, output) = real(&script);
+    if ok {
+        Ok(())
+    } else if output.is_empty() {
+        Err("提交 network 地址清理失败".to_string())
+    } else {
+        Err(format!("提交 network 地址清理失败: {}", output))
+    }
+}
+
+/// 生成可测试的清理脚本。删除不存在的 UCI 项视为正常，commit 必须成功。
+fn session_address_cleanup_commands(cfg: &Config) -> Vec<String> {
+    let mut commands = Vec::new();
+
+    // 先停掉逻辑接口，确保内核不继续持有上一次会话的静态地址。
+    for iface in [&cfg.iface_v6, &cfg.iface] {
+        if !iface.is_empty() {
+            commands.push(format!(
+                "ifdown {} >/dev/null 2>&1 || true",
+                super::shell::sq(iface)
+            ));
+        }
+    }
+
+    if !cfg.iface.is_empty() {
+        for option in ["ipaddr", "netmask", "gateway", "dns"] {
+            let path = format!("network.{}.{}", cfg.iface, option);
+            commands.push(format!(
+                "uci -q delete {} 2>/dev/null || true",
+                super::shell::sq(&path)
+            ));
+        }
+        for section in [format!("{}_def", cfg.iface), format!("{}_gw4", cfg.iface)] {
+            let path = format!("network.{}", section);
+            commands.push(format!(
+                "uci -q delete {} 2>/dev/null || true",
+                super::shell::sq(&path)
+            ));
+        }
+    }
+
+    if !cfg.iface_v6.is_empty() {
+        for option in ["ip6addr", "ip6gw", "dns"] {
+            let path = format!("network.{}.{}", cfg.iface_v6, option);
+            commands.push(format!(
+                "uci -q delete {} 2>/dev/null || true",
+                super::shell::sq(&path)
+            ));
+        }
+    }
+
+    commands.push("uci commit network".to_string());
+    commands
+}
+
 /// 确保蜂窝接口存在并应用地址。
 ///
 /// 返回（接口名, 数据网卡, 已执行的 UCI 命令列表）。
@@ -509,5 +574,43 @@ mod tests {
         let iface = "fm350";
         assert_eq!(format!("{}_def", iface), "fm350_def");
         assert_eq!(format!("{}_gw4", iface), "fm350_gw4");
+    }
+
+    #[test]
+    fn session_cleanup_removes_addresses_but_keeps_interface_skeleton() {
+        let cfg = Config::default();
+        let script = session_address_cleanup_commands(&cfg).join("; ");
+
+        for path in [
+            "network.fm350.ipaddr",
+            "network.fm350.netmask",
+            "network.fm350.gateway",
+            "network.fm350.dns",
+            "network.fm350v6.ip6addr",
+            "network.fm350v6.ip6gw",
+            "network.fm350v6.dns",
+            "network.fm350_def",
+            "network.fm350_gw4",
+        ] {
+            assert!(script.contains(path), "清理脚本缺少 {}", path);
+        }
+        assert!(script.contains("ifdown 'fm350v6'"));
+        assert!(script.contains("ifdown 'fm350'"));
+        assert!(!script.contains("network.fm350.proto"));
+        assert!(!script.contains("network.fm350.device"));
+        assert!(!script.contains("network.fm350.auto"));
+        assert!(script.ends_with("uci commit network"));
+    }
+
+    #[test]
+    fn session_cleanup_quotes_configured_interface_names() {
+        let cfg = Config {
+            iface: "cellular; touch /tmp/nope".to_string(),
+            iface_v6: "cellular6".to_string(),
+            ..Default::default()
+        };
+        let script = session_address_cleanup_commands(&cfg).join("; ");
+        assert!(script.contains("ifdown 'cellular; touch /tmp/nope'"));
+        assert!(script.contains("'network.cellular; touch /tmp/nope.ipaddr'"));
     }
 }

@@ -40,7 +40,9 @@ pub use heal::{
     apply_after_dial, bounce_data_dev, bounce_iface_v4, bounce_iface_v6, line_has_metric,
     reset_usb_data_dev, route_guard,
 };
-pub use iface::{ensure_autostart, ensure_iface, status, teardown_iface, NetStatus};
+pub use iface::{
+    clear_session_addresses, ensure_autostart, ensure_iface, status, teardown_iface, NetStatus,
+};
 pub use probe::{
     check_connectivity4, check_connectivity6, data_health, data_plane_stalled, detect_dev,
     foreign_ifaces_on_dev, DataHealth,

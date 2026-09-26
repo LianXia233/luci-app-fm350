@@ -810,6 +810,14 @@ return view.extend({
 		var info = st ? (st.info || {}) : {};
 		var sig = st ? (st.signal || {}) : {};
 		var pdp = st ? (st.pdp || {}) : {};
+		/* PDP 状态与 IP/DNS 来自 fm350d 对模组的 AT 查询，是会话信息的权威数据源。
+		   net.status 仅是主机内核快照，用于接口/路由就绪态，不用于展示当前 PDP IP/DNS。 */
+		var pdpActive = !!pdp.active;
+		var pdpHasIpv4 = pdpActive && !!pdp.ipv4;
+		var pdpHasIpv6 = pdpActive && !!pdp.ipv6;
+		var pdpStatus = pdpActive ? _('已连接') :
+			(!info.iccid ? _('SIM 未就绪 / 无服务') :
+				(sig.reg_state && sig.reg_state.indexOf('已注册') < 0 ? _('无服务 / 未注册') : _('PDP 未激活')));
 		var temp = st ? (st.temperature || null) : null;
 		var sensors = (temp && temp.sensors) ? temp.sensors : [];
 
@@ -932,11 +940,12 @@ return view.extend({
 				v(st ? st.at_port : '', '')),
 
 			card(_('PDP 上下文'),
-				[ dot(pdp.active), v(pdp.active ? _('已连接') : _('未连接')) ],
+				[ dot(pdpActive), pdpStatus ],
 				_('APN ') + v(pdp.apn) + ' · ' + v(pdp.pdp_type, '')),
 
-			card(_('IPv4 地址'), v(pdp.ipv4, _('未分配')), v(pdp.ipv6, ''), 'ethernet'),
-			card(_('DNS 服务器'), (pdp.dns && pdp.dns.length) ? pdp.dns.join(', ') : '-', _('来自 AT+GTDNS'))
+			card(_('IPv4 地址'), v(pdpActive ? pdp.ipv4 : null, pdpActive ? _('未分配') : _('未连接')),
+				pdpActive ? v(pdp.ipv6, '') : '', 'ethernet'),
+			card(_('DNS 服务器'), (pdpActive && pdp.dns && pdp.dns.length) ? pdp.dns.join(', ') : '-', _('来自模组 PDP 状态'))
 		]));
 
 		/* ---------------- 三、信号细节 ---------------- */
@@ -1103,20 +1112,20 @@ return view.extend({
 						row(_('IPv4 接口'), net.iface),
 						row(_('IPv6 接口'), net.iface_v6),
 						row(_('物理网卡'), net.dev),
-						row(_('IPv4 地址'), (net.ipv4 && net.ipv4.length) ? net.ipv4.join(', ') : null),
-						row(_('IPv6 地址'), (net.ipv6 && net.ipv6.length) ? net.ipv6.join(', ') : null),
-						/* 三行新增观测位（审查问题：net 状态展示缺位）：
-						   默认路由是否真正就位（v4/v6 分开看）、UCI 实际下发的 DNS、
-						   以及综合 pdp+kernel+route 的链路就绪结论。 */
-						row(_('默认路由 IPv4'), net.default4 != null ? (net.default4 ? _('已就位') : _('未就位')) : null),
-						(net.ipv6 && net.ipv6.length)
+						row(_('PDP IPv4 地址'), pdpHasIpv4 ? pdp.ipv4 : null),
+						row(_('PDP IPv6 地址'), pdpHasIpv6 ? pdp.ipv6 : null),
+						/* 观测主机侧默认路由是否就位（v4/v6 分开看），并结合模组 PDP
+						   状态与内核接口/路由快照给出链路就绪结论。 */
+						row(_('默认路由 IPv4'), pdpHasIpv4 && net.default4 != null ? (net.default4 ? _('已就位') : _('未就位')) : null),
+						(pdpHasIpv6 && net.ipv6 && net.ipv6.length)
 							? row(_('默认路由 IPv6'), net.default6 != null ? (net.default6 ? _('已就位') : _('未就位')) : null)
 							: null,
-						row(_('DNS 配置'), (net.dns && net.dns.length) ? net.dns.join(', ') : null),
-						row(_('接口路由'), (net.routes && net.routes.length) ? net.routes.join('  |  ') : null),
+						row(_('PDP DNS'), (pdpActive && pdp.dns && pdp.dns.length) ? pdp.dns.join(', ') : null),
+						row(_('接口路由'), ((pdpHasIpv4 || pdpHasIpv6) && net.routes && net.routes.length) ? net.routes.join('  |  ') : null),
 						row(_('接口状态'), net.up ? _('已启用') : _('未启用')),
-						row(_('链路就绪'), (pdp && pdp.active && net.up &&
-							(net.default4 || ((net.ipv6 && net.ipv6.length) && net.default6)))
+						row(_('链路就绪'), (pdpActive && net.up &&
+							((pdpHasIpv4 && net.default4) ||
+								(pdpHasIpv6 && net.ipv6 && net.ipv6.length && net.default6)))
 							? _('是') : _('否'))
 					])
 				])
