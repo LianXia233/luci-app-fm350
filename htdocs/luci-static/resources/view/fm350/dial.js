@@ -560,6 +560,8 @@ return view.extend({
 
 		o = s.option(form.DummyValue, '_addr', _('已分配 IP 地址'));
 		o.cfgvalue = function() {
+			if (!pdp.active)
+				return _('未连接');
 			var parts = [];
 			if (pdp.ipv4) parts.push(pdp.ipv4);
 			if (pdp.ipv6) parts.push(pdp.ipv6);
@@ -568,7 +570,7 @@ return view.extend({
 
 		o = s.option(form.DummyValue, '_dns', _('DNS 域名解析'));
 		o.cfgvalue = function() {
-			return (pdp.dns && pdp.dns.length) ? pdp.dns.join(', ') : '-';
+			return (pdp.active && pdp.dns && pdp.dns.length) ? pdp.dns.join(', ') : '-';
 		};
 
 		/* ---------------- 三、操作控制 ---------------- */
@@ -617,9 +619,9 @@ return view.extend({
 		/* 渲染整体容器并前置插入 PDP Hero 实时态势看板 */
 		return m.render().then(function(mapNode) {
 			var ipList = [];
-			if (pdp.ipv4) ipList.push(E('div', { 'class': 'fm350-chip-pill' }, [ 'IPv4', E('code', {}, pdp.ipv4) ]));
-			if (pdp.ipv6) ipList.push(E('div', { 'class': 'fm350-chip-pill' }, [ 'IPv6', E('code', {}, pdp.ipv6) ]));
-			if (pdp.dns && pdp.dns.length) {
+			if (isActive && pdp.ipv4) ipList.push(E('div', { 'class': 'fm350-chip-pill' }, [ 'IPv4', E('code', {}, pdp.ipv4) ]));
+			if (isActive && pdp.ipv6) ipList.push(E('div', { 'class': 'fm350-chip-pill' }, [ 'IPv6', E('code', {}, pdp.ipv6) ]));
+			if (isActive && pdp.dns && pdp.dns.length) {
 				ipList.push(E('div', { 'class': 'fm350-chip-pill' }, [ 'DNS', E('code', {}, pdp.dns.join(', ')) ]));
 			}
 
