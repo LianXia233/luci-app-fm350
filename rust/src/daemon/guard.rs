@@ -174,6 +174,8 @@ struct StackGuard {
     fail_rounds: u32,
     /// 已执行到第几级恢复。
     recover_level: u32,
+    /// 第 2 级去激活重拨连续失败次数。
+    redial_failures: u32,
     /// 上轮探测结果。`None` = 接口没地址，探测不适用（交回地址巡检兜底）。
     last_ok: Option<bool>,
     last_recover: Option<Instant>,
@@ -186,27 +188,48 @@ pub struct NetGuard {
     v6: StackGuard,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardAction {
+    Continue,
+    Redial,
+    Purified,
+}
+
 impl NetGuard {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 一轮双栈连通性巡检。
-    pub fn tick(&mut self, at: &AtHandle, cfg: &Config) {
+    /// 一轮双栈连通性巡检；返回本轮是否进入净化态，供拨号巡检同步启动退避。
+    pub fn tick(&mut self, at: &AtHandle, cfg: &Config) -> bool {
         if !cfg.net_guard || !cfg.enabled {
-            return;
+            return false;
         }
         let Some(dev) = net::detect_dev(cfg) else {
-            return;
+            return false;
         };
         let ns = net::status(cfg);
         let rounds = cfg.net_guard_rounds.max(1);
 
-        self.tick_v4(at, cfg, &dev, &ns, rounds);
-        self.tick_v6(at, cfg, &dev, &ns, rounds);
+        // IPv4 第 2 级重拨会同时影响双栈；本轮执行后不再用旧快照继续触发
+        // IPv6 恢复，避免同一轮对模组重复去激活/拨号。
+        match self.tick_v4(at, cfg, &dev, &ns, rounds) {
+            GuardAction::Purified => return true,
+            GuardAction::Redial => return false,
+            GuardAction::Continue => {}
+        }
+        matches!(self.tick_v6(at, cfg, &dev, &ns, rounds), GuardAction::Purified)
     }
 
-    fn tick_v4(&mut self, at: &AtHandle, cfg: &Config, dev: &str, ns: &net::NetStatus, rounds: u32) {
+    /// IPv4 恢复动作状态；重拨后不再处理另一栈的旧快照。
+    fn tick_v4(
+        &mut self,
+        at: &AtHandle,
+        cfg: &Config,
+        dev: &str,
+        ns: &net::NetStatus,
+        rounds: u32,
+    ) -> GuardAction {
         // 接口没有 v4 地址属于「地址未下发」，由拨号/地址巡检负责，
         // 这里不重复兜底 —— 否则两个巡检会抢着 ifup。
         if ns.ipv4.is_empty() {
@@ -218,7 +241,7 @@ impl NetGuard {
             }
             self.v4.reset();
             self.v4.last_ok = None;
-            return;
+            return GuardAction::Continue;
         }
 
         if net::check_connectivity4(dev) {
@@ -227,7 +250,7 @@ impl NetGuard {
             }
             self.v4.reset();
             self.v4.last_ok = Some(true);
-            return;
+            return GuardAction::Continue;
         }
 
         if self.v4.last_ok != Some(false) {
@@ -239,11 +262,12 @@ impl NetGuard {
         self.v4.last_ok = Some(false);
         self.v4.fail_rounds += 1;
         if self.v4.fail_rounds < rounds || !cooled(self.v4.last_recover, NET_GUARD_COOLDOWN) {
-            return;
+            return GuardAction::Continue;
         }
         self.v4.recover_level += 1;
         self.v4.fail_rounds = 0;
-        let done = if self.v4.recover_level == 1 {
+        let is_redial = self.v4.recover_level >= 2;
+        let done = if !is_redial {
             warnf!(format_args!(
                 "net_guard: IPv4 连续 {} 轮不可达，重建接口 {}（第 1 级）",
                 rounds, cfg.iface
@@ -261,9 +285,26 @@ impl NetGuard {
             if done { "已执行" } else { "执行失败" }
         ));
         self.v4.last_recover = Some(Instant::now());
+
+        if is_redial {
+            if self.v4.note_redial_result(done, rounds) {
+                let failures = self.v4.redial_failures;
+                self.purify_after_failed_redials(cfg, "IPv4", failures, rounds);
+                return GuardAction::Purified;
+            }
+            return GuardAction::Redial;
+        }
+        GuardAction::Continue
     }
 
-    fn tick_v6(&mut self, at: &AtHandle, cfg: &Config, dev: &str, ns: &net::NetStatus, rounds: u32) {
+    fn tick_v6(
+        &mut self,
+        at: &AtHandle,
+        cfg: &Config,
+        dev: &str,
+        ns: &net::NetStatus,
+        rounds: u32,
+    ) -> GuardAction {
         if ns.ipv6.is_empty() {
             if self.v6.last_ok.is_some() {
                 infof!(format_args!(
@@ -273,7 +314,7 @@ impl NetGuard {
             }
             self.v6.reset();
             self.v6.last_ok = None;
-            return;
+            return GuardAction::Continue;
         }
 
         if net::check_connectivity6(dev) {
@@ -282,7 +323,7 @@ impl NetGuard {
             }
             self.v6.reset();
             self.v6.last_ok = Some(true);
-            return;
+            return GuardAction::Continue;
         }
 
         if self.v6.last_ok != Some(false) {
@@ -294,7 +335,7 @@ impl NetGuard {
         self.v6.last_ok = Some(false);
         self.v6.fail_rounds += 1;
         if self.v6.fail_rounds < rounds || !cooled(self.v6.last_recover, NET_GUARD_COOLDOWN) {
-            return;
+            return GuardAction::Continue;
         }
         self.v6.fail_rounds = 0;
 
@@ -310,13 +351,16 @@ impl NetGuard {
                 if done { "已执行" } else { "执行失败" }
             ));
             self.v6.last_recover = Some(Instant::now());
-            return;
+            return GuardAction::Continue;
         }
 
         // v6 独占故障**绝不重拨**：重拨会重建双栈，为修一个栈去断另一个栈
         // 是净亏。只有双栈同时异常才升级为重拨。
         let v4_down_too = ns.ipv4.is_empty() || !net::check_connectivity4(dev);
         if !v4_down_too {
+            // 双栈重拨失败序列被「IPv4 已恢复」打断，不应把此前失败带到
+            // 之后可能发生的新一轮双栈故障。
+            self.v6.redial_failures = 0;
             warnf!(format_args!(
                 "net_guard: IPv6 独占故障（IPv4 正常），仅重建 v6 子接口 {}",
                 cfg.iface_v6
@@ -327,7 +371,7 @@ impl NetGuard {
                 if done { "已执行" } else { "执行失败" }
             ));
             self.v6.last_recover = Some(Instant::now());
-            return;
+            return GuardAction::Continue;
         }
 
         self.v6.recover_level += 1;
@@ -344,6 +388,35 @@ impl NetGuard {
         // 重拨同时重建双栈，v4 侧的计数与冷却一并复位，避免紧接着又重拨一次
         self.v4.reset();
         self.v4.last_recover = Some(Instant::now());
+        if self.v6.note_redial_result(done, rounds) {
+            let failures = self.v6.redial_failures;
+            self.purify_after_failed_redials(cfg, "IPv6/双栈", failures, rounds);
+            return GuardAction::Purified;
+        }
+        GuardAction::Redial
+    }
+
+    /// 第 2 级重拨连续失败后清理两栈会话残值，避免 netifd 把死地址继续
+    /// 当作在线状态展示。地址清理失败时保留告警；拨号巡检仍会独立重试。
+    fn purify_after_failed_redials(
+        &mut self,
+        cfg: &Config,
+        stack: &str,
+        failures: u32,
+        rounds: u32,
+    ) {
+        warnf!(format_args!(
+            "net_guard: {} 第 2 级重拨连续失败 {}/{} 次，进入无服务净化态",
+            stack, failures, rounds
+        ));
+        match net::clear_session_addresses(cfg) {
+            Ok(()) => infof!(format_args!("net_guard: 已清理蜂窝接口残留地址与 DNS，保留接口骨架")),
+            Err(e) => warnf!(format_args!("net_guard: 清理蜂窝接口残留配置失败: {}", e)),
+        }
+        self.v4.reset();
+        self.v4.last_ok = None;
+        self.v6.reset();
+        self.v6.last_ok = None;
     }
 }
 
@@ -353,6 +426,17 @@ impl StackGuard {
     fn reset(&mut self) {
         self.fail_rounds = 0;
         self.recover_level = 0;
+        self.redial_failures = 0;
+    }
+
+    /// 记录一次第 2 级重拨结果；达到配置门槛时由 NetGuard 触发净化。
+    fn note_redial_result(&mut self, succeeded: bool, rounds: u32) -> bool {
+        if succeeded {
+            self.redial_failures = 0;
+            return false;
+        }
+        self.redial_failures = self.redial_failures.saturating_add(1);
+        self.redial_failures >= rounds.max(1)
     }
 }
 
@@ -445,5 +529,24 @@ mod tests {
     fn cooldowns_are_far_longer_than_a_redial() {
         assert!(RECOVER_COOLDOWN >= Duration::from_secs(120));
         assert!(NET_GUARD_COOLDOWN >= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn repeated_failed_level_two_redials_trigger_purification_threshold() {
+        let mut stack = StackGuard::default();
+        assert!(!stack.note_redial_result(false, 3));
+        assert!(!stack.note_redial_result(false, 3));
+        assert!(stack.note_redial_result(false, 3));
+        assert_eq!(stack.redial_failures, 3);
+
+        // 成功的重拨打断「连续失败」序列。
+        assert!(!stack.note_redial_result(true, 3));
+        assert_eq!(stack.redial_failures, 0);
+    }
+
+    #[test]
+    fn failed_redial_purge_threshold_has_a_one_round_floor() {
+        let mut stack = StackGuard::default();
+        assert!(stack.note_redial_result(false, 0));
     }
 }

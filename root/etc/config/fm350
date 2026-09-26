@@ -26,6 +26,7 @@ config main 'main'
 	# 绑定数据网卡），连续 net_guard_rounds 轮失败才按栈恢复；
 	# v6 单独故障绝不重拨，不误杀正常栈
 	option net_guard '1'
+	# 连续失败门槛：net_guard 恢复与拨号失败后的 UCI 地址净化共用；净化后自动重拨退避 300 秒
 	option net_guard_rounds '3'
 	option poll_interval '30'
 	# 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；设为 0 可关闭独立轮询
