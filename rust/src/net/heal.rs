@@ -12,9 +12,12 @@
 //! |---|---|---|---|
 //! | 1 | 补/删路由 | 路由缺失或残留 | 无 |
 //! | 2 | `ifdown/ifup` 单个接口 | v4 或 v6 单侧不通 | 该侧重新协商 |
-//! | 3 | `ip link` 硬复位数据网卡 | 端点 stall（tx_errors 涨、tx_packets 不动） | v6 一并失联，需拉回 |
+//! | 3 | `ip link` 硬复位数据网卡 | 地址/路由漂移（netdev 层） | v6 一并失联，需拉回 |
+//! | 4 | USB 驱动解绑重绑 | 端点 stall（两类形态见 [`data_plane_stalled`]） | netdev 重建、可能改名 |
+//! | 5 | 去激活重拨 / 重启模组 | 以上全部无效 | 双栈中断，甚至整机复位 |
 //!
-//! 判定顺序必须是 1 → 2 → 3，见 [`data_plane_stalled`] 与 [`bounce_data_dev`]。
+//! 判定顺序必须是 1 → 2 → 3 → 4，见 [`reset_usb_data_dev`]、[`bounce_data_dev`]
+//! 与 [`data_plane_stalled`]。
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -133,9 +136,108 @@ pub fn route_guard(cfg: &Config) -> bool {
     acted
 }
 
+/// 复位 USB 数据端点：解绑并重新绑定承载数据网卡的 USB 驱动。
+///
+/// ## 为什么必须单独有这一级
+///
+/// [`bounce_data_dev`] 只做 `ip link down/up`，动的是 netdev 层：它既清不掉
+/// USB 端点的 halt 状态，也重建不了 usbnet 的 URB 队列。而数据面 stall 的根因
+/// 恰恰在 USB 端点，所以 bounce 对这类故障**结构性无效**。
+///
+/// 实机证据（FM350-GL，驱动 rndis_host，控制接口 2-1:1.0 + 数据接口 2-1:1.1）：
+///   * 只 bounce（含反复执行）：`tx_errors` 一路涨到 787、`tx_packets` 停在 1、
+///     `rx` 恒为 0，链路持续不通；
+///   * 改为驱动 unbind/bind 一次：netdev 立即重建（ifindex 变化）、计数归零，
+///     ARP 状态由 FAILED 变为 INCOMPLETE —— 说明请求确实发出去了，主机侧
+///     驱动状态已被清干净。
+///
+/// ## 风险与必须处理的副作用
+///
+/// 解绑期间数据网卡会短暂消失，且 netdev 名**可能变化**（内核按最小可用编号
+/// 重新分配，RNDIS 通常仍拿回原名，但不能依赖）。因此绑定后必须重新识别名字
+/// 并把 uci 的 `device` 同步成新名，否则 netifd 会一直盯着一个已消失的设备。
+///
+/// 另注：当 uci 的 `data_dev` 被配成固定设备名（非 `auto`）时，[`detect_dev`]
+/// 不会重新扫描，改名就检测不到 —— 这是既有行为，使用固定名时应避免走到
+/// 这一级，或改用 `auto`。
+pub fn reset_usb_data_dev(cfg: &Config) -> bool {
+    let dev = match detect_dev(cfg) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    // 1) 由 netdev 反查它挂在哪个 USB 接口、由哪个驱动承载。
+    let (ok_if, iface) = real(&format!(
+        "readlink -f /sys/class/net/{}/device 2>/dev/null | sed 's#.*/##'",
+        dev
+    ));
+    let iface = iface.trim().to_string();
+    if !ok_if || iface.is_empty() {
+        return false;
+    }
+    let (_, drv) = real(&format!(
+        "basename $(readlink -f /sys/class/net/{}/device/driver 2>/dev/null) 2>/dev/null",
+        dev
+    ));
+    let drv = drv.trim().to_string();
+    if drv.is_empty() {
+        return false;
+    }
+
+    let bus = format!("/sys/bus/usb/drivers/{}", drv);
+
+    // 2) 解绑。驱动会连带释放它 claim 的伙伴接口（RNDIS 的数据接口），
+    //    所以只需对控制接口操作一次。
+    let _ = real(&format!("echo {} > {}/unbind 2>/dev/null", iface, bus));
+    sleep(Duration::from_secs(2));
+
+    // 3) 重新绑定。绑定偶发失败（实机第 1 次即成功，但必须留重试），
+    //    失败时重复写入即可，不要据此判定设备已死。
+    let mut bound = false;
+    for _ in 0..3 {
+        let _ = real(&format!("echo {} > {}/bind 2>/dev/null", iface, bus));
+        sleep(Duration::from_secs(4));
+        let (ok_now, cur) = real(&format!(
+            "basename $(readlink -f /sys/class/net/{}/device/driver 2>/dev/null) 2>/dev/null",
+            dev
+        ));
+        if ok_now && cur.trim() == drv {
+            bound = true;
+            break;
+        }
+    }
+    if !bound {
+        return false;
+    }
+
+    // 4) 重新识别 netdev 名并同步 uci，避免 netifd 盯错设备。
+    let new_dev = match detect_dev(cfg) {
+        Some(d) => d,
+        None => return false,
+    };
+    if new_dev != dev {
+        let _ = real(&format!(
+            "uci -q set network.{}.device={}; uci -q commit network",
+            cfg.iface, new_dev
+        ));
+    }
+
+    // 5) 回到 netifd：由它按 UCI 重新下发地址与路由（裸 up 不会恢复配置）。
+    let (ok, _) = real(&format!("ifup {}", cfg.iface));
+    if v6_managed(cfg) {
+        let _ = real(&format!("ifup {}", cfg.iface_v6));
+        // RA 模式：链路重建后 sysctl 可能已回默认，必须重新打开并主动发 RS。
+        if v6_ra_mode(cfg) {
+            enable_and_solicit_v6_ra(&new_dev);
+        }
+    }
+    ok
+}
+
 /// 轻量复位数据网卡：只 down/up 网卡并重新 ifup，不动基带、不重启模组。
 ///
-/// 端点偶发 stall（典型诱因是与其它 modem 插件争抢接口）多数能被这一级恢复。
+/// 适用于**地址/路由漂移**一类 netdev 层问题。对 USB 端点 stall 无效 ——
+/// 那种情况请用 [`reset_usb_data_dev`]（stall 的根因在 USB 层，down/up 够不着）。
 pub fn bounce_data_dev(cfg: &Config) -> bool {
     let dev = match detect_dev(cfg) {
         Some(d) => d,
@@ -169,9 +271,10 @@ pub fn bounce_data_dev(cfg: &Config) -> bool {
 
 /// 轻量重建 IPv4 侧接口：只 ifdown/ifup 主接口，不碰数据网卡链路与 v6 子接口。
 ///
-/// 与 [`bounce_data_dev`] 的分工：端点 stall 需要 `ip link` 硬复位（会连带 v6
-/// 失联再一并拉回）；而公网连通性丢失且 v6 独立存活时，硬复位反而会误伤正常的
-/// v6 —— 这里只让 netifd 重新下发 v4 地址/路由/网关，v6 子接口保持原状。
+/// 与 [`bounce_data_dev`] 的分工：端点 stall 需要 USB 驱动层复位（见
+/// [`reset_usb_data_dev`]）；而公网连通性丢失且 v6 独立存活时，上述任何
+/// 硬复位都会误伤正常的 v6 —— 这里只让 netifd 重新下发 v4 地址/路由/网关，
+/// v6 子接口保持原状。
 pub fn bounce_iface_v4(cfg: &Config) -> bool {
     let _ = real(&format!("ifdown {}", cfg.iface));
     sleep(Duration::from_secs(2));

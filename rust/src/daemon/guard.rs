@@ -12,7 +12,11 @@
 //!
 //! ## 分级与冷却
 //!
-//! 恢复动作按代价递增分级（复位网卡 → 重拨 → 重启模组），同级反复无效才升级。
+//! 恢复动作按**针对性**分级（复位 USB 端点 → 复位网卡 → 重拨 → 重启模组），
+//! 同级反复无效才升级。第一级取的不是「代价最小」而是「最对症」：数据面 stall
+//! 的根因在 USB 端点，只复位 netdev 层（`ip link down/up`）修不好它，跳过这一级
+//! 会让故障一路升级到重拨乃至重启模组 —— PDP 与射频本就是好的，白白断网且仍然
+//! 修不好（实机即如此：net_guard 一路升到第 7 级全部无效）。
 //! 每级之间强制冷却：重拨一次要几十秒，期间整条链路是断的，探测目标抖动时
 //! 若不冷却会把链路反复打断（恢复风暴）。
 
@@ -93,7 +97,9 @@ impl DataGuard {
         let Some(dev) = net::detect_dev(cfg) else {
             return true;
         };
-        let Some(cur) = net::data_health(&dev) else {
+        // probe = true：先发一个包再采样，否则「冻结」形态与空闲无法区分，
+        // 见 net::data_plane_stalled 对 A/B 两种形态的说明。
+        let Some(cur) = net::data_health(&dev, true) else {
             // 读不到统计（网卡刚消失）：既不能判健康也不能判 stall，跳过
             return true;
         };
@@ -123,11 +129,19 @@ impl DataGuard {
             self.stall_rounds, level
         ));
         let done = match level {
-            // 第 1 级：复位数据网卡（不动基带，代价最小）
-            1 => net::bounce_data_dev(cfg),
-            // 第 2 级：重新拨号（重建 PDP 与接口，双栈都会短暂中断）
-            2 => redial(at, cfg),
-            // 第 3 级及以上：重启模组（AT+CFUN=1,1），代价最大，放在最后
+            // 第 1 级：复位 USB 数据端点（stall 的根因就在这一层）
+            //
+            // 放在最前不是因为它代价最小，而是因为**只有它直击根因**：
+            // 端点 halt 与 usbnet 队列停止都发生在 USB/驱动层，第 2 级的
+            // `ip link down/up` 只动 netdev 层，对这类故障结构性无效。
+            // 实机教训：跳过这一级会让故障一路升级到重拨（第 3 级）乃至
+            // 重启模组，而 PDP 与射频本来就是好的，白白断网且仍然修不好。
+            1 => net::reset_usb_data_dev(cfg),
+            // 第 2 级：复位数据网卡（netdev 层，对地址/路由漂移类问题有效）
+            2 => net::bounce_data_dev(cfg),
+            // 第 3 级：重新拨号（重建 PDP 与接口，双栈都会短暂中断）
+            3 => redial(at, cfg),
+            // 第 4 级及以上：重启模组（AT+CFUN=1,1），代价最大，放在最后
             _ => match modem::reboot(at, cfg) {
                 Ok(_) => true,
                 Err(e) => {
@@ -144,8 +158,10 @@ impl DataGuard {
         self.recover_level = level;
         self.last_recover = Some(Instant::now());
         self.stall_rounds = 0;
-        // 自愈后基线失效（计数器可能已被清零），下一轮重新取基准
-        self.last_health = net::detect_dev(cfg).and_then(|d| net::data_health(&d));
+        // 自愈后基线失效（计数器可能已被清零、网卡可能已改名），下一轮重新取基准。
+        // probe = false：刚复位完不要立刻再发包，避免把恢复窗口内的正常静默
+        // 误判成冻结。
+        self.last_health = net::detect_dev(cfg).and_then(|d| net::data_health(&d, false));
     }
 }
 

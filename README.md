@@ -470,7 +470,7 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | `gateway_mode` | `auto` | 网关模式：`auto` 推导并实测同网段 `.1` 网关、失败回退；`static` 用 `gateway`；`off` 无网关 onlink 直连 |
 | `gateway` | （空） | 静态网关（`gateway_mode=static` 必填）；`auto` 实测成功后回写实际值 |
 | `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`） |
-| `data_guard` | `1` | 数据面健康巡检与分级自愈（网卡 stall 时复位 → 重拨 → 重启模组） |
+| `data_guard` | `1` | 数据面健康巡检与分级自愈（USB 端点复位 → 网卡复位 → 重拨 → 重启模组） |
 | `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
 | `net_guard` | `1` | 公网连通性保活：IPv4/IPv6 各自独立向公共 DNS 发 ICMP（绑定数据网卡），「模组侧有地址」不等于「真正可用」；连续多轮失败才按栈恢复，v6 单独故障绝不重拨 |
 | `net_guard_rounds` | `3` | 连续多少轮连通性探测失败才触发该栈的恢复动作（每栈 300 s 恢复冷却） |
@@ -666,6 +666,13 @@ make package/luci-app-fm350/compile V=s
   而同链路 `ping 223.5.5.5` 正常（21 ms）——只要 ARP 能解析到网关 MAC（实机为 `00:00:88:ff:00:00`），三层转发就是好的。
 - **手动干预**：个别运营商网关不是 `.1` 时，用 `uci set fm350.main.gateway_mode=static; uci set fm350.main.gateway=<网关>; uci commit` 指定；
   确定必须走直连时设 `gateway_mode=off`。实测成功的网关会回写到 `fm350.main.gateway`，便于 `uci show fm350` 直接查看。
+- **stall 的两种形态与「彻底冻结」检测（1.0.14-r4 起）**：端点 stall 有挣扎期与冻结期两种形态。
+  挣扎期即上文「tx_errors 涨而 tx_packets 不动」；冻结期是队列被内核 `netif_stop_queue` 永久停止后
+  **两个计数器同时不再变化**（实测：tx=1 / rx=0 / tx_err 冻结在 787，30 秒零增量），数值上与「链路空闲」
+  无法区分。1.0.14-r4 起 `data_guard` 巡检前先主动发一个探测包制造确定的发包尝试，再判定是否冻结；
+  同时把「USB 驱动解绑重绑（`reset_usb_data_dev`）」加入自愈分级的第一级——`ip link down/up` 只动
+  netdev 层，清不掉端点 halt，对该故障结构性无效。注意：PDP 每次重拨都会换 IP，
+  **人工排障时严禁按记忆里的旧地址/旧网关下结论**，必须按当前地址动态推导。
 </details>
 
 <details>
