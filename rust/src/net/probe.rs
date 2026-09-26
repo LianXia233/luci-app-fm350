@@ -140,10 +140,31 @@ pub struct DataHealth {
     pub rx_packets: u64,
     pub tx_packets: u64,
     pub tx_errors: u64,
+    /// 本次采样前是否**主动发过**探测包。
+    ///
+    /// 只有它为 true 时，才允许判定「冻结」形态的 stall —— 详见
+    /// [`data_plane_stalled`] 对两种形态的说明。
+    pub probe_sent: bool,
 }
 
 /// 读取数据网卡收发统计（走 sysfs，成本极低，可每轮调用）。
-pub fn data_health(dev: &str) -> Option<DataHealth> {
+///
+/// `probe = true` 时先向 [`NET_CHECK_TARGETS_V4`] 发一个 ICMP 再采样，制造一次
+/// **确定的发包尝试**。冻结形态的 stall 在计数上与「链路空闲」长得一模一样
+/// （两个计数器都不动），不主动发包就无法区分；而漏判的代价是整条链路持续
+/// 不通，一个包的开销可以忽略。
+pub fn data_health(dev: &str, probe: bool) -> Option<DataHealth> {
+    let mut sent = false;
+    if probe {
+        if let Some(target) = NET_CHECK_TARGETS_V4.first() {
+            // 只发一个包、短超时：目的是制造一次 xmit 尝试，不关心是否收到回应。
+            let _ = real(&format!(
+                "ping -c 1 -W 2 -I {} {} >/dev/null 2>&1",
+                dev, target
+            ));
+            sent = true;
+        }
+    }
     let rd = |n: &str| -> Option<u64> {
         fs::read_to_string(format!("/sys/class/net/{}/statistics/{}", dev, n))
             .ok()
@@ -153,19 +174,36 @@ pub fn data_health(dev: &str) -> Option<DataHealth> {
         rx_packets: rd("rx_packets")?,
         tx_packets: rd("tx_packets")?,
         tx_errors: rd("tx_errors")?,
+        probe_sent: sent,
     })
 }
 
 /// 判定数据面是否卡死。
 ///
-/// 判据：**tx_errors 在涨，而 tx_packets 不动**。正常链路上 tx_errors 恒为 0，
-/// 一旦 USB 数据端点被打到 stall，内核每次提交 URB 都会记一次错误、包却一个
-/// 也发不出去（实机：tx_packets 停在 2，tx_errors 从百级一路涨到千级，
-/// 同时刷 `NETDEV WATCHDOG: transmit queue timed out`）。
+/// USB 数据端点 stall 有两种形态，都必须覆盖 —— 只认第一种会在故障**最严重**
+/// 的阶段反而检测不到：
+///
+/// | 形态 | 表现 | 成因 |
+/// |---|---|---|
+/// | A 挣扎期 | `tx_errors` 涨而 `tx_packets` 不动 | 端点 halted，每次提交 URB 都记一次错误、包却发不出去 |
+/// | B 冻结期 | `tx_errors` 与 `tx_packets` **同时**不再变化 | 队列已被 `netif_stop_queue` 永久停止，连提交机会都没有 |
+///
+/// 实机（FM350-GL）连续观测到的演进：A 阶段 `tx_packets` 停在 1、`tx_errors`
+/// 从百级涨到 787；随后进入 B 阶段，两个计数器 30 秒内全部零增量，此时
+/// `rx_packets` 恒为 0、ARP 停在 INCOMPLETE。旧判据只认 A，于是 B 阶段
+/// `data_guard` 全程静默（日志零条），只能靠 `net_guard` 反复重拨，而重拨
+/// 根本不碰 USB 层，最终一路升到第 7 级仍无效。
+///
+/// 形态 B 的判定**必须**以 `cur.probe_sent` 为前提：不先制造发包尝试，它与
+/// 「链路空闲」在数值上无法区分，会把空闲误判成卡死。
 ///
 /// 不用「RX 不增长」作判据：空闲链路上本来就没有下行流量。
 pub fn data_plane_stalled(prev: &DataHealth, cur: &DataHealth) -> bool {
-    cur.tx_errors > prev.tx_errors && cur.tx_packets <= prev.tx_packets
+    let struggling = cur.tx_errors > prev.tx_errors && cur.tx_packets <= prev.tx_packets;
+    let frozen = cur.probe_sent
+        && cur.tx_packets <= prev.tx_packets
+        && cur.tx_errors <= prev.tx_errors;
+    struggling || frozen
 }
 
 // ---------------------------------------------------------------- 公网连通性
@@ -228,12 +266,14 @@ mod tests {
             rx_packets: 0,
             tx_packets: 2,
             tx_errors: 100,
+            probe_sent: true,
         };
-        // 端点 stall：包发不出去（tx_packets 不动），错误计数却在涨
+        // 形态 A（挣扎期）：包发不出去（tx_packets 不动），错误计数却在涨
         let stalled = DataHealth {
             rx_packets: 0,
             tx_packets: 2,
             tx_errors: 145,
+            probe_sent: true,
         };
         assert!(data_plane_stalled(&a, &stalled));
 
@@ -242,11 +282,42 @@ mod tests {
             rx_packets: 0,
             tx_packets: 30,
             tx_errors: 101,
+            probe_sent: true,
         };
         assert!(!data_plane_stalled(&a, &healthy));
 
-        // 空闲链路：计数完全不变，不算 stall（没流量是正常的）
-        assert!(!data_plane_stalled(&a, &a));
+        // 空闲链路：计数完全不变且**没发过探测包**，不算 stall（没流量是正常的）
+        let idle = DataHealth {
+            rx_packets: 0,
+            tx_packets: 2,
+            tx_errors: 100,
+            probe_sent: false,
+        };
+        assert!(!data_plane_stalled(&a, &idle));
+    }
+
+    #[test]
+    fn stalled_detects_frozen_queue_when_probe_sent() {
+        // 形态 B（冻结期）：队列被 netif_stop_queue 永久停止后，两个计数器
+        // 同时不再变化（实机：tx=1 / rx=0 / tx_err 冻结在 787）。只要本帧
+        // 确实发过探测包，就应判 stall —— 这是旧判据漏掉、导致 data_guard
+        // 全程静默的形态。
+        let prev = DataHealth {
+            rx_packets: 0,
+            tx_packets: 1,
+            tx_errors: 787,
+            probe_sent: false,
+        };
+        let frozen = DataHealth {
+            rx_packets: 0,
+            tx_packets: 1,
+            tx_errors: 787,
+            probe_sent: true,
+        };
+        assert!(data_plane_stalled(&prev, &frozen));
+
+        // 同样的计数，但没有发过探测包：无法与空闲区分，不能判 stall。
+        assert!(!data_plane_stalled(&prev, &prev));
     }
 
     #[test]

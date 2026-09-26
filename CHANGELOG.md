@@ -2,6 +2,176 @@
 
 本项目遵循语义化版本号。
 
+## F22 embind7（rootfs 固件，独立于插件版本号）—— 当前交付
+
+以 **embind4** 为基线干净重做，集成 embind5/embind6 的全部功能，并补三处改进。
+产物 `fm350-f22-root-embind7.squashfs`，20979712 B，md5 `b97e07eb5044b4bb0f23a34878976d8a`。
+
+### 携带功能
+
+- **LuCI 可访问**：植入 `lucihttp.so` / `ubus.so` / `uci.so` 与 `liblucihttp.so.0.1`、
+  `libubus.so.20230605`、`libubox.so.20230523`、`libblobmsg_json.so.20230523`、
+  `libjson-c.so.5`；`/etc/config/luci` 去掉非法的连字符键名；新增
+  `/etc/init.d/luci-compat`（START=18）建 ubus socket 兼容软链。
+- **dropbear 开机自启**：`S95dropbear` / `K10dropbear` 使能链接写入 rootfs。
+- **ADB 通道自愈**：`start_usb.sh` 超时不再 `exit 0`，仍绑定 UDC 并重试 5 次 +
+  adbd 兜底；`usb.init` 的 dipc 早退分支回退为 USB 自动模式 1；`zadb-guard` 守护。
+
+### 相对 embind6 的改进
+
+1. `zadb-guard` 由「自检一次」改为**后台循环**：每 120 s 一轮、最多 5 轮，
+   UDC 一旦绑定立即停止重启动作（幂等）。
+2. 新增 `/etc/usbdiag_collect.sh` + `/etc/init.d/usbdiag`（START=17）：把
+   `dipc_config`、`pcie_link_state`、`aplog_usb_port`、gadget 目录、UDC 值、
+   `dipc_mode`、`adbd_usb` 实例数、functionfs 挂载写入
+   `/tmp/usbdiag.log` 与 `/overlay/usbdiag.log`。
+3. `start_usb.sh` 在等待前/等待后/绑定后各采集一次诊断。
+
+改进 2/3 用于直接回答核心悬案：**`aplog_usb_port` 是否为 `1 0`**、
+`usb.init` 究竟执行到哪一步。ADB 一旦恢复即可 `cat /tmp/usbdiag.log` 取证。
+
+### 为什么可以放心加回功能
+
+embind5/embind6 曾因刷入后 ADB 不可用而回退。但回退到 embind4 后复测证实
+**同一份已通过验收的 embind4 同样 offline**，故 ADB 故障与 rootfs 内容无关；
+把功能加回来不会让情况更糟。
+
+### 校验
+
+- 相对 embind4：**改 3**（`etc/config/luci`、`etc/init.d/usb.init`、`etc/start_usb.sh`）、
+  **增 13**、**删 0**；`/lib` 原生库 md5 全 SAME；`adbd_usb` / `atproxy` / `dropbear` 未变
+- 8 项功能断言全过；全部脚本 `sh -n` 通过；启动链排序
+  `S17usbdiag → S18luci-compat → S90usb.init → S95dropbear → S99zadb-guard`
+
+## F22 embind6（rootfs 固件，独立于插件版本号）—— 已回退
+
+**已回退。** 刷入实机后 ADB 通道仍不可用（`adb devices` 恒 `offline`；USB 枚举
+次数停在 3 次，UDC 绑定从未触发）。当前基线回到 embind4。以下内容仅作排查记录保留。
+
+**归因修正**：回退到 embind4 后复测，**adb 同样 offline**（描述符与 embind5/6
+完全一致）。embind4 是历史上 adb 验收通过的版本，因此 embind5/embind6 相对它的
+内容改动**均不是根因**；故障域已从 rootfs 内容移出，落在模组侧持久状态上。
+完整分析与后续建议见 README「embind5/embind6 回退说明」。
+
+**修复刷入后 adb 恒 offline**（rootfs 层修复，非插件代码）。基线回退到用户实测
+正常的 **embind4**，在其上叠加 embind5 的 LuCI/dropbear 修复与本次自愈改动。
+
+### 修复
+
+- **`etc/start_usb.sh` 超时放弃 UDC 绑定**：原版轮询
+  `/sys/module/mtu3/parameters/aplog_usb_port` 等 `1 0`，100 秒超时后 `exit 0`，
+  永不执行 `echo 11201000.usb > /config/usb_gadget/g1/UDC`；UDC 不绑定则
+  `adbd_usb` 挂在 functionfs 上永远等不到激活。改为等待上限 180s、
+  超时仍绑定、绑定后自检并重试 5 次、末尾兜底检查并补拉起 `adbd_usb`。
+- **`etc/init.d/usb.init` dipc 早退**：`dipc_mode` 取自
+  `/mnt/vendor/nvdata/md_cmn/dipc_config`，nvdata 被清空时该值为空会直接
+  `exit 0`，整个 AP gadget 不创建。改为回退 USB 自动模式 1，保留 PCIe 已连接
+  时的原有退出分支（正常路径行为不变）。
+- **无开机自检**：新增 `etc/adbd_guard.sh` + `etc/init.d/zadb-guard`
+  （`S99zadb-guard`，字典序排在 `S99usb.init` 之后），开机 120s 后自检，
+  UDC 未绑定则重启 usb.init、`adbd_usb` 缺失则重新拉起。
+
+### 判定依据
+
+主机侧 USB 描述符为 `manufacturer=Fibocom Wireless Inc.` /
+`product=FM350-GL` / `bcdDevice=0.01`，而 `usb.init` 成功建 gadget 会写入
+`Mediatek` / `mt6880` / `0x0223` —— 一条都不匹配，证明 AP 侧 gadget 从未绑定
+到 UDC。已排除：镜像超容量（`mtd31` 32 MiB vs 镜像 20 MiB）、bootloop
+（10 分钟时间序列无重复枚举）、embind5 内容破坏 adbd（embind4→embind5 diff
+仅 `etc/config/luci` 变更 + 纯新增，0 删除，原生库 md5 一致）。
+
+### 红线
+
+`/lib` 原生库（libuci / libubox / libubus.so.20210603 / libblobmsg_json）
+不得覆盖。构建脚本内置 md5 断言；embind4→embind6 diff 实测全部 SAME。
+
+## F22 embind5（rootfs 固件，独立于插件版本号）—— 已回退
+
+**已回退。** 同 embind6：刷入后 ADB 通道不可用，当前基线回到 embind4。
+以下内容仅作记录保留。
+
+**LuCI 可访问 + dropbear 开机自启固化**（rootfs 层修复，非插件代码）。
+
+### 修复
+
+- **`/cgi-bin/luci` 502**：固件缺 LuCI Lua 绑定与依赖库，植入
+  `lucihttp.so` / `ubus.so` / `uci.so` 及 `liblucihttp.so.0.1`、
+  `libubus.so.20230605`、`libubox.so.20230523`、`libblobmsg_json.so.20230523`、
+  `libjson-c.so.5`。
+- **`/cgi-bin/luci` 500（`unable to find section 'main'`）**：原厂
+  `/etc/config/luci` 含 `option resource-prefix`，连字符在 UCI 名称里非法
+  导致整个文件解析失败；改写为 `mediaurlbase` / `resourcebase`。
+- **ubus socket 路径不兼容**：新增 `/etc/init.d/luci-compat`（START=18），
+  开机建 `/var/run/ubus/ubus.sock → /var/run/ubus.sock`。
+- **dropbear 重启不自启**：`S95dropbear` / `K10dropbear` 使能链接写入 rootfs
+  （板端 `enable` 在本固件不跨重启）。
+
+### 红线
+
+固件 `/lib` 原生库（libuci / libubox / libubus.so.20210603 / libblobmsg_json）
+不得覆盖——`rpcd`、`netifd` 动态依赖它们。构建脚本内置 md5 断言。
+
+## 1.0.14-r4
+
+**数据面自愈两级修复**：stall 判据补「冻结」形态、新增 USB 端点复位自愈级、
+PDP 回落判据修正。源于 FM350-GL 实机排障：数据面全哑后 `net_guard` 一路升到
+第 7 级全部无效，而 `data_guard` 全程零日志——自愈体系在该故障上整体失效，
+逐条归因如下。
+
+### 背景（实机故障链）
+
+USB RNDIS 数据端点 halt → usbnet 反复 URB 失败（`tx_errors` 累积至 787）→
+`netif_stop_queue` 队列永久停止 → ARP 请求发不出 → 网关解析不到 MAC →
+回退 onlink 无网关 → 每个公网 IP 都依赖直发 ARP → 彻底不通。
+
+### 修复
+
+- **`data_plane_stalled` 漏判「冻结」形态**（`net/probe.rs`）：旧判据只认
+  「tx_errors 涨而 tx_packets 不动」（挣扎期，形态 A）。队列被永久停止后
+  `tx_errors` 也停止增长，两计数器**同时冻结**（实机：tx=1 / rx=0 /
+  tx_err 冻结在 787，30 秒零增量）——此时旧判据恒为 false，故障最严重的
+  阶段反而检测不到。新判据增加冻结形态（B）：`probe_sent && tx_packets
+  不动 && tx_errors 不动`。`data_health()` 新增 `probe` 参数，观测时先发
+  一个 ICMP 制造**确定的发包尝试**，把「发了但包没进 xmit」从「链路空闲」
+  中区分出来；自愈后取基线用 `probe = false`，避免把恢复窗口内的正常静默
+  误判成冻结。
+- **自愈体系缺「USB 端点复位」级**（`net/heal.rs` 新增 `reset_usb_data_dev`，
+  插入为 data_guard 第 1 级）：原有三级（`ip link down/up` / 重拨 /
+  重启模组）都不在 USB 驱动层，对端点 halt **结构性无效**——实机 bounce
+  反复执行后 `tx_errors` 仍涨到 787。新动作按 netdev 反查 USB 接口与驱动，
+  `unbind` → 至多重试 3 次 `bind`，自动识别 netdev 改名并同步 uci
+  `device`，最后 `ifup` 交回 netifd。data_guard 分级更新为：
+  **USB 端点复位 → 网卡复位 → 重拨 → 重启模组**（第一级取「最对症」而非
+  「代价最小」——跳过它会让故障一路升级到重拨乃至重启模组，而 PDP 与射频
+  本就是好的，白白断网且仍然修不好）。
+- **PDP 回落判据依赖「CGCONTRDP 是否有返回行」**（`modem/pdp.rs`）：FM350
+  的 `AT+CGACT?` 只回 OK、**不列 `+CGACT:` 行**（模组方言），`cgact_state()`
+  恒返回 `None`，回落分支是 FM350 上的**常态路径**而非异常兜底。旧判据用
+  `contr_present`——但 CGCONTRDP 在上下文去激活后**照样返回行**（只是地址
+  字段为空串），等于把「已去激活 + 残留死地址」误判为激活，`dial()` 随即
+  在「已激活且已有地址」处短路、永不下发 `AT+CGACT=1`。改用 CGCONTRDP 的
+  **地址字段非空**作回落来源（实机验证：去激活后为空串）；CGPADDR 同样会
+  回残留地址，不单独采信。判不出的最坏后果是多拨一次，方向安全。
+
+### 实测边界（重要，防止误期待）
+
+本次实机故障最终未被软件手段救回，以下结论留档：
+
+- `AT+CFUN=0/1` 只切射频（CFUN:4），**USB 不重新枚举**（Dev# 恒为 3）；
+- `AT+CFUN=1,1` 在该固件上同样**不触发 USB 重枚举**（dmesg 无新枚举事件），
+  仅做协议栈复位并重拨（PDP 换址成功）；
+- 驱动 unbind/bind 能清主机侧状态（ARP 由 FAILED 变 INCOMPLETE，说明请求
+  已发出），但模组侧 RNDIS 仍不收发帧（rx 恒 0）——故障在模组侧 function，
+  剩余手段只有整机重启或物理断电重上电；
+- PDP 每次重拨都会换 IP（10.5.85.38 → 10.5.51.211 → 10.31.228.114），
+  **验证与诊断脚本严禁硬编码网关**，必须按当前地址动态推导。
+
+### 测试
+
+`cargo test` 174 通过；新增冻结形态判定测试
+`stalled_detects_frozen_queue_when_probe_sent`，并扩展空闲 / 挣扎用例的
+`probe_sent` 维度。
+
 ## 1.0.14-r3
 
 **APN 保存页报错修复**（rpcd ucode 层，无需更新 daemon）。
@@ -50,7 +220,7 @@
 
 ### 实测记录（Airpi AP3000M）
 
-- IMEI 由空写入 `86933******3`（Luhn 通过），模组重启后回读保持，
+- IMEI 由空写入 `869338070022573`（Luhn 通过），模组重启后回读保持，
   重新注册后新会话取得新 IPv6 地址（`::18d8:6aa3:8053:f97e`）。
 - `+CGPADDR` 对 IPv6 返回 **16 字节点分十进制**形式
   （如 `0.0.0.0.0.0.0.0.24.216.106.163.128.83.249.126` = `::18d8:6aa3:8053:f97e`），

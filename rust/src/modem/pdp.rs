@@ -209,14 +209,12 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         .and_then(|r| cgact_state(&r, cfg.cid));
 
     // CGCONTRDP：只提供地址与 DNS 备用值，不再单独作为激活判据。
-    let mut contr_present = false;
     let mut contr_ipv4 = String::new();
     let mut contr_ipv6 = String::new();
     let mut contr_gw4 = String::new();
     let mut contr_gw6 = String::new();
     if let Ok(r) = run(at, cfg, &at_cmd::contrdp(cfg.cid)) {
         for row in crate::at::rows(&r, "+CGCONTRDP") {
-            contr_present = true;
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
             if contr_ipv4.is_empty() {
                 if let Some(x) = row.get(3) {
@@ -289,7 +287,23 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     }
 
     // 激活结论：CGACT? 可用时以它为准，否则回落到地址类启发式。
-    let active = cgact.unwrap_or(contr_present || !addr_ipv4.is_empty() || !addr_ipv6.is_empty());
+    //
+    // 回落判据必须挑得极其小心。FM350 的 `AT+CGACT?` **只回 OK、不列 `+CGACT:`
+    // 行**（模组方言），于是 `cgact` 恒为 `None` —— 这里不是罕见的异常兜底，
+    // 而是 FM350 上的**常态执行路径**，判错就直接让拨号状态机走错分支：
+    //
+    //   * 不能用「CGCONTRDP 是否有返回行」（原判据 `contr_present`）：上下文
+    //     去激活后该命令照样返回行，只是地址字段为空串。实机即如此 ——
+    //     `+CGCONTRDP: 1,,"cmiot5g","","",...`，地址与网关位都是空，行却在；
+    //   * 不能单独采信 `addr_ipv4`（来自 CGPADDR）：去激活后它原样返回上一轮
+    //     地址（本模块顶部注释已记载）。
+    //
+    // 两者都会把「已去激活 + 残留死地址」误判为激活，`dial()` 随即在
+    // 「已激活且已有地址」处短路、永不下发 `AT+CGACT=1,<cid>`。
+    //
+    // 只有 CGCONTRDP 的**地址字段**（`contr_ipv4` / `contr_ipv6`）在去激活后
+    // 确实为空，可以作回落来源。判不出的最坏后果是多拨一次，方向是安全的。
+    let active = cgact.unwrap_or(!contr_ipv4.is_empty() || !contr_ipv6.is_empty());
 
     // 未激活时的地址是上一轮会话的残留，一律不采信，避免上层把死地址写进接口。
     if active {
