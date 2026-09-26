@@ -152,6 +152,12 @@ USB RNDIS 数据端点 halt → usbnet 反复 URB 失败（`tx_errors` 累积至
   在「已激活且已有地址」处短路、永不下发 `AT+CGACT=1`。改用 CGCONTRDP 的
   **地址字段非空**作回落来源（实机验证：去激活后为空串）；CGPADDR 同样会
   回残留地址，不单独采信。判不出的最坏后果是多拨一次，方向安全。
+- **编译期漏导出修复**（`rust/src/net/mod.rs`）：`reset_usb_data_dev` 未纳入
+  `pub use heal::{...}`，而 `daemon/guard.rs` 的第 1 级自愈按 `net::` 前缀调用
+  它 —— 编译期直接 `error[E0425]: cannot find function reset_usb_data_dev in
+  module net`，`cargo build` 返回 101，OpenWrt 在
+  `package/luci-app-fm350/compile` 判红。heal 的其余公开函数本就在该导出列表
+  内，属新增函数时的漏项，已补齐。
 
 ### 实测边界（重要，防止误期待）
 

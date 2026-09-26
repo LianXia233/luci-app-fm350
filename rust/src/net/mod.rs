@@ -38,7 +38,7 @@ pub use gateway::{
 };
 pub use heal::{
     apply_after_dial, bounce_data_dev, bounce_iface_v4, bounce_iface_v6, line_has_metric,
-    route_guard,
+    reset_usb_data_dev, route_guard,
 };
 pub use iface::{ensure_autostart, ensure_iface, status, teardown_iface, NetStatus};
 pub use probe::{
