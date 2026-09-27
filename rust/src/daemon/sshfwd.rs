@@ -25,8 +25,9 @@
 //!
 //! ## 实现要点
 //!
-//! - socat 以 `nohup ... &` 拉起后由 init 收养（daemon 退出它继续活着），
-//!   包装 sh 由本进程 `try_wait` 回收，不产生 zombie。
+//! - socat 以后台 `&` 拉起后由 init 收养（daemon 退出它继续活着），包装 sh
+//!   由本进程 `try_wait` 回收，不产生 zombie；**严禁 nohup**（精简 BusyBox
+//!   普遍缺失，见 [`ensure_socat`] 内注释）。spawn 后强制 `kill -0` 存活校验。
 //! - pid 记账用 `/var/run/fm350-sshfwd.pid`，避免 `pgrep/pkill -f` 的
 //!   「模式串匹配到自身命令行」自杀陷阱。
 //! - 每 15 s 一轮（内部节流，独立于主循环 poll_interval），状态只在
@@ -225,10 +226,13 @@ impl SshFwdWatch {
             return;
         }
 
-        // nohup + &：sh 写完 pid 立即退出（由本进程回收），socat 被 init
-        // 收养，daemon 退出后它继续服务。
+        // 后台启动 + pid 记账。**不能加 nohup**：BusyBox 精简环境普遍没有
+        // nohup，`nohup socat ... &` 会让后台命令变成 nohup 本身并立即以
+        // "not found" 退出 —— pid 文件里记下的是一个从未活过的 pid
+        // （1.0.15-r1 实机实锤）。stdout/stderr 已重定向，sh 退出后 socat
+        // 被残缺进程组之外无 HUP 来源，孤儿由 init 收养，无需 nohup。
         let script = format!(
-            "nohup socat TCP4-LISTEN:{l},fork,reuseaddr TCP4:127.0.0.1:{p} >/dev/null 2>&1 & echo $! > {f}",
+            "socat TCP4-LISTEN:{l},fork,reuseaddr TCP4:127.0.0.1:{p} >/dev/null 2>&1 & echo $! > {f}",
             l = lan,
             p = fwd,
             f = PID_FILE
@@ -242,9 +246,19 @@ impl SshFwdWatch {
             .spawn()
         {
             Ok(mut child) => {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(Duration::from_millis(500));
                 let _ = child.try_wait();
-                s.socat_running = true;
+                // spawn 后强制存活性校验：不能乐观置 true，否则「状态说
+                // 运行、端口无人监听」的假绿会掩盖真实故障。
+                let (alive, out) = real(&format!(
+                    "kill -0 $(cat {f}) 2>/dev/null && echo ALIVE",
+                    f = PID_FILE
+                ));
+                if alive && out.contains("ALIVE") {
+                    s.socat_running = true;
+                } else {
+                    s.detail = "socat 拉起后立即退出（见 logread 中 socat 输出）".into();
+                }
             }
             Err(e) => {
                 s.detail = format!("socat 拉起失败：{}", e);
