@@ -299,6 +299,118 @@ impl SshFwdWatch {
     }
 }
 
+/// 判断 ADB 设备当前是否在线（exec 与 bootstrap 共用）。
+fn adb_online() -> bool {
+    let (_, devs) = real("adb devices 2>/dev/null");
+    devs.lines().any(|l| l.ends_with("\tdevice"))
+}
+
+/// SSH 客户端密钥路径（router 侧，用于免密登录模组 dropbear）。
+const CLIENT_KEY: &str = "/etc/fm350/modem_client_key";
+
+/// 模组 shell 命令执行超时（秒）。adbd 离线时 `adb shell` 会挂住，必须包裹。
+const EXEC_TIMEOUT: u64 = 15;
+
+/// 经 ADB 通道向模组下发 shell 命令（USB 直连，不依赖 dropbear）。
+pub fn adb_exec(cmd: &str) -> Result<String, String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err("命令为空".into());
+    }
+    if !adb_online() {
+        return Err("ADB 设备离线，无法执行（等待重连中）".into());
+    }
+    let (ok, out) = real(&format!(
+        "timeout {t} adb shell {c} 2>&1",
+        t = EXEC_TIMEOUT,
+        c = crate::net::shell::sq(cmd)
+    ));
+    if out.contains("error:") && (out.contains("device") || out.contains("offline")) {
+        return Err(out);
+    }
+    if !ok {
+        return Err(if out.is_empty() {
+            format!("adb shell 执行失败（超时 {}s）", EXEC_TIMEOUT)
+        } else {
+            out
+        });
+    }
+    Ok(out)
+}
+
+/// 经 ADB 通道把 router 侧公钥注入模组 dropbear 免密清单（幂等）。
+///
+/// 这是一次性引导：模组 dropbear 是 root 空密码（LAN 暴露），但 ssh 通道
+/// 交互式输入密码在脚本环境不可行，因此统一收敛到密钥认证 —— 注入成功后
+/// 建议用户在模组侧关闭空密码登录（本插件不代改模组 sshd 配置）。
+pub fn ssh_bootstrap() -> Result<String, String> {
+    if !real("command -v dbclient >/dev/null 2>&1 && command -v dropbearkey >/dev/null 2>&1").0 {
+        return Err("router 缺少 dbclient / dropbearkey（dropbear 客户端组件）".into());
+    }
+    if !adb_online() {
+        return Err("ADB 设备离线，无法注入公钥".into());
+    }
+    if !real(&format!("[ -f {k} ]", k = CLIENT_KEY)).0 {
+        let (ok, out) = real(&format!(
+            "mkdir -p /etc/fm350 && dropbearkey -t ed25519 -f {k}",
+            k = CLIENT_KEY
+        ));
+        if !ok {
+            return Err(format!("生成客户端密钥失败：{}", out));
+        }
+    }
+    let (ok, pubkey) = real(&format!(
+        "dropbearkey -y -f {k} 2>/dev/null | grep '^ssh-'",
+        k = CLIENT_KEY
+    ));
+    if !ok || pubkey.trim().is_empty() {
+        return Err("提取客户端公钥失败".into());
+    }
+    let pk = pubkey.trim();
+    // 公钥内容为算法名 + base64 + 注释，不含引号；双层引号：router sh 的
+    // 单引号包 adb 参数，模组 ash 侧用双引号引用变量展开结果。
+    let (ok, out) = real(&format!(
+        "adb shell 'mkdir -p /root/.ssh; chmod 700 /root/.ssh; grep -qF \"{pk}\" /root/.ssh/authorized_keys 2>/dev/null || echo {pk} >> /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys' 2>&1",
+        pk = pk
+    ));
+    if !ok {
+        return Err(format!("公钥注入失败：{}", out));
+    }
+    Ok("公钥已就位（幂等注入）".into())
+}
+
+/// 经 SSH 通道（adb forward → 模组 dropbear，密钥免密）下发 shell 命令。
+pub fn ssh_exec(cfg: &crate::config::Config, cmd: &str) -> Result<String, String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err("命令为空".into());
+    }
+    if !real("command -v dbclient >/dev/null 2>&1").0 {
+        return Err("router 缺少 dbclient".into());
+    }
+    if !real(&format!("[ -f {k} ]", k = CLIENT_KEY)).0 {
+        return Err("尚未注入 SSH 公钥，请先点击「注入 SSH 公钥」".into());
+    }
+    let (ok, out) = real(&format!(
+        "timeout {t} dbclient -y -i {k} root@127.0.0.1:{p} {c} 2>&1",
+        t = EXEC_TIMEOUT,
+        k = CLIENT_KEY,
+        p = cfg.sshfwd_fwd_port,
+        c = crate::net::shell::sq(cmd)
+    ));
+    if !ok {
+        return Err(if out.is_empty() {
+            format!(
+                "SSH 执行失败（超时 {}s；请确认转发链已就绪）",
+                EXEC_TIMEOUT
+            )
+        } else {
+            out
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

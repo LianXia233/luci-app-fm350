@@ -221,6 +221,24 @@ return {
 		/* SSH 转发巡检快照：daemon 内存只读，秒回不阻塞 rpcd */
 		'sshfwd': { 'call': function(req) { return exec('fm350d sshfwd'); } },
 
+		/* 模组 shell 双通道执行（ADB / SSH）：后端有 15s 超时包裹，rpcd 代理
+		 * 给 30s 上限；adb 设备离线时后端快速失败，不会堵 ubus 通道 */
+		'modexec': {
+			'args': { 'channel': '', 'cmd': '' },
+			'call': function(req) {
+				let ch = s(get_arg(req, 'channel', ''));
+				let cmd = s(get_arg(req, 'cmd', ''));
+				if (ch != 'adb' && ch != 'ssh')
+					return { ok: false, error: '通道只能是 adb 或 ssh' };
+				if (cmd == '')
+					return { ok: false, error: '缺少 cmd 参数' };
+				return exec('fm350d modexec ' + ch + ' ' + quote(cmd), 30);
+			}
+		},
+
+		/* SSH 公钥引导（幂等）：经 ADB 把 router 公钥写入模组 dropbear */
+		'sshbootstrap': { 'call': function(req) { return exec('fm350d sshbootstrap', TMO_WRITE); } },
+
 		'set': {
 			'args': { 'key': '', 'value': '' },
 			'call': function(req) {

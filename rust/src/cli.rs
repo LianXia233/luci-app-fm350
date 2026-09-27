@@ -60,6 +60,8 @@ fm350d —— FM350 模组后端守护与命令行工具
   fm350d usbmode <模式>               设置 USB 模式（40 = RNDIS+AT）
   fm350d reboot                       重启模组
   fm350d sshfwd                       SSH 转发状态（经 daemon 巡检快照）
+  fm350d modexec <adb|ssh> <命令>     经 ADB/SSH 通道向模组下发 shell 命令
+  fm350d sshbootstrap                 经 ADB 注入 router 公钥到模组 dropbear
   fm350d config                       输出当前配置 JSON
   fm350d set <键> <值>                写入配置项
 
@@ -349,6 +351,40 @@ pub fn run() {
             })
         }),
 
+        // 模组 shell 双通道执行：优先经 daemon（与巡检器共享 adb server 视角），
+        // daemon 不可达时回落本地直接执行（命令本身无状态）。
+        "modexec" => {
+            let channel = rest.first().cloned().unwrap_or_default();
+            let cmd = rest.get(1..).map(|v| v.join(" ")).unwrap_or_default();
+            if channel != "adb" && channel != "ssh" {
+                print_json(&serde_json::json!({
+                    "ok": false, "error": "通道必须是 adb 或 ssh"
+                }));
+            } else if cmd.trim().is_empty() {
+                print_json(&serde_json::json!({
+                    "ok": false, "error": "缺少要执行的命令"
+                }));
+            } else if channel == "adb" {
+                print_json(&match crate::daemon::sshfwd::adb_exec(&cmd) {
+                    Ok(v) => serde_json::json!({ "ok": true, "result": v }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                });
+            } else {
+                print_json(&match crate::daemon::sshfwd::ssh_exec(&cfg, &cmd) {
+                    Ok(v) => serde_json::json!({ "ok": true, "result": v }),
+                    Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                });
+            }
+        }
+
+        // SSH 公钥引导（幂等）：经 ADB 注入 router 公钥到模组 dropbear。
+        "sshbootstrap" => print_json(
+            &match crate::daemon::sshfwd::ssh_bootstrap() {
+                Ok(v) => serde_json::json!({ "ok": true, "result": v }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            },
+        ),
+
         "config" => print_json(&serde_json::json!({ "ok": true, "config": cfg })),
         "set" => {
             let key = rest.first().cloned().unwrap_or_default();
@@ -446,7 +482,8 @@ mod tests {
         for cmd in [
             "daemon", "status", "info", "signal", "pdp", "net", "ports", "cell", "lock",
             "lock-band", "lock-cell", "dial", "hangup", "at", "sms", "smsc", "imei", "rat",
-            "sim", "cfun", "usbmode", "reboot", "sshfwd", "config", "set",
+            "sim", "cfun", "usbmode", "reboot", "sshfwd", "modexec", "sshbootstrap",
+            "config", "set",
         ] {
             assert!(USAGE.contains(&format!("fm350d {}", cmd)), "缺少 {}", cmd);
         }
