@@ -2,6 +2,24 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.15-r3 (2026-09-27)
+
+### 新增：模组命令操作台（ADB / SSH 双通道，LuCI 上下发命令）
+
+- AT 调试页「模组 SSH 转发」卡片内新增操作台：通道切换（ADB / SSH）、
+  命令输入与输出回显，向模组 shell 下发命令。
+- **ADB 通道**：`adb shell` 经 USB 直连模组，不依赖 dropbear；adbd 离线时
+  快速失败并提示等待重连。
+- **SSH 通道**：经转发链（adb forward → 模组 dropbear）以 `dbclient` 密钥
+  免密登录。首次使用点「注入 SSH 公钥」——经 ADB 把 router 侧生成的
+  ed25519 公钥幂等写入模组 `/root/.ssh/authorized_keys`（bootstrap），
+  规避 root 空密码的交互式认证。
+- 所有执行均以 `timeout 15` 包裹（rpcd 代理给 30s），adbd 离线不会挂死
+  ubus 通道；命令经单引号强转义拼接，杜绝注入。
+- CLI：`fm350d modexec <adb|ssh> <命令>`、`fm350d sshbootstrap`。
+- 红线提示已在页面标注：命令在模组内以 root 执行，严禁触碰 IMEI / NV 项；
+  后端不做 IMEI 类拦截（shell 命令自由度与 LuCI root 权限同级）。
+
 ## 1.0.15-r2 (2026-09-27)
 
 ### 修复：socat 拉起假绿（1.0.15-r1 实机实锤）

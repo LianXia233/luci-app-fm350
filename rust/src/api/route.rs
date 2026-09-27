@@ -68,6 +68,38 @@ pub fn dispatch(
         // shell/adb 动作 —— 请求永远即时返回，绝不阻塞。
         "/api/sshfwd" => ok(serde_json::json!({ "sshfwd": crate::daemon::sshfwd::snapshot() })),
 
+        // 模组 shell 命令执行（ADB / SSH 双通道）。同步执行但有 15s 超时
+        // 包裹，adbd 离线时快速失败而非挂死 rpcd 代理。
+        "/api/sshfwd/exec" => {
+            if *method == Method::Post {
+                let channel = arg_str(payload, q, "channel").unwrap_or_default();
+                let cmd = arg_str(payload, q, "cmd").unwrap_or_default();
+                let r = match channel.as_str() {
+                    "adb" => crate::daemon::sshfwd::adb_exec(&cmd),
+                    "ssh" => crate::daemon::sshfwd::ssh_exec(cfg, &cmd),
+                    _ => Err("channel 必须为 adb 或 ssh".to_string()),
+                };
+                match r {
+                    Ok(v) => ok(serde_json::json!({ "result": v })),
+                    Err(e) => err(&e),
+                }
+            } else {
+                err("仅支持 POST")
+            }
+        }
+
+        // SSH 公钥引导：经 ADB 把 router 公钥注入模组 dropbear 免密清单。
+        "/api/sshfwd/bootstrap" => {
+            if *method == Method::Post {
+                match crate::daemon::sshfwd::ssh_bootstrap() {
+                    Ok(v) => ok(serde_json::json!({ "result": v })),
+                    Err(e) => err(&e),
+                }
+            } else {
+                err("仅支持 POST")
+            }
+        }
+
         // ---- 拨号 / 挂断 ----
         "/api/dial" => dial(at, cfg, payload),
         "/api/hangup" => {

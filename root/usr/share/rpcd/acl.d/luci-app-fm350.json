@@ -42,6 +42,8 @@
 					"reboot",
 					"config",
 					"set",
+					"modexec",
+					"sshbootstrap",
 					"imei_write"
 				],
 				"luci.fm350.sms": [

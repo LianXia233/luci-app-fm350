@@ -774,13 +774,80 @@ return view.extend({
 		var sfActions = E('div', {
 			'style': 'margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;'
 		});
+
+		/* ---- 模组操作台：ADB / SSH 双通道 shell 命令下发 ---- */
+		var mdChan = 'adb';
+		var mdOut = E('div', {
+			'style': 'margin-top:8px; padding:8px 10px; background:var(--fm-term-bg); color:#7dd3a8;'
+				+ ' font-family:ui-monospace,Menlo,Consolas,monospace; font-size:0.78rem; line-height:1.55;'
+				+ ' border-radius:10px; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all;'
+		}, _('输出将显示在这里。'));
+		var mdInput = E('input', {
+			'class': 'fm350-at-input',
+			'type': 'text',
+			'placeholder': _('模组 shell 命令（如 uname -a / ls /etc/init.d/）'),
+			'autocomplete': 'off',
+			'spellcheck': 'false'
+		});
+		var mdRun = sfBtn(_('执行'), '#2563eb', function() {
+			var cmd = mdInput.value.trim();
+			if (!cmd) return;
+			mdRun.disabled = true;
+			sfSet(mdOut, [ E('span', { 'style': 'color:#94a3b8;' }, '[' + mdChan + '] ' + cmd + ' …') ]);
+			api.modexec(mdChan, cmd).then(function(res) {
+				mdRun.disabled = false;
+				var text = (res && res.ok) ? (res.value || _('（无输出）'))
+					: _('执行失败：') + ((res && res.error) || _('未知错误'));
+				mdOut.textContent = '[' + mdChan + '] $ ' + cmd + '\n' + String(text).replace(/\r/g, '');
+				mdOut.scrollTop = mdOut.scrollHeight;
+			});
+		});
+		var mdKeyBtn = sfBtn(_('注入 SSH 公钥'), '#d97706', function() {
+			mdKeyBtn.disabled = true;
+			api.sshBootstrap().then(function(res) {
+				mdKeyBtn.disabled = false;
+				api.notify(res, _('公钥已注入模组 dropbear（幂等）'));
+			});
+		});
+		var mdChan = 'adb';
+		var chanBtns = {};
+		function mdChanBtn(key, label, color) {
+			var b = E('button', {
+				'class': 'fm350-chip-btn',
+				'style': 'justify-content:center; color:' + color + '; border-color:' + color + '; opacity:0.55;',
+				'click': function(ev) {
+					ev.preventDefault();
+					mdChan = key;
+					for (var k in chanBtns)
+						chanBtns[k].style.opacity = (k === key) ? '1' : '0.55';
+				}
+			}, [ E('span', {}, label) ]);
+			chanBtns[key] = b;
+			return b;
+		}
+		var mdOps = E('div', {
+			'style': 'margin-top:14px; padding-top:12px; border-top:1px solid rgba(148,163,184,0.25);'
+		}, [
+			E('div', { 'style': 'font-weight:600; margin-bottom:8px;' }, _('模组命令操作台（ADB / SSH）')),
+			E('div', { 'style': 'display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;' }, [
+				mdChanBtn('adb', _('ADB 通道'), '#2563eb'),
+				mdChanBtn('ssh', _('SSH 通道'), '#16a34a'),
+				mdKeyBtn
+			]),
+			E('div', { 'class': 'fm350-input-card' }, [ mdInput, mdRun ]),
+			mdOut,
+			E('div', { 'style': 'font-size:0.72rem; color:#94a3b8; margin-top:6px;' },
+				_('ADB 通道走 USB 直连；SSH 通道走转发链（首次使用需注入公钥）。命令在模组内以 root 执行，请勿触碰 IMEI / NV 项。'))
+		]);
+
 		wrap.appendChild(E('div', { 'class': 'fm350-presets-card' }, [
 			E('div', { 'class': 'fm350-presets-title' }, [
 				E('span', {}, _('模组 SSH 转发（ADB 通道）')),
 				sfState
 			]),
 			sfBody,
-			sfActions
+			sfActions,
+			mdOps
 		]));
 
 		function sfSet(el, kids) {
