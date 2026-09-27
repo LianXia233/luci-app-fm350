@@ -2,6 +2,18 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.15-r2 (2026-09-27)
+
+### 修复：socat 拉起假绿（1.0.15-r1 实机实锤）
+
+- 实机 BusyBox 无 `nohup`，`nohup socat ... &` 中后台启动的是 nohup 本身，
+  以 "not found" 立即退出 —— socat 从未运行，pid 文件记下死 pid，
+  而巡检器乐观置 `socat_running=true`，表现为「状态说运行、端口无人监听」。
+- 修复：拉起脚本去掉 nohup（stdout/stderr 已重定向、孤儿由 init 收养，
+  无 HUP 来源）；spawn 后强制 `kill -0` 存活性校验，未存活时如实上报
+  `socat_running=false` 并给出排查指引。
+- 未修改 IMEI、NV 项或模组持久化数据。
+
 ## 1.0.15-r1 (2026-09-27)
 
 ### 新增：模组 SSH 转发（ADB 通道，默认关闭）
