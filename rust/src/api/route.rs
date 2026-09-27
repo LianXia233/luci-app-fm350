@@ -64,6 +64,10 @@ pub fn dispatch(
         // 未刷修改 rootfs 的设备上 events 恒为 0，前端据此显示「未启用」。
         "/api/eif" => ok(serde_json::json!({ "eif": crate::at::urc::snapshot() })),
 
+        // SSH 转发巡检快照：daemon 侧异步巡检，这里只读共享状态，不做任何
+        // shell/adb 动作 —— 请求永远即时返回，绝不阻塞。
+        "/api/sshfwd" => ok(serde_json::json!({ "sshfwd": crate::daemon::sshfwd::snapshot() })),
+
         // ---- 拨号 / 挂断 ----
         "/api/dial" => dial(at, cfg, payload),
         "/api/hangup" => {

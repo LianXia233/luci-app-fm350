@@ -761,6 +761,116 @@ return view.extend({
 		/* ---------------- 六、终端视窗挂载 ---------------- */
 		wrap.appendChild(termCard);
 
+		/* ---------------- 七、模组 SSH 转发（ADB 通道） ----------------
+		 * 异步加载：卡片骨架先上屏，api.sshfwd() 独立请求、到达后填充；
+		 * 任何失败只影响本卡片，绝不阻塞页面其余部分。
+		 * 开关写 UCI sshfwd_enable，daemon 下一轮巡检（≤15s+poll）自动应用。 */
+		var sfState = E('span', {
+			'style': 'font-size:0.78rem; font-weight:600; margin-left:auto; color:#94a3b8;'
+		}, _('读取中…'));
+		var sfBody = E('div', {
+			'style': 'font-size:0.85rem; line-height:1.8;'
+		}, E('span', { 'style': 'color:#94a3b8;' }, _('正在从守护进程读取转发状态…')));
+		var sfActions = E('div', {
+			'style': 'margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;'
+		});
+		wrap.appendChild(E('div', { 'class': 'fm350-presets-card' }, [
+			E('div', { 'class': 'fm350-presets-title' }, [
+				E('span', {}, _('模组 SSH 转发（ADB 通道）')),
+				sfState
+			]),
+			sfBody,
+			sfActions
+		]));
+
+		function sfSet(el, kids) {
+			while (el.firstChild) el.removeChild(el.firstChild);
+			for (var i = 0; i < kids.length; i++) el.appendChild(kids[i]);
+		}
+
+		function sfBtn(label, color, fn) {
+			return E('button', {
+				'class': 'fm350-chip-btn',
+				'style': 'justify-content:center; border-color:' + color + '; color:' + color + ';',
+				'click': function(ev) { ev.preventDefault(); fn(); }
+			}, [ E('span', {}, label) ]);
+		}
+
+		function sfRefresh() {
+			api.sshfwd().then(function(res) {
+				drawSshfwd(res && res.ok ? (res.value || {}) : null,
+					res && res.ok ? '' : ((res && res.error) || _('后端无响应')));
+			});
+		}
+
+		function drawSshfwd(sf, error) {
+			var KIND = { good: '#16a34a', warn: '#d97706', bad: '#dc2626', muted: '#94a3b8' };
+			function tag(text, kind) {
+				return E('span', { 'style': 'font-weight:700; color:' + KIND[kind] }, text);
+			}
+			function row(label, val, kind) {
+				return E('div', {}, [
+					E('span', { 'style': 'display:inline-block; min-width:11em; color:var(--fm-text-muted);' }, label),
+					val == null ? E('span', {}, '—')
+					            : E('span', { 'style': kind ? 'color:' + KIND[kind] + '; font-weight:600;' : '' }, val)
+				]);
+			}
+
+			if (error || !sf) {
+				sfSet(sfState, [ tag(_('不可用'), 'bad') ]);
+				sfSet(sfBody, [ E('span', { 'style': 'color:#dc2626;' }, _('后端读取失败：') + (error || _('无数据'))) ]);
+				sfSet(sfActions, [ sfBtn(_('重试'), '#2563eb', sfRefresh) ]);
+				return;
+			}
+
+			var kind, text;
+			if (!sf.enabled)            { kind = 'muted'; text = _('未启用'); }
+			else if (!sf.supported)     { kind = 'bad';   text = _('环境不支持'); }
+			else if (sf.port_conflict)  { kind = 'bad';   text = _('端口冲突'); }
+			else if (sf.forward_ok && sf.socat_running) { kind = 'good'; text = _('转发正常'); }
+			else if (!sf.adb_online)    { kind = 'warn';  text = _('ADB 离线'); }
+			else                        { kind = 'warn';  text = _('就绪中'); }
+			sfSet(sfState, [ tag(text, kind) ]);
+
+			var lines = [];
+			if (!sf.enabled) {
+				lines.push(E('div', {}, _(
+					'启用后，守护进程会把模组内 SSH（dropbear:22）经 USB ADB 通道转发到路由器 LAN，'
+					+ '即可从局域网直连模组 root shell。无 ADB 通道的模组上不产生任何动作。')));
+				lines.push(row(_('LAN 监听端口'), sf.lan_port || 2222));
+				lines.push(row(_('adb forward 端口'), sf.fwd_port || 2223));
+			} else {
+				lines.push(row(_('运行环境'), sf.supported ? _('支持（adb / socat 就绪）') : _('缺少 adb 或 socat'), sf.supported ? 'good' : 'bad'));
+				lines.push(row(_('ADB 设备'), sf.adb_online ? _('在线') : _('离线'), sf.adb_online ? 'good' : 'warn'));
+				lines.push(row(_('端口转发'), sf.forward_ok
+					? _('已建立') + ' (tcp:' + (sf.fwd_port || 2223) + ' → 模组 22)'
+					: _('未建立'), sf.forward_ok ? 'good' : 'warn'));
+				lines.push(row(_('LAN 监听'), sf.port_conflict
+					? _('被其它进程占用')
+					: (sf.socat_running ? _('运行中') + ' (0.0.0.0:' + (sf.lan_port || 2222) + ')' : _('未运行')),
+					sf.port_conflict ? 'bad' : (sf.socat_running ? 'good' : 'warn')));
+				if (sf.detail)
+					lines.push(E('div', { 'style': 'color:#94a3b8; margin-top:6px;' }, sf.detail));
+			}
+			sfSet(sfBody, lines);
+
+			var toggleLabel = sf.enabled ? _('停用转发') : _('启用转发');
+			var toggleTo = sf.enabled ? '0' : '1';
+			var act = [
+				sfBtn(toggleLabel, sf.enabled ? '#dc2626' : '#16a34a', function() {
+					api.set('sshfwd_enable', toggleTo).then(function(res) {
+						api.notify(res, _('已保存，守护进程将在下一轮巡检（约 15 秒内）应用'));
+						setTimeout(sfRefresh, 8000);
+						setTimeout(sfRefresh, 20000);
+					});
+				}),
+				sfBtn(_('刷新状态'), '#2563eb', sfRefresh)
+			];
+			sfSet(sfActions, act);
+		}
+
+		sfRefresh();
+
 		return wrap;
 	}
 });

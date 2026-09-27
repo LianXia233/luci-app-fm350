@@ -44,6 +44,7 @@ pub mod guard;
 pub mod port;
 pub mod sig;
 pub mod singleton;
+pub mod sshfwd;
 pub mod v6;
 
 pub use dial::{redial, DialWatch, NO_ADDR_REDIAL_ROUNDS, NO_SERVICE_RETRY_INTERVAL};
@@ -51,6 +52,7 @@ pub use guard::{ConflictWatch, DataGuard, NetGuard};
 pub use gt::GtWatch;
 pub use port::PortWatch;
 pub use singleton::{acquire, Singleton, LOCK_FILE};
+pub use sshfwd::SshFwdWatch;
 pub use v6::V6Watch;
 
 /// 巡检周期下限。
@@ -83,6 +85,7 @@ pub fn run(cfg_initial: config::Config) -> Result<(), String> {
     let mut conflict = ConflictWatch::new();
     let mut port = PortWatch::new();
     let mut gt = GtWatch::new();
+    let mut sshfwd = SshFwdWatch::new();
 
     loop {
         // 每轮重新读配置：用户在 LuCI 改的参数下一轮即生效，无需重启服务。
@@ -109,6 +112,9 @@ pub fn run(cfg_initial: config::Config) -> Result<(), String> {
         port.release_on_change(&at, &cfg);
         port.reselect_if_down(&at, &cfg);
         port.observe_exclusivity(&at, &cfg);
+
+        // SSH 转发巡检：不依赖 AT 句柄，内部 15s 节流；关闭态零副作用。
+        sshfwd.tick(&cfg);
 
         // 加速标志在取走睡眠时长之后才清零，保证「事件 → 短睡眠」链路生效
         let sleep = gt.sleep_interval(interval);

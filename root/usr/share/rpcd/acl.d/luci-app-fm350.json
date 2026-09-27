@@ -13,6 +13,7 @@
 					"lock",
 					"config",
 					"ports",
+					"sshfwd",
 					"imei_read",
 					"imei_backup"
 				],
