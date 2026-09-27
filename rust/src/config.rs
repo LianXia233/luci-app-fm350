@@ -93,6 +93,13 @@ pub struct Config {
     /// IMEI / 串号写入开关。默认关闭：写入属高风险不可逆操作。
     pub imei_write: bool,
     pub enabled: bool,
+    /// SSH 转发开关：经 ADB 通道把模组内 dropbear:22 转发到 LAN。
+    /// 默认关闭：无 ADB 通道的模组/固件上不产生任何动作（见 daemon::sshfwd）。
+    pub sshfwd_enable: bool,
+    /// LAN 侧监听端口（socat，0.0.0.0）。
+    pub sshfwd_lan_port: u16,
+    /// adb forward 本地端口（127.0.0.1 → 模组 22）。
+    pub sshfwd_fwd_port: u16,
 }
 
 impl Default for Config {
@@ -130,6 +137,9 @@ impl Default for Config {
             api_port: 8766,
             imei_write: false,
             enabled: true,
+            sshfwd_enable: false,
+            sshfwd_lan_port: 2222,
+            sshfwd_fwd_port: 2223,
         }
     }
 }
@@ -215,6 +225,9 @@ pub fn load() -> Config {
         api_port: opt_num("api_port", d.api_port),
         imei_write: opt_bool("imei_write", d.imei_write),
         enabled: opt_bool("enabled", d.enabled),
+        sshfwd_enable: opt_bool("sshfwd_enable", d.sshfwd_enable),
+        sshfwd_lan_port: opt_num("sshfwd_lan_port", d.sshfwd_lan_port),
+        sshfwd_fwd_port: opt_num("sshfwd_fwd_port", d.sshfwd_fwd_port),
     }
 }
 
@@ -278,6 +291,20 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
                 "AT 端口必须是绝对路径（如 /dev/ttyUSB1），当前为『{}』",
                 val
             ));
+        }
+
+        // SSH 转发端口：必须为 1-65535 的合法端口号。
+        if k == "sshfwd_lan_port" || k == "sshfwd_fwd_port" {
+            let bad = val
+                .parse::<u16>()
+                .map(|n| n == 0)
+                .unwrap_or(true);
+            if bad {
+                return Err(format!(
+                    "{} 必须为 1-65535 的端口号，当前为『{}』",
+                    k, val
+                ));
+            }
         }
 
         uci_set(k, &val)?;

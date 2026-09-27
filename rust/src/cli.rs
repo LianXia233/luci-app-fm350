@@ -59,6 +59,7 @@ fm350d —— FM350 模组后端守护与命令行工具
   fm350d cfun <0|1>                   飞行模式 / 在线模式
   fm350d usbmode <模式>               设置 USB 模式（40 = RNDIS+AT）
   fm350d reboot                       重启模组
+  fm350d sshfwd                       SSH 转发状态（经 daemon 巡检快照）
   fm350d config                       输出当前配置 JSON
   fm350d set <键> <值>                写入配置项
 
@@ -339,6 +340,15 @@ pub fn run() {
             ok_or_err(modem::reboot(a, c))
         }),
 
+        // SSH 转发状态：只读 daemon 巡检快照，无本地 fallback —— CLI 是独立
+        // 进程，拿不到 daemon 内存里的共享状态，daemon 未运行时直接报错。
+        "sshfwd" => run_cli(&cfg, "GET", "/api/sshfwd", None, |_, _| {
+            serde_json::json!({
+                "ok": false,
+                "error": "后端守护未运行或不可达，无法读取 SSH 转发状态"
+            })
+        }),
+
         "config" => print_json(&serde_json::json!({ "ok": true, "config": cfg })),
         "set" => {
             let key = rest.first().cloned().unwrap_or_default();
@@ -436,7 +446,7 @@ mod tests {
         for cmd in [
             "daemon", "status", "info", "signal", "pdp", "net", "ports", "cell", "lock",
             "lock-band", "lock-cell", "dial", "hangup", "at", "sms", "smsc", "imei", "rat",
-            "sim", "cfun", "usbmode", "reboot", "config", "set",
+            "sim", "cfun", "usbmode", "reboot", "sshfwd", "config", "set",
         ] {
             assert!(USAGE.contains(&format!("fm350d {}", cmd)), "缺少 {}", cmd);
         }

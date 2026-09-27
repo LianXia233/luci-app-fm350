@@ -138,6 +138,7 @@ return baseclass.extend({
 
 	/* ---- 模组控制 ---- */
 	reboot: wrap(OBJ, 'reboot', [], 'result'),
+	sshfwd: wrap(OBJ, 'sshfwd', [], 'sshfwd'),
 	cfun: wrap(OBJ, 'cfun', [ 'mode' ], 'result'),
 	sim: wrap(OBJ, 'sim', [ 'slot' ], 'result'),
 	usbmode: wrap(OBJ, 'usbmode', [ 'mode' ], 'result'),

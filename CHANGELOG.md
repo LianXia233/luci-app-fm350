@@ -2,6 +2,27 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.15 (2026-09-27)
+
+### 新增：模组 SSH 转发（ADB 通道，默认关闭）
+
+- 守护进程内置 `SshFwdWatch` 巡检器：开启 `sshfwd_enable` 后，自动维护
+  `LAN 客户端 → 0.0.0.0:<lan_port> (socat) → 127.0.0.1:<fwd_port> (adb forward)
+  → 模组 adbd (USB) → 模组内 dropbear:22` 的转发链，15 秒一轮全幂等自愈
+  （ADB 离线等待重连、forward 重建、socat 拉起），模组重启/USB 重插后无需
+  人工干预自动恢复。
+- **不支持的模组零动作**：`sshfwd_enable` 默认 0；缺 `adb`/`socat`、端口配置
+  非法时巡检器只置状态并返回，不产生任何 shell 副作用；关闭态连检测都不执行。
+- **端口冲突不抢占**：LAN 端口被旧版独立 fm350-ssh-fwd 等外部进程占用时仅上报
+  `port_conflict`，绝不 kill 他人进程；内置 socat 以 pid 文件
+  （`/var/run/fm350-sshfwd.pid`）记账，禁用时只停自己拉起的进程。
+- **前端不阻塞加载**：AT 调试页新增「模组 SSH 转发」卡片，骨架先上屏、
+  `sshfwd` 状态独立请求异步填充，失败只影响本卡片；状态读取走 daemon 内存
+  快照（`/api/sshfwd`、`fm350d sshfwd`），秒回，不做任何 shell/adb 动作。
+- 配置项：`sshfwd_enable`（默认 0）、`sshfwd_lan_port`（默认 2222）、
+  `sshfwd_fwd_port`（默认 2223）；保存时校验端口范围 1-65535。
+- 未修改 IMEI、NV 项或模组持久化数据。
+
 ## 未发布修复：PDP 失活时清理静态会话残值
 
 - 自动拨号连续失败达到 `net_guard_rounds`（默认 3）后，清理 `network.fm350` 的 IPv4 地址、网关、DNS，以及 `fm350v6` 的静态 IPv6 地址/DNS 和插件生成路由段；提交后保留 netifd 接口骨架，并 `ifdown` 两栈，避免无卡开机继续应用上次拨号地址。

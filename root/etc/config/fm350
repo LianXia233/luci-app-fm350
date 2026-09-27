@@ -36,3 +36,9 @@ config main 'main'
 	option api_port '8766'
 	# IMEI 写入开关：默认 0（关闭）。高风险不可逆操作，仅在维修等场景临时开启
 	option imei_write '0'
+	# 模组 SSH 转发（ADB 通道）：默认 0（关闭）。开启后守护把模组内 dropbear:22
+	# 经 adb forward + socat 转发到 LAN（0.0.0.0:lan_port）。无 ADB 通道的模组
+	# 上不产生任何动作；lan_port 被外部进程占用时不抢占，仅上报端口冲突
+	option sshfwd_enable '0'
+	option sshfwd_lan_port '2222'
+	option sshfwd_fwd_port '2223'

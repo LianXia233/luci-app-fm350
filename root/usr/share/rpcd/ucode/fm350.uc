@@ -218,6 +218,9 @@ return {
 		},
 		'reboot': { 'call': function(req) { return exec('fm350d reboot', TMO_WRITE); } },
 
+		/* SSH 转发巡检快照：daemon 内存只读，秒回不阻塞 rpcd */
+		'sshfwd': { 'call': function(req) { return exec('fm350d sshfwd'); } },
+
 		'set': {
 			'args': { 'key': '', 'value': '' },
 			'call': function(req) {
