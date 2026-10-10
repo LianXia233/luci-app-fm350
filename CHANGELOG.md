@@ -2,7 +2,35 @@
 
 本项目遵循语义化版本号。
 
-## 1.0.15-r4 (2026-10-10)
+## 1.0.16-r1 (2026-10-11)
+
+本版为 1.0.15 系列「模组缺席快速失败 + 稳定路径」的**实机验证修正版**。
+1.0.15-r4 的包未成功发布（Release 中仅存 r3），其改动并入本版并补齐实测修正。
+
+### 修复：稳定标识无限递归导致栈溢出（严重）
+
+`resolve_stable()` 调用 `list_ports()`，而 `list_ports()` 为计算 `current`
+又回调 `resolve_stable()` —— **互相递归**。实机表现：
+
+```
+thread '<unknown>' (23410) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+```
+
+后果：`fm350d ports` / `fm350d status` 返回空、`rc=-1`，前端拿不到端口列表。
+
+- 拆出 `scan_ports()`（纯扫描，不依赖配置、不解析稳定标识），
+  `list_ports()` 在其结果上叠加 `current` / `busy` / `note` 判定，
+  `resolve_stable()` 改调 `scan_ports()`，递归链切断。
+- `any_fm350_present()` 亦切至 `scan_ports()`（预检处于忙等路径，
+  省一次全量扫描）。
+- 新增 4 个单测锁死 stable_id 边界（`stable_id_from_real_device_path` /
+  `stable_id_differs_per_interface` / `stable_id_rejects_non_usb_bus` /
+  `stable_id_handles_short_paths`），单元测试 196 passed。
+
+**实机验证**（基线法：以新二进制就位为日志基线，6 轮 × 8 次调用压测）：
+48 次调用全部返回合法 JSON，新增日志 **0 行**，`stack overflow` / `panic`
+计数均为 0。
 
 ### 修复：模组未识别 / 无模组时 LuCI 卡死（高级配置页拖垮全局）
 
@@ -22,7 +50,11 @@
 
   全部 AT 依赖端点（status / info / signal / pdp / cell / lock / at / dial /
   imei / rat / sim / cfun / usbmode / reboot / sms）在命中前两态时不再进入
-  AT 串行队列。（实机实测：配置错口 + 模组在线场景从 894.9 ms 降至 220 ms。）
+  AT 串行队列。
+
+  **实机实测**：配置错口 + 模组在线场景由 **894.9 ms 降至 130~139 ms**
+  （约 -85%）；不存在的端口 140~160 ms 快速失败；错误文案附带全部候选口
+  与稳定标识，可直接照抄改配。
 - **第 1 层 · 打开熔断**（`at/mod.rs`）：独占打开失败后进入
   `OPEN_RETRY_COOLDOWN`（5s）冷却，期内直接复述上次错误不撞内核；
   用户改端口 / 自动改选写入新路径时熔断立即失效，新口即时生效。
@@ -32,14 +64,14 @@
   `AT+CFUN?` 阻塞加载——CFUN 开关先按「状态未知」渲染，页面渲染完成后
   异步拉取注入；占用探测仅由「重新探测扫描」按钮显式触发。
 
-### 新增：/dev/serial/by-id 稳定路径
+### 新增：AT 口稳定路径（udev by-id + sysfs 拓扑双路径）
 
 - `at/port.rs` 新增 `by_id_link()` / `stable_path()`：udev 以 USB 序列号 +
   接口序号命名，USB 重枚举导致 `ttyUSB*` 编号漂移时 by-id 别名仍指向
   同一物理接口。
 - **sysfs 拓扑稳定标识兜底**（新增 `sysfs_stable_id()`）：**不依赖 udev**。
   精简固件（ImmortalWrt 默认）常无 udev，`/dev/serial/by-id` 目录不存在，
-  by-id 方案实机零收益。改用内核 sysfs USB 拓扑推导稳定标识，形如
+  by-id 方案在这些设备上零收益。改用内核 sysfs USB 拓扑推导稳定标识，形如
   `usb-usb2-2-1:1.6`（bus + 设备路径 + 接口号），由 `canonicalize` 解析，
   纯内核态、任何固件可用；`resolve_stable()` 负责把配置中的稳定标识还原为
   当前真实节点，`list_ports()` 据此正确标记 `current`。
@@ -47,9 +79,13 @@
   `stable_path()` 返回（有 udev 时 by-id，否则拓扑标识），哑口 / 端口消失
   改选不再因编号漂移反复失联。
 - `PortCandidate` 新增 `by_id`、`stable`、`interface` 字段，`/api/ports`
-  与 CLI `ports` 直接序列化；高级配置页端口下拉以 ★ 标记并列出拓扑稳定
+  与 CLI `ports` 直接序列化；高级配置页端口下拉以 ★ 标记并列出稳定
   路径选项（标注「稳定路径·无需 udev」），无任何稳定标识时显式给出说明
   占位而非静默留空。
+
+**实机验证**（ImmortalWrt / kernel 6.18.52 / MT7981 + FM350-GL，7 个串口）：
+7 口全部获得唯一稳定标识（`usb-usb2-2-1:1.2` ~ `:1.9`），
+`ttyUSB3` → `usb-usb2-2-1:1.6` → `current=True` 精确匹配配置端口。
 
 - 未修改 IMEI、NV 项或模组持久化数据。
 
