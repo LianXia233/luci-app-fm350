@@ -15,6 +15,35 @@ use super::http::{at_err, err, ok, Json};
 use crate::at::AtHandle;
 use crate::config::Config;
 
+/// 模组缺席预检（LuCI 卡死防御第 0 层）。
+///
+/// 判定：配置的 AT 口节点不存在，**且**系统里没有任何疑似 FM350 的候选口
+/// —— 即「模组未识别 / 已拔出」状态。此时所有依赖 AT 通道的接口立即返回
+/// 明确错误，不再进入 `AtHandle`（打开失败也要等熔断判定，且哑口状态下
+/// 单条命令要等满 at_timeout）。
+///
+/// 为什么不能只看配置端口：用户把 `at_port` 配错（指向不存在的 ttyUSB9）
+/// 而模组其实在线时，候选口扫描仍会发现 2cb7 设备 —— 这种情况必须放行，
+/// 让 open 错误本身（"设备不存在"）指明是配置问题。
+///
+/// 成本：一次 metadata + 一次 sysfs 读目录（亚毫秒），远低于任何 AT 往返。
+fn modem_absent(cfg: &Config) -> Option<String> {
+    if std::fs::metadata(&cfg.at_port).is_ok() {
+        return None;
+    }
+    let has_fm350 = crate::at::list_ports(cfg, false)
+        .iter()
+        .any(|p| p.likely_fm350);
+    if has_fm350 {
+        return None;
+    }
+    Some(format!(
+        "模组未识别：配置的 AT 口 {} 不存在，且未发现任何 Fibocom (2cb7) 串口。\
+请检查模组供电与 USB 枚举，或到「高级配置 → AT 串口管理」重新扫描选择端口",
+        cfg.at_port
+    ))
+}
+
 /// 派发一次请求。
 pub fn dispatch(
     at: &AtHandle,
@@ -53,13 +82,33 @@ pub fn dispatch(
         }
 
         // ---- 只读状态 ----
-        "/api/status" => ok(serde_json::json!({ "status": crate::modem::status(at, cfg) })),
-        "/api/info" => ok(serde_json::json!({ "info": crate::modem::info(at, cfg) })),
-        "/api/signal" => ok(serde_json::json!({ "signal": crate::modem::signal(at, cfg) })),
-        "/api/pdp" => ok(serde_json::json!({ "pdp": crate::modem::pdp(at, cfg) })),
+        // AT 依赖类端点统一过模组缺席预检：模组未识别时亚毫秒返回，
+        // 绝不进入 AT 串行队列拖住 rpcd。
+        "/api/status" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "status": crate::modem::status(at, cfg) })),
+        },
+        "/api/info" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "info": crate::modem::info(at, cfg) })),
+        },
+        "/api/signal" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "signal": crate::modem::signal(at, cfg) })),
+        },
+        "/api/pdp" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "pdp": crate::modem::pdp(at, cfg) })),
+        },
         "/api/net" => ok(serde_json::json!({ "net": crate::net::status(cfg) })),
-        "/api/cell" => ok(serde_json::json!({ "cell": crate::modem::cell_info(at, cfg) })),
-        "/api/lock" => ok(serde_json::json!({ "lock": crate::modem::lock_status(at, cfg) })),
+        "/api/cell" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "cell": crate::modem::cell_info(at, cfg) })),
+        },
+        "/api/lock" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => ok(serde_json::json!({ "lock": crate::modem::lock_status(at, cfg) })),
+        },
         // EIF 兜底通道状态（f22-atproxy 的 +GT* URC 消费情况）。
         // 未刷修改 rootfs 的设备上 events 恒为 0，前端据此显示「未启用」。
         "/api/eif" => ok(serde_json::json!({ "eif": crate::at::urc::snapshot() })),
@@ -101,8 +150,14 @@ pub fn dispatch(
         }
 
         // ---- 拨号 / 挂断 ----
-        "/api/dial" => dial(at, cfg, payload),
+        "/api/dial" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => dial(at, cfg, payload),
+        },
         "/api/hangup" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             let r = crate::modem::hangup(at, cfg);
             let _ = crate::net::teardown_iface(cfg);
             at_err(r)
@@ -112,6 +167,9 @@ pub fn dispatch(
         // 读取始终允许；写入需 imei_write=1 且 confirm=1，执行前自动备份。
         // 守卫在 imei::write 内部，这里只做参数转发。
         "/api/imei" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             if *method == Method::Post {
                 let value = arg_str(payload, q, "value").unwrap_or_default();
                 let confirm = payload
@@ -126,7 +184,10 @@ pub fn dispatch(
                 ok(serde_json::json!({ "imei": crate::imei::state(at, cfg) }))
             }
         }
-        "/api/imei/backup" => at_err(crate::imei::backup(at, cfg)),
+        "/api/imei/backup" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => at_err(crate::imei::backup(at, cfg)),
+        },
 
         // ---- AT 透传（高风险，IMEI 写入类被拦截）----
         "/api/at" => {
@@ -137,15 +198,27 @@ pub fn dispatch(
             if crate::at::is_imei_write(&cmd) {
                 return err(&crate::at::imei_block_reason(&cmd));
             }
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             at_err(at.with(cfg, |p| p.command(&cmd)))
         }
 
         // ---- 锁频 / 锁小区 ----
-        "/api/lock/band" => at_err(crate::modem::lock_band(at, cfg, &arg_list(payload, q, "args"))),
-        "/api/lock/cell" => at_err(crate::modem::lock_cell(at, cfg, &arg_list(payload, q, "args"))),
+        "/api/lock/band" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => at_err(crate::modem::lock_band(at, cfg, &arg_list(payload, q, "args"))),
+        },
+        "/api/lock/cell" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => at_err(crate::modem::lock_cell(at, cfg, &arg_list(payload, q, "args"))),
+        },
 
         // ---- 制式 / SIM / 功能等级 ----
         "/api/rat" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             if *method == Method::Post {
                 let order: Vec<String> = payload
                     .get("order")
@@ -158,23 +231,38 @@ pub fn dispatch(
             }
         }
         "/api/sim" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             let slot = arg_u64(payload, q, "slot").unwrap_or(0) as u32;
             at_err(crate::modem::set_sim_slot(at, cfg, slot))
         }
         "/api/cfun" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             let mode = arg_u64(payload, q, "mode").unwrap_or(1) as u32;
             at_err(crate::modem::set_cfun(at, cfg, mode))
         }
         "/api/usbmode" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             let mode = arg_u64(payload, q, "mode").unwrap_or(40) as u32;
             at_err(crate::modem::set_usb_mode(at, cfg, mode))
         }
-        "/api/reboot" => at_err(crate::modem::reboot(at, cfg)),
+        "/api/reboot" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => at_err(crate::modem::reboot(at, cfg)),
+        },
 
         // ---- 短信 ----
-        "/api/sms/list" => match crate::sms::list(at, cfg) {
-            Ok(v) => ok(serde_json::json!({ "messages": v })),
-            Err(e) => err(&e),
+        "/api/sms/list" => match modem_absent(cfg) {
+            Some(e) => err(&e),
+            None => match crate::sms::list(at, cfg) {
+                Ok(v) => ok(serde_json::json!({ "messages": v })),
+                Err(e) => err(&e),
+            },
         },
         "/api/sms/send" => {
             let number = arg_str(payload, q, "number").unwrap_or_default();
@@ -182,13 +270,22 @@ pub fn dispatch(
             if number.is_empty() {
                 return err("缺少收件人号码");
             }
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             at_err(crate::sms::send(at, cfg, &number, &text))
         }
         "/api/sms/delete" => match arg_i64(payload, q, "index") {
-            Some(i) => at_err(crate::sms::delete(at, cfg, i)),
+            Some(i) => match modem_absent(cfg) {
+                Some(e) => err(&e),
+                None => at_err(crate::sms::delete(at, cfg, i)),
+            },
             None => err("缺少 index"),
         },
         "/api/sms/storage" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
             if *method == Method::Post {
                 // 默认值取 "SM"：实机 `AT+CPMS=?` 只返回 ("SM")，"ME" 不在
                 // 受支持列表内；与 storage() 解析失败的回落值一致。
@@ -360,6 +457,41 @@ mod tests {
         let mut q = HashMap::new();
         q.insert("args".to_string(), "20,6,3".to_string());
         assert_eq!(arg_list(&Json::Null, &q, "args"), vec!["20", "6", "3"]);
+    }
+
+    /// 模组缺席预检：沙箱环境无串口设备，默认配置必然命中「端口不存在且
+    /// 无 2cb7 候选」→ 必须返回带指引的错误；这是 LuCI 防卡死的核心分支。
+    #[test]
+    fn modem_absent_reports_when_no_fm350_anywhere() {
+        let cfg = Config::default();
+        let r = modem_absent(&cfg);
+        let msg = r.expect("无串口环境下必须判为模组缺席");
+        assert!(msg.contains("模组未识别"), "错误信息: {}", msg);
+        assert!(msg.contains(&cfg.at_port), "必须带上当前配置端口: {}", msg);
+    }
+
+    /// AT 透传在模组缺席时必须被预检拦截（不得进入 AT 串行队列）。
+    #[test]
+    fn at_passthrough_fast_fails_when_modem_absent() {
+        let at = AtHandle::new();
+        let cfg = Config::default();
+        let payload = serde_json::json!({ "cmd": "AT+CSQ" });
+        let j = dispatch(&at, &cfg, &Method::Post, "/api/at", &empty_q(), &payload);
+        assert_eq!(j["ok"], Json::Bool(false));
+        assert!(
+            j["error"].as_str().unwrap().contains("模组未识别"),
+            "错误信息: {}",
+            j["error"]
+        );
+    }
+
+    /// 端口枚举不受预检影响：模组缺席时它恰恰是用户排障的入口。
+    #[test]
+    fn ports_endpoint_bypasses_modem_absence_guard() {
+        let at = AtHandle::new();
+        let cfg = Config::default();
+        let j = dispatch(&at, &cfg, &Method::Get, "/api/ports", &empty_q(), &Json::Null);
+        assert_eq!(j["ok"], Json::Bool(true));
     }
 
     #[test]

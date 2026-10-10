@@ -78,15 +78,36 @@ function extract(key) {
 	};
 }
 
-function wrap(object, method, params, key) {
+function wrap(object, method, params, key, ms) {
 	var fn = decl(object, method, params);
 	var ex = extract(key);
 	return function() {
 		var args = arguments;
-		return fn.apply(null, args).then(ex, function(e) {
+		return timeout(fn.apply(null, args).then(ex, function(e) {
 			return { ok: false, error: '' + ((e && e.message) || e || _('调用失败')) };
-		});
+		}), ms);
 	};
+}
+
+/* 前端超时护栏（前后端解耦的最后一块）：
+ *
+ * rpcd ucode 代理是同步转发，后端理论上不会超过其 timeout（读 20s / 写 90s）
+ * 才返回。但 rpcd 自身异常（代理挂死、ubus 通道停滞）时前端 Promise 可能
+ * 永不 settle —— 页面转圈、LuCI 假死。这里用 Promise.race 兜底：到时先
+ * 返回「后端调用超时」，页面照常渲染与操作，不再被后端状态绑死。
+ *
+ * 读类缺省 30s（略大于 ucode 的 20s，让后端的真实错误先到）；
+ * 写类（拨号、短信发送、模组控制等）显式传 95s。 */
+function timeout(p, ms) {
+	var t = (ms != null) ? ms : 30000;
+	return Promise.race([
+		p,
+		new Promise(function(res) {
+			setTimeout(function() {
+				res({ ok: false, error: _('后端调用超时，请稍后重试') + ' (' + Math.round(t / 1000) + 's)' });
+			}, t);
+		})
+	]);
 }
 
 return baseclass.extend({
@@ -108,7 +129,7 @@ return baseclass.extend({
 	   这里保留完整响应：pdp 拨上但网络配置失败 → ok:false + error=net_error。 */
 	dial: function(apn) {
 		var fn = decl(OBJ, 'dial', [ 'apn' ]);
-		return fn.apply(null, arguments).then(function(res) {
+		return timeout(fn.apply(null, arguments).then(function(res) {
 			var r = parseRaw(res);
 			if (r == null)
 				return { ok: false, error: _('后端无响应') };
@@ -124,37 +145,37 @@ return baseclass.extend({
 			return { ok: true, value: r };
 		}, function(e) {
 			return { ok: false, error: '' + ((e && e.message) || e || _('调用失败')) };
-		});
+		}), 95000);
 	},
-	hangup: wrap(OBJ, 'hangup', [], 'result'),
+	hangup: wrap(OBJ, 'hangup', [], 'result', 95000),
 
 	/* ---- AT 透传 ---- */
-	at: wrap(OBJ, 'at', [ 'cmd' ], 'result'),
+	at: wrap(OBJ, 'at', [ 'cmd' ], 'result', 95000),
 
 	/* ---- 锁频 / 锁小区 / 制式 ---- */
-	lockBand: wrap(OBJ, 'lock_band', [ 'args' ], 'result'),
-	lockCell: wrap(OBJ, 'lock_cell', [ 'args' ], 'result'),
-	rat: wrap(OBJ, 'rat', [ 'order' ], 'result'),
+	lockBand: wrap(OBJ, 'lock_band', [ 'args' ], 'result', 95000),
+	lockCell: wrap(OBJ, 'lock_cell', [ 'args' ], 'result', 95000),
+	rat: wrap(OBJ, 'rat', [ 'order' ], 'result', 95000),
 
 	/* ---- 模组控制 ---- */
-	reboot: wrap(OBJ, 'reboot', [], 'result'),
+	reboot: wrap(OBJ, 'reboot', [], 'result', 95000),
 	sshfwd: wrap(OBJ, 'sshfwd', [], 'sshfwd'),
-	modexec: wrap(OBJ, 'modexec', [ 'channel', 'cmd' ], 'result'),
-	sshBootstrap: wrap(OBJ, 'sshbootstrap', [], 'result'),
-	cfun: wrap(OBJ, 'cfun', [ 'mode' ], 'result'),
-	sim: wrap(OBJ, 'sim', [ 'slot' ], 'result'),
-	usbmode: wrap(OBJ, 'usbmode', [ 'mode' ], 'result'),
-	set: wrap(OBJ, 'set', [ 'key', 'value' ], 'result'),
+	modexec: wrap(OBJ, 'modexec', [ 'channel', 'cmd' ], 'result', 35000),
+	sshBootstrap: wrap(OBJ, 'sshbootstrap', [], 'result', 95000),
+	cfun: wrap(OBJ, 'cfun', [ 'mode' ], 'result', 95000),
+	sim: wrap(OBJ, 'sim', [ 'slot' ], 'result', 95000),
+	usbmode: wrap(OBJ, 'usbmode', [ 'mode' ], 'result', 95000),
+	set: wrap(OBJ, 'set', [ 'key', 'value' ], 'result', 95000),
 
 	/* ---- IMEI（写入需后端开关 + 二次确认） ---- */
 	imeiRead: wrap(OBJ, 'imei_read', [], 'imei'),
-	imeiBackup: wrap(OBJ, 'imei_backup', [], 'result'),
-	imeiWrite: wrap(OBJ, 'imei_write', [ 'value', 'confirm' ], 'result'),
+	imeiBackup: wrap(OBJ, 'imei_backup', [], 'result', 95000),
+	imeiWrite: wrap(OBJ, 'imei_write', [ 'value', 'confirm' ], 'result', 95000),
 
 	/* ---- 短信 ---- */
 	smsList: wrap(OBJ_SMS, 'list', [], 'messages'),
 	smsStorage: wrap(OBJ_SMS, 'storage', [ 'mem' ], 'storage'),
-	smsSend: wrap(OBJ_SMS, 'send', [ 'number', 'text' ], 'result'),
+	smsSend: wrap(OBJ_SMS, 'send', [ 'number', 'text' ], 'result', 95000),
 	smsDelete: wrap(OBJ_SMS, 'delete', [ 'index' ], 'result'),
 
 	/* 载入独立样式表（只注入一次），页面本身不写内联样式 */
