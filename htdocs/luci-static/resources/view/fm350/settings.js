@@ -138,10 +138,21 @@ function createRadioSwitch(initial) {
 
 	paint();
 
-	return E('div', { 'class': 'fm350-radio-switch' }, [
+	var root = E('div', { 'class': 'fm350-radio-switch' }, [
 		track,
 		E('div', { 'class': 'fm350-switch-meta' }, [ stateLabel, hint ])
 	]);
+
+	/* 异步状态注入接口：页面渲染不再等待 AT+CFUN?（模组缺席时该命令
+	 * 以前要等满 at_timeout，经 rpcd 同步转发会堵住整个 ubus 通道），
+	 * 现在先以「状态未知」渲染，数据回来后再更新。 */
+	root.updateState = function(v) {
+		state.online = v;
+		state.failed = (v == null);
+		paint();
+	};
+
+	return root;
 }
 
 /* ---------------- 动态矢量 SVG 渲染组件库 ---------------- */
@@ -844,13 +855,16 @@ function injectFrostedGlassTheme() {
 }
 
 return view.extend({
+	/* 页面加载只做 sysfs 只读扫描（probe=0）：不做逐口独占探测、不碰 AT 通道。
+	 * 模组未识别时本页必须在亚秒内渲染完成 —— 此前 load 即 probe=1 + AT 透传，
+	 * 后端慢时经 rpcd 同步转发把整个 ubus 通道堵住，高级配置页会拖垮全局 LuCI。
+	 * 占用探测只由「重新探测扫描」按钮显式触发。 */
 	load: function() {
 		return Promise.all([
 			uci.load('fm350'),
 			api.info(),
 			api.imeiRead(),
-			api.ports('1'),
-			api.at('AT+CFUN?')
+			api.ports('0')
 		]);
 	},
 
@@ -874,7 +888,9 @@ return view.extend({
 			|| imei.write_enabled === true;
 
 		var isExclOk = atStats.open === true && (!atStats.other_pids || atStats.other_pids.length === 0);
-		var cfunNow = cfunLevel((data[4] && data[4].ok && data[4].value) || null);
+		/* CFUN 状态不再阻塞页面渲染：渲染时按「状态未知」绘制，render 完成后
+		   异步拉取并注入（见下方 _radio 选项与 fetchCfun）。 */
+		var cfunNow = null;
 
 		var m, s, o;
 
@@ -998,7 +1014,8 @@ return view.extend({
 		s = m.section(form.NamedSection, 'main', 'fm350', _('AT 串口管理'));
 		s.description = _('插件独占 AT 口：fm350d 运行期间持续持有该端口并申请排他锁，'
 			+ '其它申请排他锁的程序将无法并发争抢；若有进程绕过锁强开，下方状态栏将直接列出其 PID。'
-			+ '请选择模组实际导出的 AT 口，通常为 /dev/ttyUSB1 或 /dev/ttyUSB2；更改端口保存即生效。');
+			+ '候选端口带内核驱动标识与占用探测；★ 标记的 /dev/serial/by-id/… 为稳定路径，'
+			+ 'USB 重枚举后 ttyUSB 编号漂移时依然指向同一物理接口，推荐优先选用。更改端口保存即生效。');
 
 		/* 扫描失败或未发现候选端口时，给出显式诊断与操作指引，
 		   而不是只留下一个空下拉框让用户无从下手 */
@@ -1053,6 +1070,13 @@ return view.extend({
 		portList.forEach(function(p) {
 			o.value(p.path, portLabel(p));
 			seen[p.path] = true;
+
+			/* by-id 稳定别名：udev 以 USB 序列号 + 接口序号命名，重启 / 重枚举
+			   不变。后端自动改选已优先写入 by-id 路径，这里同步暴露给手动选择。 */
+			if (p.by_id && !seen[p.by_id]) {
+				o.value(p.by_id, '★ ' + p.by_id + '（' + (p.product || p.name) + _('，稳定路径）'));
+				seen[p.by_id] = true;
+			}
 		});
 
 		if (!seen[curPort])
@@ -1135,7 +1159,15 @@ return view.extend({
 		o = s.option(form.DummyValue, '_radio', _('移动网络'));
 		o.rawhtml = true;
 		o.description = _('开启＝在线模式（CFUN=1），关闭＝飞行模式（CFUN=0）。点击开关立即下发生效，无需保存配置');
-		o.cfgvalue = function() { return createRadioSwitch(cfunNow); };
+		o.cfgvalue = function() {
+			var sw = createRadioSwitch(cfunNow);
+			/* 页面渲染完成后异步读取 CFUN 状态（不阻塞 render，不参与 load 的
+			   Promise.all）——模组缺席时这里只会安静失败，开关保持「状态未知」 */
+			api.at('AT+CFUN?').then(function(res) {
+				sw.updateState(cfunLevel((res && res.ok && res.value) || null));
+			});
+			return sw;
+		};
 
 		o = s.option(form.ListValue, '_sim', _('SIM 卡槽'));
 		o.description = _('选择物理卡槽或板载 eSIM 后，点击右侧按钮下发指令');

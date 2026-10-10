@@ -47,6 +47,41 @@ pub fn is_candidate_tty(name: &str) -> bool {
         })
 }
 
+/// 在 `/dev/serial/by-id` 下查找解析到指定设备的稳定符号链接。
+///
+/// 返回形如 `/dev/serial/by-id/usb-Fibocom_FM350-GL_...-if01` 的路径。
+/// 判定方式：对每个链接 `readlink` 后与目标设备做 canonicalize 比对，
+/// 悬空链接与不相关设备一律跳过。目录不存在（无 udev / 精简固件）返回 `None`。
+pub fn by_id_link(path: &str) -> Option<String> {
+    let want = std::fs::canonicalize(path).ok()?;
+    let rd = std::fs::read_dir("/dev/serial/by-id").ok()?;
+    for e in rd.flatten() {
+        let Ok(t) = std::fs::read_link(e.path()) else {
+            continue;
+        };
+        let full = if t.is_absolute() {
+            t
+        } else {
+            match e.path().parent() {
+                Some(p) => p.join(t),
+                None => continue,
+            }
+        };
+        if std::fs::canonicalize(&full).is_ok_and(|c| c == want) {
+            return Some(e.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// 优先返回 by-id 稳定路径，找不到（无 udev）时原样返回设备节点。
+///
+/// 自动改选与配置写入都应经过它：写 `/dev/ttyUSB1` 会在下次重枚举后
+/// 指向另一个接口（编号漂移），写 by-id 路径则始终指向同一物理接口。
+pub fn stable_path(path: &str) -> String {
+    by_id_link(path).unwrap_or_else(|| path.to_string())
+}
+
 /// 依据 USB 描述符判断是否为 Fibocom FM350 系列。
 pub fn looks_like_fm350(vid: &str, vendor: &str, product: &str) -> bool {
     let v = vid.trim().to_lowercase();
@@ -60,6 +95,12 @@ pub fn looks_like_fm350(vid: &str, vendor: &str, product: &str) -> bool {
 pub struct PortCandidate {
     /// 设备节点绝对路径，如 `/dev/ttyUSB1`。
     pub path: String,
+    /// 稳定路径（`/dev/serial/by-id/...`，重启 / 重枚举不变）。
+    ///
+    /// 与 `path` 同时存在时前端与自动改选应优先使用它：`ttyUSB*` 编号会随
+    /// USB 枚举顺序漂移，by-id 链接以 USB 序列号 / 接口路径命名，是 udev
+    /// 官方提供的稳定别名。无 udev 的精简固件上为空串。
+    pub by_id: String,
     /// 设备名，如 `ttyUSB1`。
     pub name: String,
     /// 绑定的内核驱动（option / usbserial / cdc_acm ...）。
@@ -213,6 +254,12 @@ pub fn list_ports(cfg: &Config, probe: bool) -> Vec<PortCandidate> {
         let vendor = find_usb_attr(&sysobj, "manufacturer").unwrap_or_default();
         let product = find_usb_attr(&sysobj, "product").unwrap_or_default();
         let current = path == cfg.at_port;
+        // by-id 稳定别名：仅设备节点真实存在时可解析（悬空无意义）
+        let by_id = if std::fs::metadata(&path).is_ok() {
+            by_id_link(&path).unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         // 节点不存在时不做独占探测（open 必然失败，报「被占用」反而误导），
         // 如实标注「等待重枚举」—— 这正对应「sysfs 已注册但 devtmpfs 节点
@@ -236,6 +283,7 @@ pub fn list_ports(cfg: &Config, probe: bool) -> Vec<PortCandidate> {
 
         out.push(PortCandidate {
             likely_fm350: looks_like_fm350(&vid, &vendor, &product),
+            by_id,
             path,
             name,
             driver,
@@ -267,7 +315,9 @@ pub fn identify_at_port(cfg: &Config) -> Option<String> {
             continue;
         }
         if probe_at_ok(&p.path, cfg.baudrate) {
-            return Some(p.path.clone());
+            // 写入 by-id 稳定路径：USB 重枚举后 ttyUSB* 编号会漂移，而
+            // by-id 别名指向同一物理接口。无 udev 时回退原节点路径。
+            return Some(stable_path(&p.path));
         }
     }
     None
@@ -409,11 +459,22 @@ mod tests {
         assert!(merge_candidate_names(vec![Vec::<String>::new()]).is_empty());
     }
 
+    /// by-id 稳定路径：目录不存在（无 udev）时返回 None、stable_path 原样回退。
+    #[test]
+    fn stable_path_falls_back_to_node() {
+        // 沙箱/固件上多半没有 /dev/serial/by-id，即便有也不会解析到这个假路径
+        let p = "/dev/fm350-no-such-port-xyz";
+        assert_eq!(by_id_link(p), None);
+        assert_eq!(stable_path(p), p);
+    }
+
+    /// 按「当前端口 → 疑似 FM350 → 名称」排序，便于前端把最可能的选项放最前。
     #[test]
     fn port_sort_puts_current_and_fm350_first() {
         fn c(name: &str, current: bool, fm: bool) -> PortCandidate {
             PortCandidate {
                 path: format!("/dev/{}", name),
+                by_id: String::new(),
                 name: name.to_string(),
                 driver: String::new(),
                 vid: String::new(),

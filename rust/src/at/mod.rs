@@ -44,7 +44,8 @@ pub use cmd as at_cmd;
 pub use guard::{block_reason, is_imei_write, IMEI_READ_CMD};
 pub use parse::{field, first, first_ipv4, has_error, is_ok, raw_lines, rows, scalar};
 pub use port::{
-    find_usb_attr, identify_at_port, is_candidate_tty, list_ports, looks_like_fm350, PortCandidate,
+    by_id_link, find_usb_attr, identify_at_port, is_candidate_tty, list_ports, looks_like_fm350,
+    stable_path, PortCandidate,
 };
 pub use urc::{snapshot as gt_snapshot, GtEvent};
 
@@ -119,6 +120,15 @@ const RESELECT_COOLDOWN: Duration = Duration::from_secs(60);
 /// 返回明确错误而不是无限排队。这是 LuCI 卡死防御的第二层：rpcd ucode 是
 /// 同步转发，后端锁住多久，rpcd 主循环就堵多久。
 const LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// 打开失败后的重试冷却：最近一次独占打开失败后，多久内不再重复尝试。
+///
+/// 模组未识别 / 被拔出时，配置端口不存在，每次 API 调用都会走到 open 失败
+/// 分支。open 本身虽然快速失败（ENOENT），但「每个请求都撞一次内核 +
+/// sysfs」在 LuCI 高频轮询下毫无意义，还会放大 rpcd 同步转发延迟。冷却期
+/// 内直接返回上次错误（熔断），到点后再放行一次真实探测——模组插回后
+/// 最多多等一个冷却周期即可恢复。
+const OPEN_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// 把底层打开串口的错误翻译成可读中文，便于用户在 LuCI 上定位问题。
 fn friendly_open_err(path: &str, e: &str) -> String {
@@ -352,6 +362,9 @@ struct Slot {
     releases: u64,
     /// 上一次哑口自动改选探测失败的时刻（冷却期内不重复探测）。
     reselect_failed_at: Option<Instant>,
+    /// 上一次独占打开失败的时刻与错误（冷却期内熔断，直接复述错误）。
+    open_failed_at: Option<Instant>,
+    open_failed_err: Option<String>,
 }
 
 /// 全局 AT 端口句柄（daemon 单点持有，进程内串行，全程独占）。
@@ -368,6 +381,8 @@ impl AtHandle {
                 opens: 0,
                 releases: 0,
                 reselect_failed_at: None,
+                open_failed_at: None,
+                open_failed_err: None,
             }),
         }
     }
@@ -399,10 +414,36 @@ impl AtHandle {
             slot.port = None;
             slot.opened_at = None;
             slot.releases += 1;
+            // 用户 / 改选刚写入了新端口：打开失败熔断必须同步失效，
+            // 否则新口要白白多等一个冷却周期才能打开。
+            slot.open_failed_at = None;
+            slot.open_failed_err = None;
         }
 
         if slot.port.is_none() {
-            slot.port = Some(AtPort::open(&cfg.at_port, cfg.baudrate, cfg.at_timeout)?);
+            // 熔断：刚打开失败过且仍在冷却期内，直接复述上次错误，
+            // 不再撞内核。模组缺席时这是 LuCI 不被拖垮的关键——所有
+            // AT 类请求都在亚毫秒内拿到明确错误。
+            if let Some(t) = slot.open_failed_at {
+                if t.elapsed() < OPEN_RETRY_COOLDOWN {
+                    return Err(slot
+                        .open_failed_err
+                        .clone()
+                        .unwrap_or_else(|| "模组端口暂不可用".into()));
+                }
+            }
+            match AtPort::open(&cfg.at_port, cfg.baudrate, cfg.at_timeout) {
+                Ok(p) => {
+                    slot.port = Some(p);
+                    slot.open_failed_at = None;
+                    slot.open_failed_err = None;
+                }
+                Err(e) => {
+                    slot.open_failed_at = Some(Instant::now());
+                    slot.open_failed_err = Some(e.clone());
+                    return Err(e);
+                }
+            }
             slot.opened_at = Some(Instant::now());
             slot.opens += 1;
         }
