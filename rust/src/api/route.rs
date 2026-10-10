@@ -17,30 +17,62 @@ use crate::config::Config;
 
 /// 模组缺席预检（LuCI 卡死防御第 0 层）。
 ///
-/// 判定：配置的 AT 口节点不存在，**且**系统里没有任何疑似 FM350 的候选口
-/// —— 即「模组未识别 / 已拔出」状态。此时所有依赖 AT 通道的接口立即返回
-/// 明确错误，不再进入 `AtHandle`（打开失败也要等熔断判定，且哑口状态下
-/// 单条命令要等满 at_timeout）。
+/// 三态判定，避免「配置写错」被误判成「模组不在」而给出误导性提示：
 ///
-/// 为什么不能只看配置端口：用户把 `at_port` 配错（指向不存在的 ttyUSB9）
-/// 而模组其实在线时，候选口扫描仍会发现 2cb7 设备 —— 这种情况必须放行，
-/// 让 open 错误本身（"设备不存在"）指明是配置问题。
+///   1. **配置端口可用**（节点存在）→ 放行，交给正常 AT 流程。
+///   2. **配置端口不可用，但系统里有 Fibocom 串口** → 这是**配置/端口漂移**
+///      问题（用户把 `at_port` 写成不存在的 ttyUSB99，或 USB 重枚举后编号
+///      变了）。此时**也要快速失败** —— 实机验证证明：这种情形下旧逻辑放行
+///      后，`/api/status` 仍要跑满约 890ms 的完整 AT 流程（每条命令先撞
+///      open 失败），经 rpcd 同步转发照样拖慢整个 ubus 通道。错误信息
+///      直接给出「发现 N 个候选口」与排障指引，比放行后让用户干等更有用。
+///   3. **配置端口不可用且无任何 Fibocom 串口** → 真·模组未识别，提示
+///      检查供电与 USB 枚举。
 ///
-/// 成本：一次 metadata + 一次 sysfs 读目录（亚毫秒），远低于任何 AT 往返。
+/// 成本：一次 metadata + 一次 sysfs 枚举（亚毫秒），远低于任何 AT 往返。
 fn modem_absent(cfg: &Config) -> Option<String> {
     if std::fs::metadata(&cfg.at_port).is_ok() {
         return None;
     }
-    let has_fm350 = crate::at::list_ports(cfg, false)
-        .iter()
-        .any(|p| p.likely_fm350);
-    if has_fm350 {
+    // 配置写的是稳定标识（拓扑 / by-id）时，节点本身不会是文件，
+    // 必须先解析成当前真实节点再判断，否则会误报缺席。
+    let resolved = crate::at::resolve_stable(cfg, &cfg.at_port);
+    if resolved != cfg.at_port && std::fs::metadata(&resolved).is_ok() {
         return None;
     }
-    Some(format!(
-        "模组未识别：配置的 AT 口 {} 不存在，且未发现任何 Fibocom (2cb7) 串口。\
+
+    let cands = crate::at::list_ports(cfg, false);
+    let fm350: Vec<&crate::at::PortCandidate> =
+        cands.iter().filter(|p| p.likely_fm350).collect();
+
+    if fm350.is_empty() {
+        return Some(format!(
+            "模组未识别：配置的 AT 口 {} 不存在，且未发现任何 Fibocom (2cb7) 串口。\
 请检查模组供电与 USB 枚举，或到「高级配置 → AT 串口管理」重新扫描选择端口",
-        cfg.at_port
+            cfg.at_port
+        ));
+    }
+
+    // 有 Fibocom 口，但配置的路径打不开 —— 属于配置错误 / 编号漂移。
+    // 快速失败并列出候选，用户可直接照抄去改配置。
+    let list = fm350
+        .iter()
+        .map(|p| {
+            if p.stable.is_empty() {
+                p.path.clone()
+            } else {
+                format!("{}（稳定标识 {}）", p.path, p.stable)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    Some(format!(
+        "AT 口不可用：配置的 {} 不存在（模组在线，但可能 USB 重枚举后编号已漂移）。\
+当前发现 {} 个 Fibocom 串口：{}。\
+请到「高级配置 → AT 串口管理」重新选择端口（推荐选 ★ 稳定路径，编号漂移不受影响）",
+        cfg.at_port,
+        fm350.len(),
+        list
     ))
 }
 
