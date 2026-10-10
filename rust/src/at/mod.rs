@@ -44,8 +44,8 @@ pub use cmd as at_cmd;
 pub use guard::{block_reason, is_imei_write, IMEI_READ_CMD};
 pub use parse::{field, first, first_ipv4, has_error, is_ok, raw_lines, rows, scalar};
 pub use port::{
-    by_id_link, find_usb_attr, identify_at_port, is_candidate_tty, list_ports, looks_like_fm350,
-    stable_path, PortCandidate,
+    any_fm350_present, by_id_link, find_usb_attr, has_udev, identify_at_port, is_candidate_tty,
+    list_ports, looks_like_fm350, resolve_stable, stable_path, sysfs_stable_id, PortCandidate,
 };
 pub use urc::{snapshot as gt_snapshot, GtEvent};
 
@@ -409,8 +409,13 @@ impl AtHandle {
         // 配置里的端口变了就立刻换：丢弃旧句柄，下面按新端口重新独占打开。
         // 放在这里（而不是只靠 daemon 巡检）是为了让"改完即生效"，
         // 不受 poll_interval（默认 30 秒）制约。
-        if slot.port.is_some() && slot.port.as_ref().map(|p| p.path()) != Some(cfg.at_port.as_str())
-        {
+        //
+        // 解析稳定标识：配置可能是 `usb-usb2-2-1:1.6`（拓扑）或
+        // `/dev/serial/by-id/...`，必须先还原成**当前**实际的 tty 节点，
+        // 否则 open 必然失败。token 变了才算换口（编号漂移后 token 会变），
+        // 因此漂移也能被这里自动纠正。
+        let want = resolve_stable(cfg, &cfg.at_port);
+        if slot.port.is_some() && slot.port.as_ref().map(|p| p.path()) != Some(want.as_str()) {
             slot.port = None;
             slot.opened_at = None;
             slot.releases += 1;
@@ -432,7 +437,7 @@ impl AtHandle {
                         .unwrap_or_else(|| "模组端口暂不可用".into()));
                 }
             }
-            match AtPort::open(&cfg.at_port, cfg.baudrate, cfg.at_timeout) {
+            match AtPort::open(&want, cfg.baudrate, cfg.at_timeout) {
                 Ok(p) => {
                     slot.port = Some(p);
                     slot.open_failed_at = None;
@@ -592,7 +597,10 @@ impl AtHandle {
     /// `other_pids` 需要遍历 `/proc`，因此先把锁内状态取出来、释放锁之后再
     /// 扫描，避免拖长 AT 串行锁的占用时间。
     pub fn stats(&self, cfg: &crate::config::Config) -> AtStats {
+        // 展示用路径：配置原值（用户认得出自己填的是什么）
         let path = cfg.at_port.clone();
+        // 扫描用路径：解析后的真实节点（/proc/*/fd 里只会出现真节点）
+        let scan_path = resolve_stable(cfg, &cfg.at_port);
         let (open, held_secs, opens, releases) = match self.inner.lock() {
             Ok(g) => (
                 g.port.is_some(),
@@ -603,7 +611,7 @@ impl AtHandle {
             Err(_) => (false, 0, 0, 0),
         };
         let other_pids = if open {
-            other_openers(&path)
+            other_openers(&scan_path)
         } else {
             Vec::new()
         };

@@ -1014,8 +1014,11 @@ return view.extend({
 		s = m.section(form.NamedSection, 'main', 'fm350', _('AT 串口管理'));
 		s.description = _('插件独占 AT 口：fm350d 运行期间持续持有该端口并申请排他锁，'
 			+ '其它申请排他锁的程序将无法并发争抢；若有进程绕过锁强开，下方状态栏将直接列出其 PID。'
-			+ '候选端口带内核驱动标识与占用探测；★ 标记的 /dev/serial/by-id/… 为稳定路径，'
-			+ 'USB 重枚举后 ttyUSB 编号漂移时依然指向同一物理接口，推荐优先选用。更改端口保存即生效。');
+			+ '候选端口带内核驱动标识与占用探测。★ 标记的为稳定路径：'
+			+ 'udev 环境下是 /dev/serial/by-id/…（含 USB 序列号）；'
+			+ '精简固件（无 udev）下由内核 sysfs 的 USB 物理拓扑推导（形如 usb-usb2-2-1:1.6）。'
+			+ '两者都指向同一物理接口，USB 重枚举后 ttyUSB 编号漂移时依然有效，推荐优先选用。'
+			+ '更改端口保存即生效。');
 
 		/* 扫描失败或未发现候选端口时，给出显式诊断与操作指引，
 		   而不是只留下一个空下拉框让用户无从下手 */
@@ -1040,6 +1043,7 @@ return view.extend({
 			if (p.driver) parts.push(p.driver);
 			if (p.vid && p.pid) parts.push(p.vid + ':' + p.pid);
 			if (p.product) parts.push(p.product);
+			if (p.interface) parts.push(p.interface);
 
 			var tail = parts.length ? ' · ' + parts.join(' · ') : '';
 			var state = '';
@@ -1067,15 +1071,33 @@ return view.extend({
 		};
 
 		var seen = {};
+		/* 稳定路径可用性：by_id（udev，含序列号）优于拓扑标识（内核 sysfs，
+		   无 udev 也可用）。两者都没有时，说明后端拿不到稳定标识。 */
+		var hasAnyStable = false;
+
 		portList.forEach(function(p) {
 			o.value(p.path, portLabel(p));
 			seen[p.path] = true;
 
-			/* by-id 稳定别名：udev 以 USB 序列号 + 接口序号命名，重启 / 重枚举
-			   不变。后端自动改选已优先写入 by-id 路径，这里同步暴露给手动选择。 */
+			/* 1) by-id 稳定别名（udev 生成，含 USB 序列号，最稳）。
+			      udev 以 USB 序列号 + 接口序号命名，重启 / 重枚举不变。
+			      后端自动改选已优先写入 by-id 路径，这里同步暴露给手动选择。 */
 			if (p.by_id && !seen[p.by_id]) {
 				o.value(p.by_id, '★ ' + p.by_id + '（' + (p.product || p.name) + _('，稳定路径）'));
 				seen[p.by_id] = true;
+				hasAnyStable = true;
+			}
+
+			/* 2) 拓扑稳定标识（不依赖 udev）：精简固件（OpenWrt / ImmortalWrt
+			      默认 procd，不装 udev）上 /dev/serial/by-id 根本不存在，
+			      此前「稳定路径」在这些设备上是空功能。后端由 sysfs 的
+			      USB 物理拓扑推导出 usb-<bus>-<deviface> 形式标识，只要
+			      模组插在同一物理口就恒定，编号漂移也不受影响。 */
+			if (p.stable && !seen[p.stable]) {
+				o.value(p.stable, '★ ' + p.stable + '（' + (p.product || p.name)
+					+ _('，稳定路径·无需 udev）'));
+				seen[p.stable] = true;
+				hasAnyStable = true;
 			}
 		});
 
@@ -1083,6 +1105,20 @@ return view.extend({
 			o.value(curPort, curPort + _('（当前配置）'));
 
 		o.value('__custom__', _('手动输入其他路径…'));
+
+		/* 稳定路径不可用时的显式说明：不要让用户面对一个「推荐选 ★」
+		   却永远看不到 ★ 的下拉框。给出后端实际能力与替代方案。 */
+		if (!hasAnyStable && portList.length > 0) {
+			var stableHint = s.option(form.DummyValue, '_stable_hint', _('稳定路径可用性'));
+			stableHint.rawhtml = true;
+			stableHint.cfgvalue = function() {
+				return E('div', { 'class': 'fm350-hold-badge' },
+					_('本设备未提供稳定路径：后端既未发现 udev 生成的 '
+						+ '/dev/serial/by-id，也无法从 sysfs 推导 USB 拓扑标识。'
+						+ '此时请优先选择「疑似 FM350」标注的口；若 USB 重枚举后 '
+						+ 'ttyUSB 编号漂移导致失联，重新保存一次端口即可。'));
+			};
+		}
 
 		o.write = function(section_id, formvalue) {
 			if (formvalue === '__custom__')

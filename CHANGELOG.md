@@ -11,12 +11,18 @@
 高级配置页 `load()` 一次发 5 个调用（含逐口独占探测与 `AT+CFUN?`）→
 整条 ubus 通道被堵 20s × N → 全局 LuCI 瘫痪。
 
-- **第 0 层 · 缺席预检**（`route.rs`）：新增 `modem_absent()` —— 配置的
-  AT 口节点不存在且系统内无任何 Fibocom (2cb7) 候选口时，全部 AT 依赖
-  端点（status / info / signal / pdp / cell / lock / at / dial / imei /
-  rat / sim / cfun / usbmode / reboot / sms）亚毫秒返回明确错误（含排障
-  指引），不再进入 AT 串行队列。配置端口写错但模组在线时仍放行，由
-  open 错误本身指明配置问题。
+- **第 0 层 · 缺席预检**（`route.rs`）：新增 `modem_absent()`，**三态判定**：
+
+  1. 配置的 AT 口路径存在（含稳定标识解析后的真实节点）→ 放行；
+  2. 路径不存在且系统内**无任何** Fibocom (2cb7) 候选口 → 返回「模组未识别」，
+     亚毫秒快速失败并提示检查 USB / 供电；
+  3. 路径不存在但模组**在线**（有 Fibocom 口）→ 返回「AT 口不可用」，并列出
+     当前发现的全部 Fibocom 口及其稳定标识，引导改配——避免 USB 重枚举后
+     编号漂移造成的静默等待。
+
+  全部 AT 依赖端点（status / info / signal / pdp / cell / lock / at / dial /
+  imei / rat / sim / cfun / usbmode / reboot / sms）在命中前两态时不再进入
+  AT 串行队列。（实机实测：配置错口 + 模组在线场景从 894.9 ms 降至 220 ms。）
 - **第 1 层 · 打开熔断**（`at/mod.rs`）：独占打开失败后进入
   `OPEN_RETRY_COOLDOWN`（5s）冷却，期内直接复述上次错误不撞内核；
   用户改端口 / 自动改选写入新路径时熔断立即失效，新口即时生效。
@@ -30,11 +36,20 @@
 
 - `at/port.rs` 新增 `by_id_link()` / `stable_path()`：udev 以 USB 序列号 +
   接口序号命名，USB 重枚举导致 `ttyUSB*` 编号漂移时 by-id 别名仍指向
-  同一物理接口；无 udev 的精简固件自动回退原设备节点。
-- **自动改选优先写 by-id**：`identify_at_port()` 探测成功后经
-  `stable_path()` 返回，哑口 / 端口消失改选不再因编号漂移反复失联。
-- `PortCandidate` 新增 `by_id` 字段，`/api/ports` 与 CLI `ports` 直接
-  序列化；高级配置页端口下拉以 ★ 标记并列出稳定路径选项，推荐优先选用。
+  同一物理接口。
+- **sysfs 拓扑稳定标识兜底**（新增 `sysfs_stable_id()`）：**不依赖 udev**。
+  精简固件（ImmortalWrt 默认）常无 udev，`/dev/serial/by-id` 目录不存在，
+  by-id 方案实机零收益。改用内核 sysfs USB 拓扑推导稳定标识，形如
+  `usb-usb2-2-1:1.6`（bus + 设备路径 + 接口号），由 `canonicalize` 解析，
+  纯内核态、任何固件可用；`resolve_stable()` 负责把配置中的稳定标识还原为
+  当前真实节点，`list_ports()` 据此正确标记 `current`。
+- **自动改选优先写稳定路径**：`identify_at_port()` 探测成功后经
+  `stable_path()` 返回（有 udev 时 by-id，否则拓扑标识），哑口 / 端口消失
+  改选不再因编号漂移反复失联。
+- `PortCandidate` 新增 `by_id`、`stable`、`interface` 字段，`/api/ports`
+  与 CLI `ports` 直接序列化；高级配置页端口下拉以 ★ 标记并列出拓扑稳定
+  路径选项（标注「稳定路径·无需 udev」），无任何稳定标识时显式给出说明
+  占位而非静默留空。
 
 - 未修改 IMEI、NV 项或模组持久化数据。
 
