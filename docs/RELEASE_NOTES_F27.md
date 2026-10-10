@@ -4,12 +4,27 @@
 
 ## 1. 说明
 
-本固件基于 Fibocom 官方 **`no-OTA_29.24.02_F27`** 固件包修改（"no-OTA" 为官方发布的固件包变体名称，指该包不含 OTA 升级镜像，非本项目的修改），**修改目的为更适配 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件**：
+本固件基于 Fibocom 官方 **`no-OTA_29.24.02_F27`** 固件包修改（"no-OTA" 为官方发布的固件包变体名称，指该包不含 OTA 升级镜像，非本项目的修改），**修改目的为更适配 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件**，让数据面拨号与插件功能开箱可用。
 
-- 与 luci-app-fm350 插件的信号解析、拨号与组网逻辑更好配合；
-- 保留官方固件的拨号与网络功能不回退。
+### 修改内容（参照仓库固件改造记录）
 
-修改范围仅限 AP 侧系统分区（`root.squashfs`），modem 侧（`modem.img` / MOLY NR15）保持官方原版。
+修改范围仅限 AP 侧系统分区（`root.squashfs`），modem 侧（`modem.img` / MOLY NR15）保持官方原版。共三个部件：
+
+1. **atproxy v2**（`/usr/bin/atproxy`）：由模组内部在 PDN 就绪时机下发
+   `AT+EMBIND=1,"M-RNDIS",<cid>`，把 RNDIS 数据通道强制绑定到激活 PDN
+   （启动 20s 首绑 + 120s 周期保活）。主机侧直接发同一条 AT 不生效，
+   此为 RNDIS 数据面恢复的主路径。绑定结果以 `+GTEMBIND: rc=<n>,cid=<n>` URC 上报。
+2. **usb.init ADB 补丁**：对原厂 `/etc/init.d/usb.init` 的 boot_mode 三分支统一启用
+   `adbd_usb`（`0001` 分支补 `ffs.adb` function 链接），使 AP 域免认证 root ADB
+   在任何启动模式下随 USB 常开，便于调试。
+3. **dropbear SSH**：静态编译 dropbear 2024.86 + `-B` 空密码配置 + procd init，
+   经 `adb forward` 隧道转出 AP 域 shell（SSH-over-USB）。
+
+### 红线（与仓库改造记录一致）
+
+- **不下发 CGDCONT（APN）**：避免换卡场景改写模组 APN 导致断数据。
+- **不下发任何 IMEI 相关命令**：IMEI 操作仅限合法 NV 恢复场景。
+- atproxy 不透传原始 AT，唯一下行写命令是 EMBIND；不暴露 NetIF id。
 
 ## 2. 适用范围与校验信息
 
@@ -17,7 +32,7 @@
 |---|---|
 | 适用模组 | Fibocom FM350-GL（MT6880，k6880v1_mdot2_datacard） |
 | 基线固件版本 | 29.24.02 F27（官方 no-OTA 变体） |
-| 修改类型 | 仅 AP 侧适配 luci-app-fm350 |
+| 修改类型 | AP 侧：atproxy v2 EMBIND 强制绑定 + usb.init ADB 补丁 + dropbear SSH（见第 1 节） |
 | 文件名 | `Generic_29.24.02_F27.zip` |
 | 大小 | 50,525,259 字节（约 48.2 MiB） |
 | MD5 | `60e04e7dddb15df9bdc7d339b17505f7` |
@@ -60,6 +75,7 @@
 ### 注意事项
 
 - 本固件基于官方 no-OTA 变体，**请勿尝试混刷其他 OTA 包或对模组执行在线固件更新**。
+- 本固件含免认证 root ADB 与空密码 dropbear（均为 USB 通道调试用途），**模组 USB 口不要接入不受信任的主机/网络环境**。
 - 刷写过程断电、拔线可能导致模组变砖。
 - 刷写前确认模组电量/供电稳定（USB 直连建议使用带独立供电的口或短质量好的线）。
 - 严禁任何形式的 IMEI 篡改；IMEI 相关操作仅限合法的 NV 恢复场景，且需分步确认。
