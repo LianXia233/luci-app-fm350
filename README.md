@@ -30,6 +30,7 @@
 ## 目录
 
 - [快速开始](#快速开始)
+- [修改版固件（推荐搭配）](#修改版固件推荐搭配)
 - [界面预览](#界面预览)
 - [核心定位与架构概览](#核心定位与架构概览)
 - [功能特性清单](#功能特性清单)
@@ -89,6 +90,32 @@ rm -rf /tmp/luci-modulecache/
 - `fm350d` 是 Rust 静态二进制，不依赖 Python、Lua 后端脚本或额外 Web 服务。
 - 面向 FM350-GL 实机行为实现，不保证直接适配其它 T700 / 5G 模组。
 - IMEI 写入默认关闭，需同时开启 UCI 开关和二次确认；普通状态查看、拨号、短信、锁频不需要该开关。
+
+## 修改版固件（推荐搭配）
+
+本项目同步发布针对 FM350-GL 的**修改版固件**（基于官方 `no-OTA_29.24.02_F27` 包，
+修改目的为更适配本插件），完整发布说明（校验值、刷入步骤、NV 备份警告）见
+**[docs/RELEASE_NOTES_F27.md](docs/RELEASE_NOTES_F27.md)**。
+
+修改仅限 AP 侧 `root.squashfs`，modem 侧（MOLY NR15）保持官方原版，共三个部件：
+
+| 部件 | 作用 |
+| :--- | :--- |
+| **atproxy v2** | 模组内部在 PDN 就绪时机下发 `AT+EMBIND=1,"M-RNDIS",<cid>` 强制绑定 RNDIS 数据通道（启动 20s 首绑 + 120s 保活），主机侧直接发该 AT 不生效，是数据面恢复主路径 |
+| **usb.init ADB 补丁** | boot_mode 三分支统一启用 `adbd_usb`，AP 域免认证 root ADB 随 USB 常开 |
+| **dropbear SSH** | 静态 dropbear 2024.86（空密码 `-B`）+ procd init，经 `adb forward` 转出 AP 域 shell |
+
+红线：不下发 CGDCONT（APN）、不下发任何 IMEI 命令、atproxy 不透传原始 AT。
+
+> [!WARNING]
+> **刷入前必须先通过 AT 命令记录原始 IMEI / SN**（`AT+GSN`、`AT+CGSN` 等）。
+> IMEI / SN 丢失后模块无法注册运营商网络；丢失后可通过 AT 命令回写恢复，
+> 但前提是掌握原始值。未记录前请勿刷入。
+
+> [!NOTE]
+> 本固件含免认证 root ADB 与空密码 dropbear（USB 通道调试用途），模组 USB 口请勿接入不受信任的主机。
+
+未刷修改固件的设备上，本插件功能完全可用（EIF 增强为可选，见下文「EIF 兜底加速」）。
 
 ## 界面预览
 
