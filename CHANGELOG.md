@@ -2,6 +2,42 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.15-r4 (2026-10-10)
+
+### 修复：模组未识别 / 无模组时 LuCI 卡死（高级配置页拖垮全局）
+
+根因链：rpcd ucode 代理在主循环内**同步**转发后端调用 → 模组缺席时后端
+每条 AT 命令等满 `at_timeout`（哑口 10s）或触发改选探测（7 口 × 0.8s）→
+高级配置页 `load()` 一次发 5 个调用（含逐口独占探测与 `AT+CFUN?`）→
+整条 ubus 通道被堵 20s × N → 全局 LuCI 瘫痪。
+
+- **第 0 层 · 缺席预检**（`route.rs`）：新增 `modem_absent()` —— 配置的
+  AT 口节点不存在且系统内无任何 Fibocom (2cb7) 候选口时，全部 AT 依赖
+  端点（status / info / signal / pdp / cell / lock / at / dial / imei /
+  rat / sim / cfun / usbmode / reboot / sms）亚毫秒返回明确错误（含排障
+  指引），不再进入 AT 串行队列。配置端口写错但模组在线时仍放行，由
+  open 错误本身指明配置问题。
+- **第 1 层 · 打开熔断**（`at/mod.rs`）：独占打开失败后进入
+  `OPEN_RETRY_COOLDOWN`（5s）冷却，期内直接复述上次错误不撞内核；
+  用户改端口 / 自动改选写入新路径时熔断立即失效，新口即时生效。
+- **前端解耦**（`api.js` / `settings.js`）：全部后端调用加 `Promise.race`
+  超时护栏（读类 30s、写类 95s、modexec 35s），rpcd 异常时页面不再永久
+  转圈；高级配置页 `load()` 改为 `ports('0')` 纯 sysfs 只读扫描，移除
+  `AT+CFUN?` 阻塞加载——CFUN 开关先按「状态未知」渲染，页面渲染完成后
+  异步拉取注入；占用探测仅由「重新探测扫描」按钮显式触发。
+
+### 新增：/dev/serial/by-id 稳定路径
+
+- `at/port.rs` 新增 `by_id_link()` / `stable_path()`：udev 以 USB 序列号 +
+  接口序号命名，USB 重枚举导致 `ttyUSB*` 编号漂移时 by-id 别名仍指向
+  同一物理接口；无 udev 的精简固件自动回退原设备节点。
+- **自动改选优先写 by-id**：`identify_at_port()` 探测成功后经
+  `stable_path()` 返回，哑口 / 端口消失改选不再因编号漂移反复失联。
+- `PortCandidate` 新增 `by_id` 字段，`/api/ports` 与 CLI `ports` 直接
+  序列化；高级配置页端口下拉以 ★ 标记并列出稳定路径选项，推荐优先选用。
+
+- 未修改 IMEI、NV 项或模组持久化数据。
+
 ## 1.0.15-r3 (2026-09-27)
 
 ### 新增：模组命令操作台（ADB / SSH 双通道，LuCI 上下发命令）
