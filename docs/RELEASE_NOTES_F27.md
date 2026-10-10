@@ -1,24 +1,23 @@
-# FM350-GL F27 修改固件发布说明（v29.24.02 F27 / no-OTA）
+# FM350-GL F27 修改固件发布说明（v29.24.02 F27）
 
-> 本固件由 [LianXia233/luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 项目维护发布，为 Fibocom FM350-GL（MediaTek MT6880）官方 F27 工厂固件的修改版本。
+> 本固件由 [LianXia233/luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 项目维护发布，为 Fibocom FM350-GL（MediaTek MT6880）官方 F27 固件的修改版本。
 
 ## 1. 说明
 
-本固件基于 Fibocom 官方 `Generic_29.24.02_F27` 固件修改，**去除了 OTA 升级通道（no-OTA）**，并针对 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件做了适配调整，目的是：
+本固件基于 Fibocom 官方 **`no-OTA_29.24.02_F27`** 固件包修改（"no-OTA" 为官方发布的固件包变体名称，指该包不含 OTA 升级镜像，非本项目的修改），**修改目的为更适配 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件**：
 
 - 与 luci-app-fm350 插件的信号解析、拨号与组网逻辑更好配合；
-- 保留官方固件的拨号与网络功能不回退；
-- 关闭 OTA，防止使用中被运营商/官方 OTA 自动回刷覆盖修改。
+- 保留官方固件的拨号与网络功能不回退。
 
-修改范围仅限 AP 侧系统分区（`root.squashfs`）， modem 侧（`modem.img` / MOLY NR15）保持官方原版。
+修改范围仅限 AP 侧系统分区（`root.squashfs`），modem 侧（`modem.img` / MOLY NR15）保持官方原版。
 
 ## 2. 适用范围与校验信息
 
 | 项目 | 值 |
 |---|---|
 | 适用模组 | Fibocom FM350-GL（MT6880，k6880v1_mdot2_datacard） |
-| 基线固件版本 | 29.24.02 F27（Generic） |
-| 修改类型 | no-OTA + AP 侧适配 luci-app-fm350 |
+| 基线固件版本 | 29.24.02 F27（官方 no-OTA 变体） |
+| 修改类型 | 仅 AP 侧适配 luci-app-fm350 |
 | 文件名 | `Generic_29.24.02_F27.zip` |
 | 大小 | 50,525,259 字节（约 48.2 MiB） |
 | MD5 | `60e04e7dddb15df9bdc7d339b17505f7` |
@@ -60,7 +59,7 @@
 
 ### 注意事项
 
-- **禁止对模组执行在线/OTA 固件更新**，本固件已去除 OTA 通道，请勿尝试混刷其他 OTA 包。
+- 本固件基于官方 no-OTA 变体，**请勿尝试混刷其他 OTA 包或对模组执行在线固件更新**。
 - 刷写过程断电、拔线可能导致模组变砖。
 - 刷写前确认模组电量/供电稳定（USB 直连建议使用带独立供电的口或短质量好的线）。
 - 严禁任何形式的 IMEI 篡改；IMEI 相关操作仅限合法的 NV 恢复场景，且需分步确认。
