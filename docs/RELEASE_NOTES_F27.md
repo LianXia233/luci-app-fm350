@@ -1,0 +1,71 @@
+# FM350-GL F27 修改固件发布说明（v29.24.02 F27 / no-OTA）
+
+> 本固件由 [LianXia233/luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 项目维护发布，为 Fibocom FM350-GL（MediaTek MT6880）官方 F27 工厂固件的修改版本。
+
+## 1. 说明
+
+本固件基于 Fibocom 官方 `Generic_29.24.02_F27` 固件修改，**去除了 OTA 升级通道（no-OTA）**，并针对 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件做了适配调整，目的是：
+
+- 与 luci-app-fm350 插件的信号解析、拨号与组网逻辑更好配合；
+- 保留官方固件的拨号与网络功能不回退；
+- 关闭 OTA，防止使用中被运营商/官方 OTA 自动回刷覆盖修改。
+
+修改范围仅限 AP 侧系统分区（`root.squashfs`）， modem 侧（`modem.img` / MOLY NR15）保持官方原版。
+
+## 2. 适用范围与校验信息
+
+| 项目 | 值 |
+|---|---|
+| 适用模组 | Fibocom FM350-GL（MT6880，k6880v1_mdot2_datacard） |
+| 基线固件版本 | 29.24.02 F27（Generic） |
+| 修改类型 | no-OTA + AP 侧适配 luci-app-fm350 |
+| 文件名 | `Generic_29.24.02_F27.zip` |
+| 大小 | 50,525,259 字节（约 48.2 MiB） |
+| MD5 | `60e04e7dddb15df9bdc7d339b17505f7` |
+| SHA-256 | `9f9159efc5e6dd530fc61e9b3439f00289fd905a95b5bda4d036adfb47f779f0` |
+
+刷入前请务必校验上述哈希值，不匹配则停止操作。关键镜像分项校验：
+
+| 文件 | MD5 |
+|---|---|
+| `modem.img` | `9dfb1f11d206fd32b93e8384b62d3c63` |
+| `root.squashfs` | `677b62c6b251a2d7459df5ec1053b6bb` |
+
+## 3. ⚠️ 刷入前必须备份 IMEI / SN 分区
+
+> **⚠️ 警告：刷入本固件前，必须先备份存放 IMEI 和 SN 的 NV 分区（NVDATA）。**
+> **丢失 IMEI / SN 后模块将无法注册运营商网络（无信号、无串号），且 SN 不可由用户自行重建，属于不可逆损坏。**
+
+- **风险**：刷机过程或分区布局变化可能导致 NV 分区被擦除或校验失败。IMEI 丢失后模块插卡无服务；SN 丢失影响售后与质保。
+- **恢复方式**：恢复只能依赖刷机前备份的 NV 镜像回写（SP Flash Tool / 自定义 DA 回写 NVDATA 分区）。无备份时，IMEI 需借助专业工具写回且仅限 NV 恢复场景，SN 通常无法完整恢复。
+- **备份方法（刷入前执行）**：使用 SP Flash Tool 的 readback 功能读取 NVDATA 分区并单独保存；或通过 AT 通道/ADB 导出当前 IMEI、SN 记录留存（`AT+GSN`、`AT+CGSN`、`AT^SN` 等以官方 AT 手册为准）。
+
+**未完成 NV 备份前，请不要执行第 4 节的任何刷入操作。**
+
+## 4. 刷入步骤与注意事项
+
+### 前置准备
+
+1. 完成第 3 节 NV 备份，并确认备份文件可读、已另存。
+2. 下载固件包并校验 MD5 / SHA-256。
+3. 准备 Windows 主机、USB 数据线（模组直连）、SP Flash Tool（或等价的 MT6880 线刷工具）。
+
+### 刷入步骤
+
+1. 将模组进入刷机模式（BootROM / DA 模式），通过 USB 连接主机。
+2. 在 SP Flash Tool 中加载固件包内 `Scatter.xml`。
+3. **仅勾选需刷写的分区**：AP 侧 `root.squashfs`（及必要的 boot/lk 等），**切勿勾选 NVDATA / nvram / protect 分区**。
+4. 点击 Download 开始刷写，等待完成提示，不要中途断电或拔线。
+5. 重启模组，用 `AT+CGMR` 等命令确认固件版本为 `29.24.02 F27`，插卡验证拨号与网络。
+
+### 注意事项
+
+- **禁止对模组执行在线/OTA 固件更新**，本固件已去除 OTA 通道，请勿尝试混刷其他 OTA 包。
+- 刷写过程断电、拔线可能导致模组变砖。
+- 刷写前确认模组电量/供电稳定（USB 直连建议使用带独立供电的口或短质量好的线）。
+- 严禁任何形式的 IMEI 篡改；IMEI 相关操作仅限合法的 NV 恢复场景，且需分步确认。
+- 刷入后如信号/注册异常，优先排查 NV 分区是否完好，再排查 modem 配置。
+
+## 5. 问题反馈
+
+使用中遇到问题请在 [luci-app-fm350 Issues](https://github.com/LianXia233/luci-app-fm350/issues) 提交，附上模组型号、固件版本、AT 响应日志。
