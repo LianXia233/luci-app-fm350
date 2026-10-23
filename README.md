@@ -200,7 +200,7 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 | 模组识别 | 厂商、型号、固件版本、IMEI、序列号 (SN)、IMSI、ICCID、USB 模式、SIM 卡槽状态、短信中心 (SMSC) |
 | 网络状态 | 注册状态、运营商名称与代号、接入制式 (NR/LTE)、RSRP / RSRQ / SINR、频段 / PCI / ARFCN / TAC / 小区 ID、载波聚合 (CA) |
 | 温控监测 | 5G 基带核心温度 (`md_5g`)、SoC 峰值温度、全量 23 路独立硬件传感器明细（读数为 0 视为未装配，不计入活跃列表） |
-| 蜂窝拨号 | APN 配置、PDP 协议 (IPv4/IPv6/IPv4v6)、CID、认证协议、状态侦测、实时 IPv4/IPv6 地址与 DNS 提取 |
+| 蜂窝拨号 | APN 配置、PDP 协议 (IPv4/IPv6/IPv4v6)、CID、认证协议、状态侦测、实时 IPv4/IPv6 地址与 DNS 提取；拨号成功后按配置强制下发公共 DNS（默认 119.29.29.29 / 223.5.5.5 / 2402:4e00:: / 2400:3200::1） |
 | 路由守护 | 自动配置 IPv4 `/32` 静态接口与 IPv6 `/128` 静态子接口（地址取自模组侧 AT+CGPADDR，不依赖 RA/DHCPv6），自愈补齐缺失的默认路由 (`onlink`)，支持 Metric 跃点微调 |
 | 锁网锁频 | `AT+GTACT` 频段与制式锁定、`AT+EMMCHLCK` 物理小区 (PCI) 锁定、指定网络搜索优先级 |
 | 短信中心 | 规范 PDU 编解码（中文 UCS2、英文 GSM 7-bit 自动适配）、收件箱列表、单条/批量删除、存储容量查询 |
@@ -492,6 +492,11 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | `data_dev` | `auto` | 蜂窝数据通道网卡名，`auto` 依驱动自动探测 |
 | `metric` | `30` | 默认路由跃点优先级 |
 | `ipv6` | `1` | 是否创建并接管 IPv6 子接口 |
+| `dns_force` | `1` | 拨号成功后是否强制下发固定公共 DNS（覆盖 `AT+GTDNS` / `AT+CGCONTRDP` 上报的运营商 DNS），并自动写入 `peerdns=0` |
+| `dns4_primary` | `119.29.29.29` | 强制 DNS 的 IPv4 首选服务器 |
+| `dns4_secondary` | `223.5.5.5` | 强制 DNS 的 IPv4 备用服务器 |
+| `dns6_primary` | `2402:4e00::` | 强制 DNS 的 IPv6 首选服务器（`ipv6=0` 或 `v6_mode=off` 时不下发） |
+| `dns6_secondary` | `2400:3200::1` | 强制 DNS 的 IPv6 备用服务器（`ipv6=0` 或 `v6_mode=off` 时不下发） |
 | `extendprefix` | `1` | **插件侧已废弃（1.0.3 起）**，后端不消费此字段；`v6_mode=dhcpv6` 时插件会自动在 `fm350v6` 接口上写入 `extendprefix=1` |
 | `auto_dial` | `1` | 服务启动后自动拨号 |
 | `route_guard` | `1` | 默认路由自愈守护 |

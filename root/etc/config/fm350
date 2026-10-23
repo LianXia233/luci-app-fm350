@@ -14,6 +14,14 @@ config main 'main'
 	option data_dev 'auto'
 	option metric '30'
 	option ipv6 '1'
+	# 强制 DNS：拨号成功后把以下公共 DNS 写入 fm350 / fm350v6 接口，
+	# 覆盖模组（运营商）上报的 DNS；peerdns=0 由插件自动下发。
+	# 置 0 可恢复旧行为：沿用 AT+GTDNS / AT+CGCONTRDP 上报的 DNS。
+	option dns_force '1'
+	option dns4_primary '119.29.29.29'
+	option dns4_secondary '223.5.5.5'
+	option dns6_primary '2402:4e00::'
+	option dns6_secondary '2400:3200::1'
 	# IPv6 获取方式：dhcpv6（odhcp6c + extendprefix 前缀委派，默认）/
 	# ra（内核收 RA）/ static（模组侧地址静态 /128）/ off（不托管）
 	option v6_mode 'dhcpv6'

@@ -134,7 +134,14 @@ impl DialWatch {
                 }
                 self.dial_fail_rounds = 0;
                 self.retry_after = None;
-                match net::apply_after_dial(cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4) {
+                match net::apply_after_dial(
+                    cfg,
+                    &p.ipv4,
+                    &p.ipv6,
+                    &p.dns,
+                    &p.gw4,
+                    &p.netmask4,
+                ) {
                     Ok(n) => infof!(format_args!("已拨号并配置网络 {:?}", n.ipv4)),
                     Err(e) => warnf!(format_args!("配置网络失败: {}", e)),
                 }
@@ -194,7 +201,14 @@ impl DialWatch {
         // 把错误吞掉，出现过「模组 PDP 正常、主机侧却一直没有 IP」的静默
         // 故障。成功时只在确有偏差的那一轮打印，不会每轮刷屏。
         if !ns.ipv4.contains(&st.ipv4) {
-            match net::apply_after_dial(cfg, &st.ipv4, &st.ipv6, &st.dns, &st.gw4) {
+            match net::apply_after_dial(
+                cfg,
+                &st.ipv4,
+                &st.ipv6,
+                &st.dns,
+                &st.gw4,
+                &st.netmask4,
+            ) {
                 Ok(n) => {
                     infof!(format_args!(
                         "接口缺失或地址变化，已重新应用网络配置 {:?}",
@@ -214,6 +228,14 @@ impl DialWatch {
         // 一旦不是 1 就永远补不回来（LuCI 显示「开机时未启动」）。这里每轮
         // 无条件校验一次，成本 2~4 次 `uci get`；仅在确有修正时打日志。
         report_autostart(cfg);
+
+        // 强制 DNS 漂移复核：配置改动或外部脚本覆盖 UCI 时，地址通常不变，
+        // 只有这里会定期把 DNS 拉回强制值。无漂移时只有几次 uci get。
+        match net::enforce_forced_dns(cfg) {
+            Ok(true) => infof!(format_args!("已恢复强制 DNS 到接口 {}", cfg.iface)),
+            Ok(false) => {}
+            Err(e) => warnf!(format_args!("恢复强制 DNS 失败: {}", e)),
+        }
     }
 
     /// 已激活但没有 IPv4：v6-only 会话照常配，两个族都空则累计后强制重拨。
@@ -234,12 +256,24 @@ impl DialWatch {
             // 判据与 `needs_refresh` 保持一致：dhcpv6 / ra 模式下接口地址本来
             // 就不等于模组上报值，按相等判定会每轮命中、把 v6 子接口反复弹起。
             if net::needs_refresh(cfg, &st.ipv6, &ns.ipv6).is_some() {
-                match net::apply_after_dial(cfg, "", &st.ipv6, &st.dns, &st.gw4) {
+                match net::apply_after_dial(
+                    cfg,
+                    "",
+                    &st.ipv6,
+                    &st.dns,
+                    &st.gw4,
+                    &st.netmask4,
+                ) {
                     Ok(_) => infof!(format_args!("IPv6-only 会话已配置到 {}", cfg.iface)),
                     Err(e) => warnf!(format_args!("IPv6-only 会话配置失败: {}", e)),
                 }
             }
             report_autostart(cfg);
+            match net::enforce_forced_dns(cfg) {
+                Ok(true) => infof!(format_args!("已恢复强制 DNS 到接口 {}", cfg.iface)),
+                Ok(false) => {}
+                Err(e) => warnf!(format_args!("恢复强制 DNS 失败: {}", e)),
+            }
             return;
         }
 
@@ -296,7 +330,7 @@ pub fn redial(at: &AtHandle, cfg: &Config) -> bool {
     std::thread::sleep(Duration::from_secs(3));
     match modem::dial(at, cfg) {
         Ok(p) if !p.ipv4.is_empty() || !p.ipv6.is_empty() => {
-            net::apply_after_dial(cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4).is_ok()
+            net::apply_after_dial(cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4, &p.netmask4).is_ok()
         }
         Ok(_) => false,
         Err(e) => {

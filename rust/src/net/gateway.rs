@@ -65,6 +65,20 @@ fn mask_or(cfg: &Config, dflt: &str) -> String {
     }
 }
 
+/// 掩码优先级：用户显式配置 > 模组 `AT+CGCONTRDP` 上报 > 模式默认值。
+///
+/// 手册 §12.2.10 的字段 3 自带真实子网掩码，比「同网段 .1 → /24」的猜测
+/// 可靠得多。模组未上报（旧固件字段为空 / 非法）时才回落到默认值。
+fn mask_with_modem(cfg: &Config, modem_mask: &str, dflt: &str) -> String {
+    if !cfg.netmask.is_empty() {
+        return cfg.netmask.clone();
+    }
+    if crate::addr::is_valid_netmask4(modem_mask.trim()) {
+        return modem_mask.trim().to_string();
+    }
+    dflt.to_string()
+}
+
 /// 模组上报网关的采信条件：本身是合法 IPv4，且不等于本机地址
 /// （`AT+CGCONTRDP` 偶发回 `0.0.0.0` 或与 PDP 地址相同的占位值）。
 fn valid_modem_gw(modem_gw: &str, ipv4: &str) -> Option<String> {
@@ -104,25 +118,37 @@ pub fn in_same_subnet(ip: &str, gw: &str, mask: &str) -> bool {
 /// 规划本轮要使用的掩码与网关。返回 `(netmask, Option<gateway>)`；
 /// `None` 表示沿用无网关的 onlink 设备路由（历史行为）。
 ///
-/// auto 模式**优先采信模组上报值**（`modem_gw` 来自 `AT+CGCONTRDP` 字段位 4），
-/// 仅在模组未报时才回退到「同网段 .1」启发式 —— 运营商真实网关并不总是 `.1`。
-/// 模组上报网关与地址不同网段时掩码仍按 `/24` 规划，由 `iface::ensure_iface`
-/// 另装 `<gw>/32` 主机路由保证网关可达。
-pub fn plan_gateway(cfg: &Config, ipv4: &str, modem_gw: &str) -> (String, Option<String>) {
+/// auto 模式**优先采信模组上报值**（`modem_gw` 来自 `AT+CGCONTRDP` 字段位 4，
+/// `modem_mask` 来自字段位 3 的 `<local_addr and subnet_mask>`），仅在模组
+/// 未报时才回退到「同网段 .1」启发式 —— 运营商真实网关并不总是 `.1`。
+/// 模组上报网关与地址不同网段时掩码仍按模组值（缺失时 `/24`）规划，由
+/// `iface::ensure_iface` 另装 `<gw>/32` 主机路由保证网关可达。
+pub fn plan_gateway(
+    cfg: &Config,
+    ipv4: &str,
+    modem_gw: &str,
+    modem_mask: &str,
+) -> (String, Option<String>) {
     match cfg.gateway_mode.as_str() {
         "off" => (mask_or(cfg, "255.255.255.255"), None),
         "static" => {
             if cfg.gateway.is_empty() {
                 (mask_or(cfg, "255.255.255.255"), None)
             } else {
-                (mask_or(cfg, "255.255.255.0"), Some(cfg.gateway.clone()))
+                (
+                    mask_with_modem(cfg, modem_mask, "255.255.255.0"),
+                    Some(cfg.gateway.clone()),
+                )
             }
         }
         // auto（默认）
         _ => {
             let candidate = valid_modem_gw(modem_gw, ipv4).or_else(|| derive_gateway(ipv4));
             match candidate {
-                Some(gw) => (mask_or(cfg, "255.255.255.0"), Some(gw)),
+                Some(gw) => (
+                    mask_with_modem(cfg, modem_mask, "255.255.255.0"),
+                    Some(gw),
+                ),
                 None => (mask_or(cfg, "255.255.255.255"), None),
             }
         }
@@ -169,7 +195,8 @@ pub fn current_gateway(cfg: &Config) -> Option<String> {
 /// 接口上有地址时强制重新下发。
 pub fn config_sig(cfg: &Config) -> String {
     format!(
-        "metric={}|gw_mode={}|gw={}|mask={}|dev={}|ipv6={}|v6_mode={}|iface={}|iface_v6={}",
+        "metric={}|gw_mode={}|gw={}|mask={}|dev={}|ipv6={}|v6_mode={}|iface={}|iface_v6={}|\
+         dns_force={}|dns4p={}|dns4s={}|dns6p={}|dns6s={}",
         cfg.metric,
         cfg.gateway_mode,
         cfg.gateway,
@@ -178,7 +205,12 @@ pub fn config_sig(cfg: &Config) -> String {
         cfg.ipv6,
         cfg.v6_mode,
         cfg.iface,
-        cfg.iface_v6
+        cfg.iface_v6,
+        cfg.dns_force,
+        cfg.dns4_primary,
+        cfg.dns4_secondary,
+        cfg.dns6_primary,
+        cfg.dns6_secondary
     )
 }
 
@@ -212,11 +244,21 @@ pub fn configured_dns(cfg: &Config) -> Vec<String> {
     }
 }
 
+/// 读取 UCI 里接口当前的掩码（参数重下发时作为模组掩码的等价物保留）。
+pub fn configured_netmask(cfg: &Config) -> String {
+    let (ok, out) = real(&format!("uci -q get network.{}.netmask", cfg.iface));
+    if ok {
+        out.trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
 // ---------------------------------------------------------------- 实测与回退
 
 /// 网关 ARP 实测与回退。**必须在地址已落进内核之后调用。**
-pub fn finalize_gateway(cfg: &Config, dev: &str, ipv4: &str, modem_gw: &str) {
-    let (_, plan_gw) = plan_gateway(cfg, ipv4, modem_gw);
+pub fn finalize_gateway(cfg: &Config, dev: &str, ipv4: &str, modem_gw: &str, modem_mask: &str) {
+    let (_, plan_gw) = plan_gateway(cfg, ipv4, modem_gw, modem_mask);
     if let Some(gw) = plan_gw {
         sleep(Duration::from_millis(500));
         if probe_gateway(dev, &gw) {
@@ -265,27 +307,55 @@ pub fn fallback_to_onlink(cfg: &Config, dev: &str, gw: &str) {
     ));
 }
 
-/// DNS 是否真的写进了 UCI。
+/// DNS 是否真的按预期写进了 UCI。
 ///
 /// 调用方给了 DNS 却没写进去（批量静默失败 / 被 revert）时必须报错，
 /// 否则 resolver 会停在陈旧 DNS 上，表现为「能 ping 通 IP 但打不开网页」。
-pub fn dns_matches(cfg: &Config, dns: &[String]) -> Result<(), String> {
-    if dns.is_empty() {
-        return Ok(());
+///
+/// `modem_dns` 是模组上报值；`dns_force=1` 时这里校验的是配置项里的固定
+/// 公共 DNS，而不是模组值。IPv6 子接口单独校验。
+pub fn dns_matches(cfg: &Config, modem_dns: &[String]) -> Result<(), String> {
+    let want = super::dns::effective(cfg, modem_dns);
+    if !want.is_empty() {
+        let cur = configured_dns(cfg);
+        if !super::dns::same_servers(&cur, &want) {
+            return Err(format!(
+                "地址已就位但 DNS 配置缺失（期望 {:?}，uci 实际 {:?}）",
+                want, cur
+            ));
+        }
+        let (ok_peer, peer) = real(&format!("uci -q get network.{}.peerdns", cfg.iface));
+        if ok_peer && peer.trim() != "0" {
+            return Err(format!(
+                "network.{}.peerdns 应为 0，实际为 {}",
+                cfg.iface,
+                peer.trim()
+            ));
+        }
     }
-    let cur = configured_dns(cfg);
-    let missing: Vec<&String> = dns
-        .iter()
-        .filter(|d| !cur.iter().any(|x| x.as_str() == d.as_str()))
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "地址已就位但 DNS 配置缺失（期望含 {:?}，uci 实际 {:?}）",
-            missing, cur
-        ))
+
+    if cfg.dns_force
+        && cfg.ipv6
+        && !cfg.iface_v6.is_empty()
+        && super::v6::v6_managed(cfg)
+    {
+        let want6 = super::dns::effective_v6(cfg, modem_dns);
+        if !want6.is_empty() {
+            let (ok6, cur6) = real(&format!("uci -q get network.{}.dns", cfg.iface_v6));
+            let cur6: Vec<String> = if ok6 {
+                cur6.split_whitespace().map(str::to_string).collect()
+            } else {
+                Vec::new()
+            };
+            if !super::dns::same_servers(&cur6, &want6) {
+                return Err(format!(
+                    "IPv6 子接口 DNS 配置缺失（期望 {:?}，uci 实际 {:?}）",
+                    want6, cur6
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 /// 把 DNS 列表拼成 uci 多值写法（整体加引号，见 [`sq`] 的必要性说明）。
@@ -323,20 +393,29 @@ mod tests {
             ..base()
         };
         assert_eq!(
-            plan_gateway(&auto, "10.8.217.45", "").1.as_deref(),
+            plan_gateway(&auto, "10.8.217.45", "", "").1.as_deref(),
             Some("10.8.217.1")
         );
-        assert_eq!(plan_gateway(&auto, "10.8.217.45", "").0, "255.255.255.0");
+        assert_eq!(
+            plan_gateway(&auto, "10.8.217.45", "", "").0,
+            "255.255.255.0"
+        );
         // 公网地址：模组未报网关时不推导，掩码回到 /32
-        assert_eq!(plan_gateway(&auto, "36.112.8.10", "").1, None);
-        assert_eq!(plan_gateway(&auto, "36.112.8.10", "").0, "255.255.255.255");
+        assert_eq!(plan_gateway(&auto, "36.112.8.10", "", "").1, None);
+        assert_eq!(
+            plan_gateway(&auto, "36.112.8.10", "", "").0,
+            "255.255.255.255"
+        );
 
         let off = Config {
             gateway_mode: "off".into(),
             ..base()
         };
-        assert_eq!(plan_gateway(&off, "10.8.217.45", "").1, None);
-        assert_eq!(plan_gateway(&off, "10.8.217.45", "").0, "255.255.255.255");
+        assert_eq!(plan_gateway(&off, "10.8.217.45", "", "").1, None);
+        assert_eq!(
+            plan_gateway(&off, "10.8.217.45", "", "").0,
+            "255.255.255.255"
+        );
 
         let st = Config {
             gateway_mode: "static".into(),
@@ -344,7 +423,7 @@ mod tests {
             ..base()
         };
         assert_eq!(
-            plan_gateway(&st, "10.8.217.45", "").1.as_deref(),
+            plan_gateway(&st, "10.8.217.45", "", "").1.as_deref(),
             Some("10.8.217.254")
         );
     }
@@ -357,27 +436,63 @@ mod tests {
         };
         // 模组上报的网关优先于「同网段 .1」推导
         assert_eq!(
-            plan_gateway(&auto, "10.8.217.45", "10.8.217.254").1.as_deref(),
+            plan_gateway(&auto, "10.8.217.45", "10.8.217.254", "")
+                .1
+                .as_deref(),
             Some("10.8.217.254")
         );
         // 占位网关 0.0.0.0 不采信，回退推导
         assert_eq!(
-            plan_gateway(&auto, "10.8.217.45", "0.0.0.0").1.as_deref(),
+            plan_gateway(&auto, "10.8.217.45", "0.0.0.0", "").1.as_deref(),
             Some("10.8.217.1")
         );
         // 模组网关 == 本机地址：不采信
         assert_eq!(
-            plan_gateway(&auto, "10.8.217.45", "10.8.217.45").1.as_deref(),
+            plan_gateway(&auto, "10.8.217.45", "10.8.217.45", "")
+                .1
+                .as_deref(),
             Some("10.8.217.1")
         );
         // 公网地址 + 模组上报网关：采信上报值
-        let (m, g) = plan_gateway(&auto, "36.112.8.10", "36.112.8.1");
+        let (m, g) = plan_gateway(&auto, "36.112.8.10", "36.112.8.1", "");
         assert_eq!(g.as_deref(), Some("36.112.8.1"));
         assert_eq!(m, "255.255.255.0");
         // 异网段网关仍采信（主机路由由 ensure_iface 补）
-        let (m2, g2) = plan_gateway(&auto, "10.8.217.45", "172.16.0.1");
+        let (m2, g2) = plan_gateway(&auto, "10.8.217.45", "172.16.0.1", "");
         assert_eq!(g2.as_deref(), Some("172.16.0.1"));
         assert_eq!(m2, "255.255.255.0");
+    }
+
+    /// 手册 §12.2.10 的模组掩码优先于默认 /24，用户显式配置又优先于模组值。
+    #[test]
+    fn modem_subnet_mask_beats_default_but_not_user_override() {
+        let auto = Config {
+            gateway_mode: "auto".into(),
+            ..base()
+        };
+        let (mask, gw) = plan_gateway(&auto, "10.8.217.45", "", "255.255.255.252");
+        assert_eq!(mask, "255.255.255.252");
+        assert_eq!(gw.as_deref(), Some("10.8.217.1"));
+
+        let user = Config {
+            netmask: "255.255.0.0".into(),
+            ..auto.clone()
+        };
+        assert_eq!(
+            plan_gateway(&user, "10.8.217.45", "", "255.255.255.252").0,
+            "255.255.0.0"
+        );
+
+        // 非法/缺失掩码回落默认 /24
+        assert_eq!(
+            plan_gateway(&auto, "10.8.217.45", "", "255.0.255.0").0,
+            "255.255.255.0"
+        );
+        // 无网关时仍用 /32，不因模组掩码放宽（避免对整段公网逐 IP ARP）
+        assert_eq!(
+            plan_gateway(&auto, "36.112.8.10", "", "255.255.255.0").0,
+            "255.255.255.255"
+        );
     }
 
     #[test]

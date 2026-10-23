@@ -38,6 +38,101 @@ pub fn is_valid_ipv4(s: &str) -> bool {
     numeric && s != "0.0.0.0"
 }
 
+/// 是否为合法 IPv4 子网掩码（点分十进制、四段、且为连续 1）。
+///
+/// 手册 §12.2.10 的 `<local_addr and subnet_mask>` 会把地址与掩码拼成
+/// `a1.a2.a3.a4.m1.m2.m3.m4` 一起上报。掩码必须连续，`255.0.255.0`
+/// 这类非连续值直接拒绝，避免把错误掩码写进 netifd。
+pub fn is_valid_netmask4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    let mut bits: u32 = 0;
+    for p in parts {
+        if p.is_empty() || p.len() > 3 || !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        match p.parse::<u16>() {
+            Ok(n) if n <= 255 => bits = (bits << 8) | n as u32,
+            _ => return false,
+        }
+    }
+    // 连续 1：取反后必须是 2^n - 1（0 掩码单独拒绝）。
+    if bits == 0 {
+        return false;
+    }
+    let inv = !bits;
+    inv & inv.wrapping_add(1) == 0
+}
+
+/// `AT+CGCONTRDP` 字段 3（`<local_addr and subnet_mask>`）的解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContrAddr {
+    /// 归一化后的地址（IPv6 已转成冒号写法）。
+    pub addr: String,
+    /// IPv4 掩码（手册规定随地址一起上报；未上报时为 `None`）。
+    pub mask: Option<String>,
+    /// 是否为 IPv6。
+    pub v6: bool,
+}
+
+/// 解析 `AT+CGCONTRDP` 的 `<local_addr and subnet_mask>`。
+///
+/// 手册 §12.2.10 的形态：
+///   * IPv4：`a1.a2.a3.a4.m1.m2.m3.m4`（8 段），也兼容只回 4 段地址的固件；
+///   * IPv6：16 段地址 + 16 段掩码（32 段），也兼容只回 16 段地址。
+///
+/// 仅接受合法地址；掩码非法时保留地址、丢弃掩码（上层回落到默认掩码），
+/// 不因为掩码异常把整个地址判死。
+pub fn parse_contrdp_addr(s: &str) -> Option<ContrAddr> {
+    let s = s.trim().trim_matches('"');
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    match parts.len() {
+        4 => {
+            if is_valid_ipv4(s) {
+                Some(ContrAddr {
+                    addr: s.to_string(),
+                    mask: None,
+                    v6: false,
+                })
+            } else {
+                None
+            }
+        }
+        8 => {
+            let addr = parts[..4].join(".");
+            let mask = parts[4..].join(".");
+            if !is_valid_ipv4(&addr) {
+                return None;
+            }
+            Some(ContrAddr {
+                addr,
+                mask: is_valid_netmask4(&mask).then_some(mask),
+                v6: false,
+            })
+        }
+        16 => normalize_ipv6(s).map(|addr| ContrAddr {
+            addr,
+            mask: None,
+            v6: true,
+        }),
+        32 => {
+            let addr = normalize_ipv6(&parts[..16].join("."))?;
+            let mask = parts[16..].join(".");
+            Some(ContrAddr {
+                addr,
+                mask: Some(mask),
+                v6: true,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// 是否为链路本地 IPv6（`fe80::/10`，首组落在 `fe80`~`febf`）。
 ///
 /// 任何 UP 的网卡都会自带一个 link-local 地址，把它计入「有 IPv6」
@@ -307,5 +402,53 @@ mod tests {
         assert!(looks_v6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1")); // 占位也算 v6 位出现
         assert!(!looks_v6("10.5.23.212"));
         assert!(!looks_v6(""));
+    }
+
+    /// 手册 §12.2.10：IPv4 的字段 3 是「地址 + 掩码」8 段拼接。
+    #[test]
+    fn contrdp_parses_ipv4_with_subnet_mask() {
+        let p = parse_contrdp_addr("10.5.23.212.255.255.255.0").unwrap();
+        assert_eq!(p.addr, "10.5.23.212");
+        assert_eq!(p.mask.as_deref(), Some("255.255.255.0"));
+        assert!(!p.v6);
+    }
+
+    #[test]
+    fn contrdp_accepts_bare_ipv4_from_old_firmware() {
+        let p = parse_contrdp_addr("10.5.23.212").unwrap();
+        assert_eq!(p.addr, "10.5.23.212");
+        assert_eq!(p.mask, None);
+        assert!(!p.v6);
+    }
+
+    #[test]
+    fn contrdp_parses_dotted_ipv6_and_mask() {
+        let addr = "36.9.128.87.32.0.0.0.0.0.0.0.0.0.0.8";
+        let mask = "255.255.255.255.255.255.255.255.255.255.255.255.255.255.255.255";
+        let p = parse_contrdp_addr(&format!("{}.{}", addr, mask)).unwrap();
+        assert_eq!(p.addr, "2409:8057:2000::8");
+        assert!(p.v6);
+    }
+
+    #[test]
+    fn contrdp_rejects_dummy_and_bad_mask() {
+        // 占位地址（全零 / ::1）必须拒绝
+        assert!(parse_contrdp_addr("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1").is_none());
+        // 非连续掩码：保留地址、丢弃掩码
+        let p = parse_contrdp_addr("10.5.23.212.255.0.255.0").unwrap();
+        assert_eq!(p.addr, "10.5.23.212");
+        assert_eq!(p.mask, None);
+    }
+
+    #[test]
+    fn netmask_validation_requires_contiguous_ones() {
+        assert!(is_valid_netmask4("255.255.255.0"));
+        assert!(is_valid_netmask4("255.255.255.252"));
+        assert!(is_valid_netmask4("255.255.255.255"));
+        assert!(is_valid_netmask4("128.0.0.0"));
+        assert!(!is_valid_netmask4("255.0.255.0"));
+        assert!(!is_valid_netmask4("0.0.0.0"));
+        assert!(!is_valid_netmask4("255.255.255"));
+        assert!(!is_valid_netmask4("256.0.0.0"));
     }
 }

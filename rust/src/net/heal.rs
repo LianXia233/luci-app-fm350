@@ -320,11 +320,12 @@ pub fn apply_after_dial(
     ipv6: &str,
     dns: &[String],
     modem_gw: &str,
+    modem_mask: &str,
 ) -> Result<NetStatus, String> {
     if ipv4.is_empty() && ipv6.is_empty() {
         return Err("缺少 IPv4/IPv6 地址，无法配置接口".to_string());
     }
-    ensure_iface(cfg, ipv4, ipv6, dns, modem_gw)?;
+    ensure_iface(cfg, ipv4, ipv6, dns, modem_gw, modem_mask)?;
 
     // `ifup` 是异步的：netifd 受理后，地址要过一会儿才落进内核。直接读一次
     // status() 常常读到空地址，于是把「刚拨上」误报成失败；反过来，网卡名配错
@@ -358,7 +359,7 @@ pub fn apply_after_dial(
     // onlink 方案。
     if !ipv4.is_empty() {
         if let Some(dev) = detect_dev(cfg) {
-            finalize_gateway(cfg, &dev, ipv4, modem_gw);
+            finalize_gateway(cfg, &dev, ipv4, modem_gw, modem_mask);
             // fallback 可能触发了 ifup，重新读一次状态（下方直接返回它）
             last = status(cfg);
         }

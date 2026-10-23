@@ -40,6 +40,8 @@ pub struct NetStatus {
     pub default6: bool,
     /// UCI 里为接口配置的 DNS 列表（`peerdns=0`，由本插件下发）。
     pub dns: Vec<String>,
+    /// IPv6 子接口上配置的 DNS 列表（v6_mode 托管时由本插件下发）。
+    pub dns6: Vec<String>,
 }
 
 /// 读取当前网络状态。
@@ -84,6 +86,12 @@ pub fn status(cfg: &Config) -> NetStatus {
     let (dns_ok, dns_out) = real(&format!("uci -q get network.{}.dns", cfg.iface));
     if dns_ok {
         st.dns = dns_out.split_whitespace().map(|s| s.to_string()).collect();
+    }
+    if !cfg.iface_v6.is_empty() {
+        let (dns6_ok, dns6_out) = real(&format!("uci -q get network.{}.dns", cfg.iface_v6));
+        if dns6_ok {
+            st.dns6 = dns6_out.split_whitespace().map(|s| s.to_string()).collect();
+        }
     }
     st
 }
@@ -158,7 +166,9 @@ fn session_address_cleanup_commands(cfg: &Config) -> Vec<String> {
 /// 返回（接口名, 数据网卡, 已执行的 UCI 命令列表）。
 ///
 /// `modem_gw`：模组侧 `AT+CGCONTRDP` 上报的 IPv4 网关（可空），auto 模式下
-/// 由 [`plan_gateway`] 优先采信。网关的 ARP 实测**不在这里做** —— ifup 是
+/// 由 [`plan_gateway`] 优先采信。
+/// `modem_mask`：同命令字段 3 上报的 IPv4 子网掩码（可空），优先于默认 /24。
+/// 网关的 ARP 实测**不在这里做** —— ifup 是
 /// 异步的，此时地址多半还没落进内核，固定等待 + 必失败的探测会把会话误判为
 /// 「网关不可达」并回退到 onlink 方案；实测已移到 [`super::heal::apply_after_dial`]
 /// 的地址轮询之后。
@@ -168,6 +178,7 @@ pub fn ensure_iface(
     ipv6: &str,
     dns: &[String],
     modem_gw: &str,
+    modem_mask: &str,
 ) -> Result<(String, String, Vec<String>), String> {
     let dev = detect_dev(cfg).ok_or_else(|| "未探测到数据通道网卡".to_string())?;
     let iface = &cfg.iface;
@@ -178,13 +189,17 @@ pub fn ensure_iface(
     // 只有确实要下发 IPv4 时才做网关规划；无 v4（IPv6-only 会话）时不触碰
     // 网关计划，改为清理会制造黑洞的 v4 残留。
     let (plan_mask, plan_gw) = if have_v4 {
-        plan_gateway(cfg, ipv4, modem_gw)
+        plan_gateway(cfg, ipv4, modem_gw, modem_mask)
     } else {
         (String::new(), None)
     };
     let mask = plan_mask.as_str();
     // `v6_mode=off` 时既不创建也不登记 fm350v6。
     let v6_section = cfg.ipv6 && !iface_v6.is_empty() && v6_managed(cfg);
+    // DNS 在写入 UCI 前就完成「强制/沿用模组」的决策：
+    // 主接口持有 v4+v6 全量，v6 子接口只写 v6 组。
+    let dns_main = super::dns::effective(cfg, dns);
+    let dns_v6 = super::dns::effective_v6(cfg, dns);
 
     let mut cmds: Vec<String> = Vec::new();
     // 不走 uci_batch 的完整 shell 命令（删除类）：删除不存在的项会返回非零，
@@ -233,10 +248,11 @@ pub fn ensure_iface(
     }
 
     // DNS：有则覆盖，无则清空（换 APN 后旧 DNS 不得残留）。
-    if !dns.is_empty() {
+    // dns_force=1 时这里写的是配置项里的固定公共 DNS，而不是模组上报值。
+    if !dns_main.is_empty() {
         // 必须整体加引号：多值 dns 含空格，裸写会被 `sh -c` 拆成两个参数，
         // uci 直接 rc=255，整批写入判失败，ifup 被短路 —— 接口从此起不来。
-        cmds.push(format!("set network.{}.dns={}", iface, sq(&dns.join(" "))));
+        cmds.push(format!("set network.{}.dns={}", iface, sq(&dns_main.join(" "))));
     } else {
         shell_cmds.push(format!(
             "uci -q delete network.{}.dns 2>/dev/null || true",
@@ -288,6 +304,22 @@ pub fn ensure_iface(
             }
         }
         cmds.push(format!("set network.{}.auto=1", iface_v6));
+        // IPv6 子接口单独下发 v6 上游并关闭 peer DNS。
+        // 不能只依赖主接口：dhcpv6 模式下 odhcp6c 会把运营商 DNS 混进来，
+        // `peerdns=0` 是让「强制」真正生效的开关。
+        if cfg.dns_force && !dns_v6.is_empty() {
+            cmds.push(format!("set network.{}.peerdns=0", iface_v6));
+            cmds.push(format!(
+                "set network.{}.dns={}",
+                iface_v6,
+                sq(&dns_v6.join(" "))
+            ));
+        } else {
+            shell_cmds.push(format!(
+                "uci -q delete network.{}.dns 2>/dev/null || true",
+                iface_v6
+            ));
+        }
     } else if !iface_v6.is_empty() && !v6_managed(cfg) {
         // 关闭 IPv6：主动拆掉骨架与防火墙登记，让「关闭」真正生效。
         shell_cmds.push(format!("ifdown {} >/dev/null 2>&1 || true", iface_v6));
@@ -441,6 +473,121 @@ pub fn ensure_iface(
     }
 
     Ok((iface.clone(), dev, cmds))
+}
+
+/// 保证强制 DNS 仍落在插件创建的接口上。
+///
+/// 只在拨号已成功的分支调用。作用有两个：
+///   1. 用户在 LuCI 改了 DNS 配置 → 下一轮巡检即下发，无需重拨；
+///   2. 外部脚本 `uci set network.fm350.dns=...` / `service network restart`
+///      把运行态改回运营商 DNS 时，把配置拉回强制值。
+///
+/// 返回是否实际写入。DNS 一致时只做 2~3 次 `uci get`，不 `ifup`，
+/// 不会打断已建立的会话。
+pub fn enforce_forced_dns(cfg: &Config) -> Result<bool, String> {
+    if !cfg.dns_force {
+        return Ok(false);
+    }
+    let main = super::dns::forced_all(cfg);
+    if main.is_empty() {
+        // 强制表为空时不接管，避免把 resolver 清空；apply 路径会回落到模组 DNS。
+        return Ok(false);
+    }
+    let want_v6 = if cfg.ipv6 && !cfg.iface_v6.is_empty() && v6_managed(cfg) {
+        super::dns::forced_v6(cfg)
+    } else {
+        Vec::new()
+    };
+
+    let cur_main = uci_list(&format!("network.{}.dns", cfg.iface));
+    let main_ok = super::dns::same_servers(&cur_main, &main)
+        && uci_get(&format!("network.{}.peerdns", cfg.iface)).as_deref() == Some("0");
+
+    let v6_ok = if !cfg.ipv6 || cfg.iface_v6.is_empty() || !v6_managed(cfg) {
+        true
+    } else {
+        let cur_v6 = uci_list(&format!("network.{}.dns", cfg.iface_v6));
+        if want_v6.is_empty() {
+            cur_v6.is_empty()
+        } else {
+            super::dns::same_servers(&cur_v6, &want_v6)
+                && uci_get(&format!("network.{}.peerdns", cfg.iface_v6)).as_deref() == Some("0")
+        }
+    };
+
+    if main_ok && v6_ok {
+        return Ok(false);
+    }
+
+    let mut changed_main = false;
+    let mut changed_v6 = false;
+
+    if !main_ok {
+        let cmd = format!("set network.{}.dns={}", cfg.iface, sq(&main.join(" ")));
+        if !uci(&cmd).0 {
+            return Err(format!("写入 network.{}.dns 失败", cfg.iface));
+        }
+        if !uci(&format!("set network.{}.peerdns=0", cfg.iface)).0 {
+            return Err(format!("写入 network.{}.peerdns 失败", cfg.iface));
+        }
+        changed_main = true;
+    }
+
+    if !v6_ok {
+        let cmd = if want_v6.is_empty() {
+            format!("delete network.{}.dns", cfg.iface_v6)
+        } else {
+            format!(
+                "set network.{}.dns={}",
+                cfg.iface_v6,
+                sq(&want_v6.join(" "))
+            )
+        };
+        if !uci(&cmd).0 {
+            return Err(format!("写入 network.{}.dns 失败", cfg.iface_v6));
+        }
+        if !want_v6.is_empty()
+            && !uci(&format!("set network.{}.peerdns=0", cfg.iface_v6)).0
+        {
+            return Err(format!("写入 network.{}.peerdns 失败", cfg.iface_v6));
+        }
+        changed_v6 = true;
+    }
+
+    if !uci("commit network").0 {
+        return Err("提交 network 失败".to_string());
+    }
+    // 只弹有变化的接口。static 接口的 ifup 会按 UCI 重新下发 DNS，
+    // 不重建 PDP；dhcpv6 子接口则会重启 odhcp6c（只在配置漂移时发生）。
+    if changed_main {
+        let _ = real(&format!("ifup {}", cfg.iface));
+    }
+    if changed_v6 {
+        let _ = real(&format!("ifup {}", cfg.iface_v6));
+    }
+    Ok(true)
+}
+
+/// 读取 UCI 里的 DNS 列表（空格分隔）。
+fn uci_list(path: &str) -> Vec<String> {
+    let (ok, out) = real(&format!("uci -q get {}", path));
+    if ok {
+        out.split_whitespace().map(str::to_string).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// 读取单个 UCI 值；不存在或为空返回 `None`。
+fn uci_get(path: &str) -> Option<String> {
+    let (ok, out) = real(&format!("uci -q get {}", path));
+    if ok {
+        let v = out.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// 拆除由本插件创建的接口与路由。
