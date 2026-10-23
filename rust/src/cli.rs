@@ -127,19 +127,18 @@ fn print_json(v: &Json) {
 
 /// CLI 执行：优先转发给 daemon，否则本地直连 AT 口。
 ///
-/// 读类（GET）命令的 daemon 转发读超时收敛到 [`CLI_READ_TIMEOUT`]：
-/// daemon 存在但 AT 会话被长期占用时（如哑口每条命令等满 at_timeout），
-/// 60 s 的等待会让 rpcd ucode 的同步 popen 一起挂住，LuCI 页面随之卡死；
-/// 15 s 内失败后回落本地直连，快速给出「端口已被独占」类明确错误。
-/// 写类（POST，如 dial 全流程含 PDP 激活）保留长超时，避免正常慢操作被掐断。
+/// 超时必须与 rpcd ucode 的转发预算对齐，而不是跟着 `at_timeout` 无限放大：
+/// 读类（GET）固定 [`CLI_READ_TIMEOUT`]（rpcd 读类兜底 20 s），写类（POST）
+/// 收敛到 60~[`CLI_WRITE_TIMEOUT_MAX`]（rpcd 写类兜底 90 s）。超过这个预算，
+/// rpcd 的同步 popen 会先被顶穿，LuCI 页面卡死而不是拿到错误。
 fn run_cli<F>(cfg: &Config, method: &str, path: &str, payload: Option<&Json>, local: F)
 where
     F: FnOnce(&AtHandle, &Config) -> Json,
 {
     let read_timeout = if method == "GET" {
-        Duration::from_secs(CLI_READ_TIMEOUT.max(cfg.at_timeout))
+        Duration::from_secs(CLI_READ_TIMEOUT)
     } else {
-        Duration::from_secs(cfg.at_timeout.max(60))
+        Duration::from_secs(cfg.at_timeout.clamp(60, CLI_WRITE_TIMEOUT_MAX))
     };
     if let Some(j) = via_daemon(cfg, method, path, payload, read_timeout) {
         print_json(&j);
@@ -150,9 +149,30 @@ where
     print_json(&j);
 }
 
-/// 读类命令经 daemon 转发的读超时下限（秒）。
+/// 读类命令经 daemon 转发的读超时（秒）。
 /// 必须小于 rpcd ucode 读类兜底 timeout（fm350.uc 的 20 s），留出余量。
 const CLI_READ_TIMEOUT: u64 = 15;
+
+/// 写类命令经 daemon 转发的读超时上限（秒）。
+///
+/// rpcd ucode 的 `TMO_WRITE` 是 90 s：本值必须留出 commit/序列化余量，
+/// 否则 CLI 自己还没超时，rpcd 已经把同步调用掐断。
+const CLI_WRITE_TIMEOUT_MAX: u64 = 85;
+
+/// 解析必填的 u32 参数；缺失或非法时输出用法并以退出码 2 结束。
+///
+/// 旧实现用 `unwrap_or(默认值)`：`fm350d sim abc` 会被悄悄当成切到卡槽 0，
+/// `fm350d usbmode` 会直接切到 40（触发 USB 重枚举）。这类"猜一个值"
+/// 对硬件操作是危险的，必须显式报错。
+fn require_u32(args: &[String], usage: &str) -> u32 {
+    match args.first().map(|s| s.parse::<u32>()) {
+        Some(Ok(v)) => v,
+        _ => {
+            eprintln!("{}", usage);
+            std::process::exit(2);
+        }
+    }
+}
 
 /// 守护模式入口：单实例守卫 + 主循环。
 fn run_daemon(cfg: Config) {
@@ -325,21 +345,21 @@ pub fn run() {
         },
 
         "sim" => {
-            let slot: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let slot = require_u32(rest, "用法: fm350d sim <0|1>");
             let payload = serde_json::json!({ "slot": slot });
             run_cli(&cfg, "POST", "/api/sim", Some(&payload), |a, c| {
                 ok_or_err(modem::set_sim_slot(a, c, slot))
             })
         }
         "cfun" => {
-            let mode: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+            let mode = require_u32(rest, "用法: fm350d cfun <0|1>");
             let payload = serde_json::json!({ "mode": mode });
             run_cli(&cfg, "POST", "/api/cfun", Some(&payload), |a, c| {
                 ok_or_err(modem::set_cfun(a, c, mode))
             })
         }
         "usbmode" => {
-            let mode: u32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(40);
+            let mode = require_u32(rest, "用法: fm350d usbmode <模式，如 40>");
             let payload = serde_json::json!({ "mode": mode });
             run_cli(&cfg, "POST", "/api/usbmode", Some(&payload), |a, c| {
                 ok_or_err(modem::set_usb_mode(a, c, mode))
@@ -423,14 +443,26 @@ fn sms_command(cfg: &Config, rest: &[String]) {
         }),
         "send" => {
             let number = rest.get(1).cloned().unwrap_or_default();
-            let text = rest.get(2).cloned().unwrap_or_default();
+            // 未加引号的短语（`fm350d sms send 10086 你好 世界`）应当拼成
+            // 完整正文，而不是只发第一个词。
+            let text = rest.get(2..).map(|v| v.join(" ")).unwrap_or_default();
+            if number.is_empty() || text.is_empty() {
+                eprintln!("用法: fm350d sms send <号码> <内容>");
+                std::process::exit(2);
+            }
             let payload = serde_json::json!({ "number": number, "text": text });
             run_cli(cfg, "POST", "/api/sms/send", Some(&payload), |a, c| {
                 ok_or_err(sms::send(a, c, &number, &text))
             })
         }
         "delete" => {
-            let index: i64 = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
+            let index = match rest.get(1).and_then(|s| s.parse::<i64>().ok()) {
+                Some(i) if i >= 0 => i,
+                _ => {
+                    eprintln!("用法: fm350d sms delete <序号>");
+                    std::process::exit(2);
+                }
+            };
             let payload = serde_json::json!({ "index": index });
             run_cli(cfg, "POST", "/api/sms/delete", Some(&payload), |a, c| {
                 ok_or_err(sms::delete(a, c, index))

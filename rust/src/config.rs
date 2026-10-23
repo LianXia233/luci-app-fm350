@@ -308,6 +308,9 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
         .args(["set", &format!("{}.{}={}", PACKAGE, SECTION, PACKAGE)])
         .status();
 
+    // 先整体校验再落盘：若边写边校验，后面的字段非法时前面的 `uci set`
+    // 已经进入 delta 目录，可能被下一次无关的 commit 顺带生效，留下半套配置。
+    let mut updates: Vec<(String, String)> = Vec::with_capacity(obj.len());
     for (k, v) in obj.iter() {
         let val = match v {
             serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
@@ -316,47 +319,12 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
             _ => continue,
         };
 
-        // AT 端口必须是绝对设备路径：写入 "ttyUSB1" 这类相对值后 open()
-        // 会在 cwd 下静默失败，用户却看到「保存成功」。
-        if k == "at_port" && !val.starts_with('/') {
-            return Err(format!(
-                "AT 端口必须是绝对路径（如 /dev/ttyUSB1），当前为『{}』",
-                val
-            ));
-        }
+        validate_value(k, &val)?;
+        updates.push((k.clone(), val));
+    }
 
-        // SSH 转发端口：必须为 1-65535 的合法端口号。
-        if k == "sshfwd_lan_port" || k == "sshfwd_fwd_port" {
-            let bad = val
-                .parse::<u16>()
-                .map(|n| n == 0)
-                .unwrap_or(true);
-            if bad {
-                return Err(format!(
-                    "{} 必须为 1-65535 的端口号，当前为『{}』",
-                    k, val
-                ));
-            }
-        }
-
-        // 强制 DNS：空值表示跳过该项；非空必须是合法地址。
-        // 写入非法值会让 dnsmasq 启动失败或静默丢弃该上游，必须在入口拦下。
-        if matches!(
-            k.as_str(),
-            "dns4_primary" | "dns4_secondary" | "dns6_primary" | "dns6_secondary"
-        ) && !val.is_empty()
-        {
-            let ok = if k.starts_with("dns4_") {
-                crate::addr::is_valid_ipv4(&val)
-            } else {
-                crate::addr::normalize_ipv6(&val).is_some()
-            };
-            if !ok {
-                return Err(format!("{} 不是合法的 DNS 地址：『{}』", k, val));
-            }
-        }
-
-        uci_set(k, &val)?;
+    for (k, val) in updates {
+        uci_set(&k, &val)?;
     }
     let st = Command::new("uci")
         .args(["commit", PACKAGE])
@@ -367,6 +335,128 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
     }
     invalidate_cache();
     Ok(())
+}
+
+/// 校验单个配置项取值。**所有写入都必须先过这里。**
+///
+/// 重点不是"格式好看"，而是这些值会被拼进 shell 命令：
+/// `ifup {iface}`、`ping -I {data_dev}`、`uci -q set network.{iface}.gateway={gw}`
+/// 等（见 `net::shell`）。配置来自 Web/ubus 输入，若放任引号、分号、`$()`
+/// 通过，等同于把 root shell 交给前端。因此网卡名只允许最小的字符集，
+/// 网关/掩码必须是纯地址。
+fn validate_value(key: &str, val: &str) -> Result<(), String> {
+    match key {
+        // AT 端口必须是绝对设备路径：写入 "ttyUSB1" 这类相对值后 open()
+        // 会在 cwd 下静默失败，用户却看到「保存成功」。
+        "at_port" if !val.starts_with('/') => Err(format!(
+            "AT 端口必须是绝对路径（如 /dev/ttyUSB1），当前为『{}』",
+            val
+        )),
+        // SSH 转发端口：必须为 1-65535 的合法端口号。
+        "sshfwd_lan_port" | "sshfwd_fwd_port"
+            if val.parse::<u16>().map(|n| n == 0).unwrap_or(true) =>
+        {
+            Err(format!(
+                "{} 必须为 1-65535 的端口号，当前为『{}』",
+                key, val
+            ))
+        }
+        // 强制 DNS：空值表示跳过该项；非空必须是合法地址。
+        // 写入非法值会让 dnsmasq 启动失败或静默丢弃该上游，必须在入口拦下。
+        "dns4_primary" | "dns4_secondary" if !val.is_empty() && !crate::addr::is_valid_ipv4(val) => {
+            Err(format!("{} 不是合法的 DNS 地址：『{}』", key, val))
+        }
+        "dns6_primary" | "dns6_secondary"
+            if !val.is_empty() && crate::addr::normalize_ipv6(val).is_none() =>
+        {
+            Err(format!("{} 不是合法的 DNS 地址：『{}』", key, val))
+        }
+        // UCI 段名 / 网卡名：1-15 字节，仅字母数字与 `_-.`，且不得以 `-`
+        // 开头（避免被 `ping -I` 之类当成选项）。
+        "iface" if !is_valid_iface_name(val) => Err(format!(
+            "接口名『{}』非法：只允许 1-15 位字母、数字、`_`、`-`、`.`，且不能以 `-` 开头",
+            val
+        )),
+        "iface_v6" if !val.is_empty() && !is_valid_iface_name(val) => Err(format!(
+            "IPv6 接口名『{}』非法：只允许 1-15 位字母、数字、`_`、`-`、`.`，且不能以 `-` 开头",
+            val
+        )),
+        // 空串与 auto 同义（自动探测）。
+        "data_dev" if !val.is_empty() && val != "auto" && !is_valid_iface_name(val) => {
+            Err(format!("数据网卡名『{}』非法（应为 auto 或合法网卡名）", val))
+        }
+        "gateway" if !val.is_empty() && !crate::addr::is_valid_ipv4(val) => Err(format!(
+            "网关『{}』不是合法的 IPv4 地址（留空表示自动）",
+            val
+        )),
+        "netmask" if !val.is_empty() && !crate::addr::is_valid_netmask4(val) => Err(format!(
+            "子网掩码『{}』非法：必须是连续的 IPv4 掩码（如 255.255.255.0）",
+            val
+        )),
+        // 以下字段同样会进入 AT 指令（引号内插值），必须拒绝引号、反斜杠、
+        // 换行等能闭合字符串的字符，否则 `"` + CRLF 就能追加任意 AT 指令。
+        "apn" if !val.is_empty() && !is_valid_apn(val) => Err(format!(
+            "APN『{}』非法：只允许 1-100 位字母、数字、`.`、`-`、`_`",
+            val
+        )),
+        "pdp_type"
+            if !matches!(
+                val.to_ascii_uppercase().as_str(),
+                "IP" | "IPV4" | "IPV6" | "IPV4V6" | "PPP" | "NONIP"
+            ) =>
+        {
+            Err(format!(
+                "PDP 类型『{}』非法：可选 IP / IPV4 / IPV6 / IPV4V6 / PPP / NONIP",
+                val
+            ))
+        }
+        "username" if !is_safe_at_quoted(val, 64) => Err(format!(
+            "用户名『{}』非法：最多 64 个可打印 ASCII 字符，且不能含双引号或反斜杠",
+            val
+        )),
+        "password" if !is_safe_at_quoted(val, 128) => Err(format!(
+            "密码非法：最多 128 个可打印 ASCII 字符，且不能含双引号或反斜杠"
+        )),
+        "auth" if !matches!(val, "none" | "pap" | "chap" | "both") => Err(format!(
+            "鉴权方式『{}』非法：可选 none / pap / chap / both",
+            val
+        )),
+        "gateway_mode" if !matches!(val, "auto" | "static" | "off") => Err(format!(
+            "网关模式『{}』非法：可选 auto / static / off",
+            val
+        )),
+        "v6_mode" if !matches!(val, "dhcpv6" | "ra" | "static" | "off") => Err(format!(
+            "IPv6 模式『{}』非法：可选 dhcpv6 / ra / static / off",
+            val
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// 合法 APN：点分标签，仅字母数字与 `.` `-` `_`，总长 1-100。
+fn is_valid_apn(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// AT 引号字符串内的安全字符集：可打印 ASCII，排除双引号与反斜杠。
+fn is_safe_at_quoted(s: &str, max: usize) -> bool {
+    s.len() <= max
+        && s.bytes()
+            .all(|b| (0x20..=0x7e).contains(&b) && b != b'"' && b != b'\\')
+}
+
+/// 合法 Linux 网卡名（也是安全的 UCI 段名）。
+fn is_valid_iface_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 15
+        && s != "."
+        && s != ".."
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 #[cfg(test)]
@@ -409,5 +499,101 @@ mod tests {
         assert_eq!("abc".parse::<u32>().ok(), None);
         assert_eq!("42".parse::<u32>().ok(), Some(42));
         assert_eq!(("1" == "1"), true);
+    }
+
+    #[test]
+    fn valid_values_pass_validation() {
+        for (k, v) in [
+            ("at_port", "/dev/ttyUSB1"),
+            ("at_port", "/dev/serial/by-id/usb-Fibocom_FM350_123-if01-port0"),
+            ("sshfwd_lan_port", "2222"),
+            ("sshfwd_fwd_port", "65535"),
+            ("dns4_primary", "119.29.29.29"),
+            ("dns4_secondary", ""),
+            ("dns6_primary", "2402:4e00::"),
+            ("dns6_secondary", ""),
+            ("iface", "fm350"),
+            ("iface", "fm350_5g"),
+            ("iface_v6", ""),
+            ("iface_v6", "fm350v6"),
+            ("data_dev", "auto"),
+            ("data_dev", ""),
+            ("data_dev", "wwan0"),
+            ("gateway", ""),
+            ("gateway", "10.8.217.1"),
+            ("netmask", ""),
+            ("netmask", "255.255.255.0"),
+            ("apn", "cmiot5g"),
+            ("apn", "internet.iot"),
+            ("apn", ""),
+            ("pdp_type", "IPV4V6"),
+            ("pdp_type", "ipv6"),
+            ("username", ""),
+            ("username", "user@example.com"),
+            ("password", ""),
+            ("password", "p@ss word"),
+            ("auth", "none"),
+            ("auth", "chap"),
+            ("gateway_mode", "auto"),
+            ("gateway_mode", "static"),
+            ("v6_mode", "dhcpv6"),
+            ("v6_mode", "off"),
+        ] {
+            assert!(
+                validate_value(k, v).is_ok(),
+                "{}={:?} 应通过校验: {:?}",
+                k,
+                v,
+                validate_value(k, v)
+            );
+        }
+    }
+
+    #[test]
+    fn shell_metacharacters_are_rejected_in_names_and_addresses() {
+        // 这些值会被拼进 ifup / ping -I / uci set 的 shell 命令
+        for (k, v) in [
+            ("iface", "fm350;reboot"),
+            ("iface", "fm350$(reboot)"),
+            ("iface", "fm 350"),
+            ("iface", "fm/350"),
+            ("iface", "-fm350"),
+            ("iface", ""),
+            ("iface", "this-name-is-way-too-long"),
+            ("iface", ".."),
+            ("iface_v6", "fm350v6;id"),
+            ("data_dev", "wwan0;reboot"),
+            ("data_dev", "auto;reboot"),
+            ("gateway", "10.8.217.1;reboot"),
+            ("gateway", "not-an-ip"),
+            ("netmask", "255.255.255.0;reboot"),
+            ("netmask", "255.0.255.0"),
+            ("at_port", "ttyUSB1"),
+            ("sshfwd_lan_port", "0"),
+            ("sshfwd_lan_port", "70000"),
+            ("dns4_primary", "1.1.1.1;reboot"),
+            ("dns6_primary", "2402:4e00::;reboot"),
+            // APN / 鉴权字段会被包进 AT 引号，必须挡住闭合引号与换行
+            ("apn", "cmnet\"\r\nAT+CGACT=0,1"),
+            ("apn", "cmnet\nAT+CFUN=0"),
+            ("apn", "cm net"),
+            ("apn", &"a".repeat(101)),
+            ("pdp_type", "IPV4V6\"\r\nAT+CFUN=0"),
+            ("pdp_type", "BOGUS"),
+            ("username", "user\"name"),
+            ("username", "user\r\nAT+CFUN=0"),
+            ("password", "pass\\word"),
+            ("password", &"p".repeat(129)),
+            ("auth", "PAP"),
+            ("gateway_mode", "auto;reboot"),
+            ("v6_mode", "ra;reboot"),
+        ] {
+            assert!(
+                validate_value(k, v).is_err(),
+                "{}={:?} 必须被拒绝",
+                k,
+                v
+            );
+        }
     }
 }

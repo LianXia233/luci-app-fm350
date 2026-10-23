@@ -266,21 +266,27 @@ pub fn dispatch(
             if let Some(e) = modem_absent(cfg) {
                 return err(&e);
             }
-            let slot = arg_u64(payload, q, "slot").unwrap_or(0) as u32;
+            let Some(slot) = arg_u32(payload, q, "slot") else {
+                return err("slot 参数缺失或非法（应为 0 或 1）");
+            };
             at_err(crate::modem::set_sim_slot(at, cfg, slot))
         }
         "/api/cfun" => {
             if let Some(e) = modem_absent(cfg) {
                 return err(&e);
             }
-            let mode = arg_u64(payload, q, "mode").unwrap_or(1) as u32;
+            let Some(mode) = arg_u32(payload, q, "mode") else {
+                return err("mode 参数缺失或非法（0=最低功能，1=在线）");
+            };
             at_err(crate::modem::set_cfun(at, cfg, mode))
         }
         "/api/usbmode" => {
             if let Some(e) = modem_absent(cfg) {
                 return err(&e);
             }
-            let mode = arg_u64(payload, q, "mode").unwrap_or(40) as u32;
+            let Some(mode) = arg_u32(payload, q, "mode") else {
+                return err("mode 参数缺失或非法（应为十进制模式值，如 40）");
+            };
             at_err(crate::modem::set_usb_mode(at, cfg, mode))
         }
         "/api/reboot" => match modem_absent(cfg) {
@@ -361,6 +367,11 @@ fn arg_u64(payload: &Json, q: &HashMap<String, String>, key: &str) -> Option<u64
         .get(key)
         .and_then(|v| v.as_u64())
         .or_else(|| q.get(key).and_then(|s| s.parse().ok()))
+}
+
+/// 取 u32 参数：超出范围的值必须报错，而不是截断后照常下发给模组。
+fn arg_u32(payload: &Json, q: &HashMap<String, String>, key: &str) -> Option<u32> {
+    arg_u64(payload, q, key).and_then(|v| u32::try_from(v).ok())
 }
 
 /// 取有符号整数参数（短信序号等可能为负）。
@@ -489,6 +500,18 @@ mod tests {
         q.insert("mode".to_string(), "0".to_string());
         assert_eq!(arg_u64(&Json::Null, &q, "mode"), Some(0));
         assert_eq!(arg_u64(&Json::Null, &empty_q(), "mode"), None);
+    }
+
+    /// u32 参数越界必须判为非法：旧实现 `as u32` 会把 2^32+1 截成 1。
+    #[test]
+    fn arg_u32_rejects_overflow_and_negative() {
+        let p = serde_json::json!({ "slot": 4294967296u64 });
+        assert_eq!(arg_u32(&p, &empty_q(), "slot"), None);
+        let p = serde_json::json!({ "slot": 1 });
+        assert_eq!(arg_u32(&p, &empty_q(), "slot"), Some(1));
+        let mut q = HashMap::new();
+        q.insert("mode".to_string(), "-1".to_string());
+        assert_eq!(arg_u32(&Json::Null, &q, "mode"), None);
     }
 
     #[test]

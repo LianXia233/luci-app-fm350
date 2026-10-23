@@ -251,6 +251,9 @@ pub fn build_submit_pdu(number: &str, text: &str) -> Result<(String, usize), Str
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err("收件人号码格式无效".to_string());
     }
+    if digits.len() > 20 {
+        return Err("收件人号码过长（最多 20 位数字）".to_string());
+    }
 
     // 地址按数字成对交换，奇数位末字节高半字节填 0xF
     let chars: Vec<char> = digits.chars().collect();
@@ -276,12 +279,27 @@ pub fn build_submit_pdu(number: &str, text: &str) -> Result<(String, usize), Str
 
     // 能全部塞进 GSM 7-bit 表就用 7-bit（更省、单条能发 160 字符），
     // 否则回落 UCS2（中文必然走这条）。
+    //
+    // 本实现只发单条短信（无 UDH 拼接），必须在这里硬性限制长度：
+    // UDL 是 1 字节，超过 255 会被 `as u8` 静默截断，模组收到的长度与
+    // 实际数据不符 —— 表现是发送成功但内容残缺。单条上限分别是
+    // GSM-7 160 septets、UCS2 140 字节（70 个 UTF-16 码元）。
     if let Some(septets) = gsm7::string_to_gsm7(text) {
+        if septets.len() > 160 {
+            return Err(
+                "短信内容超出单条长度限制（GSM-7 最多 160 字符），请缩短后重发".to_string(),
+            );
+        }
         tpdu.push(0x00); // TP-DCS: 7-bit
         tpdu.push(septets.len() as u8); // UDL = septet 数
         tpdu.extend_from_slice(&gsm7::pack7(&septets));
     } else {
         let ucs2 = gsm7::utf8_to_ucs2(text);
+        if ucs2.len() > 140 {
+            return Err(
+                "短信内容超出单条长度限制（中文/UCS2 最多 70 字符），请缩短后重发".to_string(),
+            );
+        }
         tpdu.push(0x08); // TP-DCS: UCS2
         tpdu.push(ucs2.len() as u8); // UDL = 字节数
         tpdu.extend_from_slice(&ucs2);
@@ -356,6 +374,18 @@ mod tests {
     fn build_rejects_malformed_number() {
         assert!(build_submit_pdu("", "x").is_err());
         assert!(build_submit_pdu("+8613800abc", "x").is_err());
+        // 号码长度超过 1 字节长度域的安全上限
+        assert!(build_submit_pdu(&"1".repeat(21), "x").is_err());
+    }
+
+    /// 单条短信长度上限：超限必须报错，不能把 UDL 截断后照发。
+    #[test]
+    fn build_rejects_overlong_text() {
+        assert!(build_submit_pdu("+8613800138000", &"A".repeat(160)).is_ok());
+        assert!(build_submit_pdu("+8613800138000", &"A".repeat(161)).is_err());
+        // UCS2：70 个汉字刚好 140 字节，71 个超限
+        assert!(build_submit_pdu("+8613800138000", &"你".repeat(70)).is_ok());
+        assert!(build_submit_pdu("+8613800138000", &"你".repeat(71)).is_err());
     }
 
     #[test]
