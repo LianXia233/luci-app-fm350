@@ -93,7 +93,7 @@ rust/src/
 ## 测试
 
 ```sh
-cd rust && cargo test      # 159 项单元测试
+cd rust && cargo test      # 221 项单元测试
 cargo build --release      # 产物 target/<triple>/release/fm350d
 ```
 

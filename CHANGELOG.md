@@ -52,6 +52,16 @@
 - 新增/更新单测覆盖换行夹带、配置注入、参数越界、短信长度等分支，
   `cargo test --locked` 221 passed。
 
+### 文档
+
+- README 与 1.0.18 行为对齐：UCI 表补齐 `username` / `password` 与 SSH 转发三项，
+  标明各字段的写入校验约束，默认 APN 修正为配置文件实际值 `ctnet`；
+  CLI 增补 `smsc` / `usbmode`，并说明严格参数校验、转发超时与单条短信长度上限；
+  IMEI 章节补充 CR/LF 多行夹带的逐行拦截规则。
+- README 功能表与 CI 说明同步：短信改为按序号删除并标注单条长度限制，
+  静态门禁覆盖 CRLF、JSON、LuCI JS、Shell 可执行位、版本一致性与 IMEI 不变式。
+- `docs/REFACTOR.md` 单元测试计数更新为 221 项。
+
 ## 1.0.17-r1 (2026-10-23)
 
 本版新增**拨号成功后强制下发 DNS**，并依据 FM350 AT 手册补齐子网掩码解析。
