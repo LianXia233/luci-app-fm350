@@ -203,7 +203,7 @@ IMEI / 设备识别码维护（默认锁定，需二次确认后方可写入）�
 | 蜂窝拨号 | APN 配置、PDP 协议 (IPv4/IPv6/IPv4v6)、CID、认证协议、状态侦测、实时 IPv4/IPv6 地址与 DNS 提取；拨号成功后按配置强制下发公共 DNS（默认 119.29.29.29 / 223.5.5.5 / 2402:4e00:: / 2400:3200::1） |
 | 路由守护 | 自动配置 IPv4 `/32` 静态接口与 IPv6 `/128` 静态子接口（地址取自模组侧 AT+CGPADDR，不依赖 RA/DHCPv6），自愈补齐缺失的默认路由 (`onlink`)，支持 Metric 跃点微调 |
 | 锁网锁频 | `AT+GTACT` 频段与制式锁定、`AT+EMMCHLCK` 物理小区 (PCI) 锁定、指定网络搜索优先级 |
-| 短信中心 | 规范 PDU 编解码（中文 UCS2、英文 GSM 7-bit 自动适配）、收件箱列表、单条/批量删除、存储容量查询 |
+| 短信中心 | 规范 PDU 编解码（中文 UCS2、英文 GSM 7-bit 自动适配）、收件箱列表、按序号删除、存储容量查询；单条上限 GSM-7 160 字符 / UCS2 70 字，超限在发送前拒绝 |
 | 硬件控制 | 软件重启模组、飞行模式与在线模式切换、实体双 SIM 卡槽软件倒换、USB 复合模式调整 |
 | IMEI 管理 | 串号读取、出厂原始数据镜像备份、受控安全写入（15 位格式校验与双重确认锁，Luhn 仅提示） |
 | 交互终端 | 网页端内置交互式 AT 透传终端，安全半双工通信，拦截越权破坏性指令 |
@@ -472,6 +472,7 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | 写入 | `imei_write=1` + `confirm=1` + 15 位格式校验 | `fm350d imei write <15 位> --confirm` |
 
 > 透传 AT 终端中的写入指令同样被强制拦截（`AT+EGMREXT=1,*`、`AT+EGMR=1,*`、`AT+SIMEI=`、`AT+CGSN=` 一律拒绝）。
+> 1.0.18 起守卫按行检查：`AT+CSQ\r\nAT+EGMR=1,7,...` 这类用 CR/LF 夹带的多行输入，只要任意一行命中写形式，整条指令都会被拒绝；`/api/at` 与 CLI `at` 对写入形式无条件拦截，只读查询不受影响。
 
 ## UCI 配置全景参考
 
@@ -483,26 +484,28 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | `at_port` | `/dev/ttyUSB1` | AT 串口节点（必须绝对路径） |
 | `baudrate` | `115200` | 串口波特率 |
 | `at_timeout` | `10` | 单条 AT 指令交互超时（秒） |
-| `apn` | `cmiot5g` | 蜂窝接入点名称 (APN) |
-| `pdp_type` | `IPV4V6` | PDP 协议：`IP` / `IPV6` / `IPV4V6` |
+| `apn` | `ctnet` | 蜂窝接入点名称 (APN)，仅允许字母、数字与 `.` `-` `_`，最长 100 |
+| `pdp_type` | `IPV4V6` | PDP 协议：`IP` / `IPV4` / `IPV6` / `IPV4V6`（页面提供 `IP` / `IPV6` / `IPV4V6`；`PPP` / `NONIP` 仅供手工配置） |
 | `cid` | `1` | 激活的 PDP Context ID |
-| `auth` | `none` | 认证协议：`none` / `pap` / `chap` |
-| `iface` | `fm350` | IPv4 接口名（生成于 `/etc/config/network`） |
-| `iface_v6` | `fm350v6` | IPv6 接口名（关联 `device=@fm350`；proto 由 `v6_mode` 决定：`none` / `dhcpv6` / `static`） |
-| `data_dev` | `auto` | 蜂窝数据通道网卡名，`auto` 依驱动自动探测 |
+| `auth` | `none` | 认证协议：`none` / `pap` / `chap` / `both` |
+| `username` | （空） | PDP 认证用户名，最多 64 个可打印 ASCII 字符，不能含双引号或反斜杠 |
+| `password` | （空） | PDP 认证密码，最多 128 个可打印 ASCII 字符，不能含双引号或反斜杠 |
+| `iface` | `fm350` | IPv4 接口名（生成于 `/etc/config/network`）：1-15 位字母、数字、`_-.`，不能以 `-` 开头 |
+| `iface_v6` | `fm350v6` | IPv6 接口名（关联 `device=@fm350`；proto 由 `v6_mode` 决定：`none` / `dhcpv6` / `static`），字符集限制同 `iface` |
+| `data_dev` | `auto` | 蜂窝数据通道网卡名，`auto` 依驱动自动探测；手工填写时须为合法网卡名 |
 | `metric` | `30` | 默认路由跃点优先级 |
 | `ipv6` | `1` | 是否创建并接管 IPv6 子接口 |
 | `dns_force` | `1` | 拨号成功后是否强制下发固定公共 DNS（覆盖 `AT+GTDNS` / `AT+CGCONTRDP` 上报的运营商 DNS），并自动写入 `peerdns=0` |
-| `dns4_primary` | `119.29.29.29` | 强制 DNS 的 IPv4 首选服务器 |
-| `dns4_secondary` | `223.5.5.5` | 强制 DNS 的 IPv4 备用服务器 |
-| `dns6_primary` | `2402:4e00::` | 强制 DNS 的 IPv6 首选服务器（`ipv6=0` 或 `v6_mode=off` 时不下发） |
-| `dns6_secondary` | `2400:3200::1` | 强制 DNS 的 IPv6 备用服务器（`ipv6=0` 或 `v6_mode=off` 时不下发） |
+| `dns4_primary` | `119.29.29.29` | 强制 DNS 的 IPv4 首选服务器（须为合法 IPv4，留空跳过） |
+| `dns4_secondary` | `223.5.5.5` | 强制 DNS 的 IPv4 备用服务器（须为合法 IPv4，留空跳过） |
+| `dns6_primary` | `2402:4e00::` | 强制 DNS 的 IPv6 首选服务器（须为合法 IPv6；`ipv6=0` 或 `v6_mode=off` 时不下发） |
+| `dns6_secondary` | `2400:3200::1` | 强制 DNS 的 IPv6 备用服务器（须为合法 IPv6；`ipv6=0` 或 `v6_mode=off` 时不下发） |
 | `extendprefix` | `1` | **插件侧已废弃（1.0.3 起）**，后端不消费此字段；`v6_mode=dhcpv6` 时插件会自动在 `fm350v6` 接口上写入 `extendprefix=1` |
 | `auto_dial` | `1` | 服务启动后自动拨号 |
 | `route_guard` | `1` | 默认路由自愈守护 |
 | `gateway_mode` | `auto` | 网关模式：`auto` 推导并实测同网段 `.1` 网关、失败回退；`static` 用 `gateway`；`off` 无网关 onlink 直连 |
-| `gateway` | （空） | 静态网关（`gateway_mode=static` 必填）；`auto` 实测成功后回写实际值 |
-| `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`） |
+| `gateway` | （空） | 静态网关（`gateway_mode=static` 必填，须为合法 IPv4）；`auto` 实测成功后回写实际值 |
+| `netmask` | （空） | 子网掩码，留空由网关模式决定（有网关 `/24`，无网关 `/32`）；手工填写须为连续掩码（如 `255.255.255.0`） |
 | `data_guard` | `1` | 数据面健康巡检与分级自愈（USB 端点复位 → 网卡复位 → 重拨 → 重启模组） |
 | `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
 | `net_guard` | `1` | 公网连通性保活：IPv4/IPv6 各自独立向公共 DNS 发 ICMP（绑定数据网卡），「模组侧有地址」不等于「真正可用」；连续多轮失败才按栈恢复，v6 单独故障绝不重拨 |
@@ -513,7 +516,13 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | `v6_poll_interval` | `300` | 从模组 AT/PDP 轮询最新 IPv6 的周期（秒）；`v6_mode=static` 下发现变化时把模组侧地址静态应用到 IPv6 接口，`0` 关闭 |
 | `v6_refresh_interval` | `1800` | IPv6 接口定时校验周期（秒），按需重新应用模组侧地址；`0` 关闭定时刷新，失效兜底仍保留 |
 | `api_port` | `8766` | 本地 JSON API 监听端口（仅 127.0.0.1） |
+| `sshfwd_enable` | `0` | 模组 SSH 转发开关：经 ADB 把模组内 dropbear 映射到 LAN，默认关闭 |
+| `sshfwd_lan_port` | `2222` | SSH 转发在路由器侧的监听端口（1-65535） |
+| `sshfwd_fwd_port` | `2223` | ADB 在模组侧使用的转发端口（1-65535） |
 | `imei_write` | `0` | **IMEI 写入全局安全开关**（为 0 时拒绝一切写入） |
+
+> [!NOTE]
+> 1.0.18 起所有配置写入都**先整批校验、再逐项落盘**：`at_port`、端口号、DNS、网卡名、网关、掩码、APN、PDP 类型、认证字段与模式枚举任一非法，整次保存都会失败并返回具体字段原因，不会留下半套 UCI delta。这样既避免配置半生效，也阻止 `;`、`$()`、引号、CR/LF 等字符经 shell / AT 指令注入。
 
 ## CLI 命令行运维速查
 
@@ -545,8 +554,10 @@ fm350d lock                # 查询当前锁定状态
 ```bash
 # 短信中心
 fm350d sms list            # 收件箱列表
-fm350d sms send 10086 "CXLL"   # 发送中文/英文短信
+fm350d sms send 10086 "CXLL"   # 发送短信；未加引号的多词正文会按空格拼接
 fm350d sms delete <id>     # 删除指定序号短信
+fm350d smsc                # 查询短信中心号码
+fm350d smsc +8613800138000 # 写入短信中心号码（可选 + 与 1-20 位数字）
 
 # IMEI 安全维护
 fm350d imei read           # 安全读取当前串号
@@ -555,10 +566,13 @@ fm350d imei write <15 位数字> --confirm   # 写入新串号（需 imei_write=
 
 # 模组与系统控制
 fm350d reboot              # 软重启模组
-fm350d sim 0               # 切换 SIM 卡槽（0 或 1）
-fm350d cfun 0              # 飞行模式（1 为在线模式）
-fm350d at "AT+CESQ"        # 透传任意 AT 指令
+fm350d sim 0               # 切换 SIM 卡槽（仅 0 / 1）
+fm350d cfun 1              # 功能模式：0=最低功能（页面飞行开关）/ 1=在线 / 4=飞行模式
+fm350d usbmode 40          # 切换 USB 复合模式（1-255，会触发 USB 重枚举）
+fm350d at "AT+CESQ"        # 透传任意 AT 指令（IMEI 写入无条件拦截）
 ```
+
+所有带参子命令都做严格校验：缺少参数或取值非法时直接以退出码 2 结束并打印用法，不再静默取默认值（`sim` / `cfun` / `usbmode` 尤其如此）。CLI 优先把命令转发给守护进程，GET 读超时 15 s、POST 写超时 60-85 s，与 rpcd 的 20 s / 90 s 预算对齐。短信为单条 PDU：GSM-7 最多 160 字符，中文/UCS2 最多 70 字，超限会直接报错而不是截断发送。
 
 ## 交叉编译与构建指引
 
@@ -598,7 +612,7 @@ make package/luci-app-fm350/compile V=s
 
 ### CI 与发布流水线
 
-- `ci.yml`：推送与 PR 时触发，拦截静态语法错误、CRLF 行尾、JSON 校验、Shell 语法，并运行全部 Rust 单元测试。
+- `ci.yml`：推送与 PR 时触发，拦截 CRLF 行尾、JSON 解析失败、LuCI JS 语法错误、Shell 语法与可执行位缺失，并校验 Makefile / CHANGELOG 版本一致性与 IMEI 安全不变式，最后运行全部 Rust 单元测试与 release 构建。
 - `release.yml`：推送 `v*` 标签或手动触发，基于 ImmortalWrt SDK 自动交叉编译产出安装包，附带 `SHA256SUMS` 与 SDK 构建签名公钥；tag 版本必须与 Makefile `PKG_VERSION` 一致，且 CHANGELOG 有对应段落。
 - **同 Release 内旧版本包自动清理**：发布前执行 `scripts/clean-release-assets.sh` 删除同 Release 内其它版本的 `.apk` / `.ipk`。`gh release upload --clobber` 只能覆盖**同名**文件，而包名带版本号，`PKG_RELEASE` 递增后旧包会与新包并存，下载时容易装到旧版本。清理只动本项目的包，`SHA256SUMS` 与 SDK 公钥保留。
 
