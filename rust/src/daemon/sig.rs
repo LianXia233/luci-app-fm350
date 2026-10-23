@@ -48,11 +48,12 @@ pub fn reapply_on_change(cfg: &Config) {
     // 用 UCI 里已记录的网关作模组网关候选：既保住原网关选择，也保住
     // ARP 实测已经通过的事实（不必重新探测一遍）。
     let gw4 = net::current_gateway(cfg).unwrap_or_default();
+    let mask = net::configured_netmask(cfg);
     let v4 = ns.ipv4.first().map(|s| s.as_str()).unwrap_or("");
     let v6 = ns.ipv6.first().map(|s| s.as_str()).unwrap_or("");
     let dns = net::configured_dns(cfg);
 
-    match net::apply_after_dial(cfg, v4, v6, &dns, &gw4) {
+    match net::apply_after_dial(cfg, v4, v6, &dns, &gw4, &mask) {
         Ok(_) => infof!(format_args!("网络参数已变更，已重新下发接口配置")),
         Err(e) => warnf!(format_args!("网络参数变更后重下发失败: {}", e)),
     }

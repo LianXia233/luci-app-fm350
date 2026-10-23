@@ -954,14 +954,53 @@ return view.extend({
 		o.default = '3';
 		o.depends('data_guard', '1');
 
+		/* ---------------- 一之三、强制 DNS ---------------- */
+		s = m.section(form.NamedSection, 'main', 'fm350', _('强制 DNS'));
+		s.description = _('拨号成功后，插件会把下面四组公共 DNS 直接写入自己创建的 '
+			+ 'fm350 / fm350v6 接口，并关闭 peerdns，覆盖运营商通过 AT+GTDNS / '
+			+ 'AT+CGCONTRDP 上报的 DNS。修改保存后由守护在下一轮巡检自动下发，无需重拨；'
+			+ '关闭开关后则从下次拨号起恢复运营商 DNS；某一项留空则跳过该项。');
+		s.anonymous = false;
+
+		o = s.option(form.Flag, 'dns_force', _('启用强制 DNS'),
+			_('关闭后不再覆盖：从下次拨号起沿用模组上报的运营商 DNS'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'dns4_primary', _('IPv4 首选 DNS'),
+			_('建议值 119.29.29.29（DNSPod）'));
+		o.datatype = 'ip4addr';
+		o.default = '119.29.29.29';
+		o.rmempty = false;
+		o.depends('dns_force', '1');
+
+		o = s.option(form.Value, 'dns4_secondary', _('IPv4 备用 DNS'),
+			_('建议值 223.5.5.5（阿里云）'));
+		o.datatype = 'ip4addr';
+		o.default = '223.5.5.5';
+		o.rmempty = false;
+		o.depends('dns_force', '1');
+
+		o = s.option(form.Value, 'dns6_primary', _('IPv6 首选 DNS'),
+			_('建议值 2402:4e00::（DNSPod）'));
+		o.datatype = 'ip6addr';
+		o.default = '2402:4e00::';
+		o.rmempty = false;
+		o.depends('dns_force', '1');
+
+		o = s.option(form.Value, 'dns6_secondary', _('IPv6 备用 DNS'),
+			_('建议值 2400:3200::1（阿里云）'));
+		o.datatype = 'ip6addr';
+		o.default = '2400:3200::1';
+		o.rmempty = false;
+		o.depends('dns_force', '1');
+
 		/* ---------------- 二、IPv6 接口 ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('IPv6 接口'));
-		s.description = _('默认走 RA 模式：守护只负责打开数据网卡的 accept_ra，'
-			+ 'IPv6 地址与默认路由全部由内核按运营商下发的 RA 自动配置。'
-			+ '旧版本把模组侧读到的地址以 /128 静态写入并补一条无网关的 onlink 默认路由，'
-			+ '该路由会以更小的 metric 压过 RA 下发的路由，导致 IPv6 完全不通；'
-			+ '且 AT+CGCONTRDP 在上下文去激活后仍返回上一轮的残留地址。'
-			+ '修改保存后需重新拨号（或重启服务）才会生效。');
+		s.description = _('默认走 dhcpv6 模式：交给 netifd 的 odhcp6c 在用户态收 RA/'
+			+ 'DHCPv6，不受内核 accept_ra 影响，并可把 /64 前缀委派给 LAN。'
+			+ 'ra 模式由内核按运营商 RA 自动配置；static 模式把模组侧地址以 /128 '
+			+ '静态写入；off 不托管 IPv6。修改保存后需重新拨号（或重启服务）才会生效。');
 		s.anonymous = false;
 
 		o = s.option(form.Flag, 'ipv6', _('启用 IPv6 子接口'),
@@ -980,7 +1019,7 @@ return view.extend({
 		o.value('ra', _('ra（内核按运营商 RA 自动配置）'));
 		o.value('static', _('static（模组侧地址静态写入）'));
 		o.value('off', _('off（不托管 IPv6）'));
-		o.default = 'ra';
+		o.default = 'dhcpv6';
 		o.rmempty = false;
 		o.depends('ipv6', '1');
 

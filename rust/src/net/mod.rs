@@ -25,6 +25,7 @@
 //! | [`iface`] | UCI 接口骨架与防火墙登记（v4/v6 主入口） |
 //! | [`heal`] | 路由守卫、自愈动作、接口重启 |
 
+pub mod dns;
 pub mod gateway;
 pub mod heal;
 pub mod iface;
@@ -32,16 +33,21 @@ pub mod probe;
 pub mod shell;
 pub mod v6;
 
+pub use dns::{
+    effective as effective_dns, effective_v6 as effective_dns6, forced_all as forced_dns,
+    forced_v4, forced_v6, same_servers,
+};
 pub use gateway::{
-    applied_sig, clear_applied, config_sig, configured_dns, current_gateway, derive_gateway,
-    dns_matches, mark_applied, plan_gateway, probe_gateway,
+    applied_sig, clear_applied, config_sig, configured_dns, configured_netmask, current_gateway,
+    derive_gateway, dns_matches, mark_applied, plan_gateway, probe_gateway,
 };
 pub use heal::{
     apply_after_dial, bounce_data_dev, bounce_iface_v4, bounce_iface_v6, line_has_metric,
     reset_usb_data_dev, route_guard,
 };
 pub use iface::{
-    clear_session_addresses, ensure_autostart, ensure_iface, status, teardown_iface, NetStatus,
+    clear_session_addresses, enforce_forced_dns, ensure_autostart, ensure_iface, status,
+    teardown_iface, NetStatus,
 };
 pub use probe::{
     check_connectivity4, check_connectivity6, data_health, data_plane_stalled, detect_dev,

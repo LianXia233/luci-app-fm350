@@ -13,7 +13,7 @@
 //! `CGCONTRDP` / `CGPADDR` 只负责提供地址与 DNS，不再单独决定 `active`。
 
 use super::run;
-use crate::addr::{is_valid_ipv4, looks_v6, normalize_ipv6};
+use crate::addr::{is_valid_ipv4, looks_v6, normalize_ipv6, parse_contrdp_addr};
 use crate::at::{at_cmd, AtHandle, AtResult};
 use crate::config::Config;
 use std::time::Duration;
@@ -35,6 +35,12 @@ pub struct PdpState {
     pub active: bool,
     pub ipv4: String,
     pub ipv6: String,
+    /// 模组侧 `AT+CGCONTRDP` 字段 3 上报的 IPv4 子网掩码。
+    ///
+    /// 手册 §12.2.10 的字段 3 是 `<local_addr and subnet_mask>`，IPv4 形态为
+    /// `a1.a2.a3.a4.m1.m2.m3.m4`。部分固件只回地址、不回掩码，此时为空，
+    /// 由 `net::gateway::plan_gateway` 回落到默认掩码。
+    pub netmask4: String,
     pub dns: Vec<String>,
     /// 模组侧 `AT+CGCONTRDP` 字段位 4 上报的 IPv4 网关（未激活/未上报为空）。
     /// 下发链路在 auto 模式下优先采信该值，见 `net::gateway::plan`。
@@ -211,15 +217,31 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     // CGCONTRDP：只提供地址与 DNS 备用值，不再单独作为激活判据。
     let mut contr_ipv4 = String::new();
     let mut contr_ipv6 = String::new();
+    let mut contr_mask4 = String::new();
     let mut contr_gw4 = String::new();
     let mut contr_gw6 = String::new();
     if let Ok(r) = run(at, cfg, &at_cmd::contrdp(cfg.cid)) {
         for row in crate::at::rows(&r, "+CGCONTRDP") {
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
-            if contr_ipv4.is_empty() {
-                if let Some(x) = row.get(3) {
-                    if is_valid_ipv4(x) {
-                        contr_ipv4 = x.clone();
+            //
+            // 手册 §12.2.10 的字段 3 是 `<local_addr and subnet_mask>`：
+            // IPv4 为 "addr.mask" 八段拼接。把它拆开后，地址与掩码都能用，
+            // 掩码优先于「同网段 .1 → /24」的猜测（见 plan_gateway）。
+            if let Some(x) = row.get(3) {
+                if let Some(p) = parse_contrdp_addr(x) {
+                    if p.v6 {
+                        if contr_ipv6.is_empty() {
+                            contr_ipv6 = p.addr;
+                        }
+                    } else {
+                        if contr_ipv4.is_empty() {
+                            contr_ipv4 = p.addr;
+                        }
+                        if contr_mask4.is_empty() {
+                            if let Some(m) = p.mask {
+                                contr_mask4 = m;
+                            }
+                        }
                     }
                 }
             }
@@ -319,6 +341,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         }
         st.gw4 = contr_gw4;
         st.gw6 = contr_gw6;
+        st.netmask4 = contr_mask4;
     }
     st.active = active;
 

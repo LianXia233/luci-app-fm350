@@ -423,7 +423,14 @@ fn dial(at: &AtHandle, cfg: &Config, payload: &Json) -> Json {
         Ok(st) => {
             // 不再用 .ok() 吞掉错误：网络配置失败必须让调用方看见原因，
             // 否则前端只能看到 net:null 而完全无从排查（实测踩过）。
-            match crate::net::apply_after_dial(&c2, &st.ipv4, &st.ipv6, &st.dns, &st.gw4) {
+            match crate::net::apply_after_dial(
+                &c2,
+                &st.ipv4,
+                &st.ipv6,
+                &st.dns,
+                &st.gw4,
+                &st.netmask4,
+            ) {
                 Ok(n) => ok(serde_json::json!({ "pdp": st, "net": n })),
                 Err(e) => ok(serde_json::json!({
                     "pdp": st,

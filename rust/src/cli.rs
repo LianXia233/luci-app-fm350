@@ -255,7 +255,14 @@ pub fn run() {
             |a, c| match modem::dial(a, c) {
                 Ok(p) => {
                     // 不把网络配置失败压成 net:false：以 net_error 带出原因
-                    match net::apply_after_dial(c, &p.ipv4, &p.ipv6, &p.dns, &p.gw4) {
+                    match net::apply_after_dial(
+                        c,
+                        &p.ipv4,
+                        &p.ipv6,
+                        &p.dns,
+                        &p.gw4,
+                        &p.netmask4,
+                    ) {
                         Ok(n) => serde_json::json!({ "ok": true, "pdp": p, "net": n }),
                         Err(e) => serde_json::json!({
                             "ok": true,

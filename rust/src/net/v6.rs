@@ -415,8 +415,22 @@ pub fn apply_ipv6_addr(cfg: &Config, ipv6: &str) -> bool {
     if !ok_proto || proto.trim() != "static" {
         cmds.push(format!("set network.{}.proto=static", iface_v6));
     }
-    for stale in ["reqaddress", "reqprefix", "peerdns", "extendprefix"] {
+    for stale in ["reqaddress", "reqprefix", "extendprefix"] {
         cmds.push(format!("delete network.{}.{}", iface_v6, stale));
+    }
+    // 强制 DNS：静态模式同样要保留 peerdns=0 与 v6 上游。
+    // 旧版这里把 peerdns 一并删掉，若主接口的 v6 上游被 netifd 过滤，
+    // 静态 v6 会话就没有可用的 v6 DNS。
+    let dns6 = super::dns::forced_v6(cfg);
+    if cfg.dns_force && !dns6.is_empty() {
+        cmds.push(format!("set network.{}.peerdns=0", iface_v6));
+        cmds.push(format!(
+            "set network.{}.dns={}",
+            iface_v6,
+            super::shell::sq(&dns6.join(" "))
+        ));
+    } else {
+        cmds.push(format!("delete network.{}.dns", iface_v6));
     }
     // 设备归属同样兜底（@<主接口>），防止历史配置指向错误设备
     let iface = &cfg.iface;

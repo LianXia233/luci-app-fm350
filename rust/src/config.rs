@@ -39,6 +39,20 @@ pub struct Config {
     pub data_dev: String,
     pub metric: u32,
     pub ipv6: bool,
+    /// 拨号成功后是否强制下发本插件配置的 DNS（覆盖模组/运营商下发的 DNS）。
+    ///
+    /// 蜂窝网络下运营商 DNS 经常出现解析慢、劫持或跨网不可达；固定为公共
+    /// DNS 后行为可预期。**只在拨号成功、接口已有地址后下发**，不影响
+    /// 未拨号时的空接口。
+    pub dns_force: bool,
+    /// IPv4 首选 DNS（`dns_force=1` 时必下发）。
+    pub dns4_primary: String,
+    /// IPv4 备用 DNS。
+    pub dns4_secondary: String,
+    /// IPv6 首选 DNS。
+    pub dns6_primary: String,
+    /// IPv6 备用 DNS。
+    pub dns6_secondary: String,
     /// 已废弃（v1.0.3 起）：原为 netifd dhcpv6 的 extendprefix 选项。
     /// IPv6 已改为守护静态配置（RNDIS 通道无 RA/DHCPv6 可用），本字段仅保留
     /// 以兼容旧配置读取，后端不再消费。
@@ -119,6 +133,11 @@ impl Default for Config {
             data_dev: "auto".into(),
             metric: 30,
             ipv6: true,
+            dns_force: true,
+            dns4_primary: "119.29.29.29".into(),
+            dns4_secondary: "223.5.5.5".into(),
+            dns6_primary: "2402:4e00::".into(),
+            dns6_secondary: "2400:3200::1".into(),
             extendprefix: true,
             auto_dial: true,
             route_guard: true,
@@ -147,6 +166,14 @@ impl Default for Config {
 // ---------------------------------------------------------------- UCI 原语
 
 fn uci_get(opt: &str) -> Option<String> {
+    uci_get_present(opt).filter(|s| !s.is_empty())
+}
+
+/// 读取 UCI 值，**保留空值**：选项存在但为空时返回 `Some("")`。
+///
+/// DNS 这类「空 = 不启用该项」的可选项必须用它，否则空值会被 `opt_str`
+/// 当成缺失而回落到默认值，用户永远清不掉某一项。
+fn uci_get_present(opt: &str) -> Option<String> {
     let out = Command::new("uci")
         .args(["-q", "get", &format!("{}.{}.{}", PACKAGE, SECTION, opt)])
         .output()
@@ -154,12 +181,7 @@ fn uci_get(opt: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn uci_set(opt: &str, val: &str) -> Result<(), String> {
@@ -176,6 +198,11 @@ fn uci_set(opt: &str, val: &str) -> Result<(), String> {
 /// 读取字符串型选项，缺失或空值回落到默认值。
 fn opt_str(key: &str, dflt: &str) -> String {
     uci_get(key).unwrap_or_else(|| dflt.to_string())
+}
+
+/// 读取字符串型选项，**空值保持为空**（仅缺失时回落默认值）。
+fn opt_str_keep_empty(key: &str, dflt: &str) -> String {
+    uci_get_present(key).unwrap_or_else(|| dflt.to_string())
 }
 
 /// 读取数值型选项：解析失败（含非数字）回落到默认值。
@@ -207,6 +234,11 @@ pub fn load() -> Config {
         data_dev: opt_str("data_dev", &d.data_dev),
         metric: opt_num("metric", d.metric),
         ipv6: opt_bool("ipv6", d.ipv6),
+        dns_force: opt_bool("dns_force", d.dns_force),
+        dns4_primary: opt_str_keep_empty("dns4_primary", &d.dns4_primary),
+        dns4_secondary: opt_str_keep_empty("dns4_secondary", &d.dns4_secondary),
+        dns6_primary: opt_str_keep_empty("dns6_primary", &d.dns6_primary),
+        dns6_secondary: opt_str_keep_empty("dns6_secondary", &d.dns6_secondary),
         extendprefix: opt_bool("extendprefix", d.extendprefix),
         auto_dial: opt_bool("auto_dial", d.auto_dial),
         route_guard: opt_bool("route_guard", d.route_guard),
@@ -307,6 +339,23 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
             }
         }
 
+        // 强制 DNS：空值表示跳过该项；非空必须是合法地址。
+        // 写入非法值会让 dnsmasq 启动失败或静默丢弃该上游，必须在入口拦下。
+        if matches!(
+            k.as_str(),
+            "dns4_primary" | "dns4_secondary" | "dns6_primary" | "dns6_secondary"
+        ) && !val.is_empty()
+        {
+            let ok = if k.starts_with("dns4_") {
+                crate::addr::is_valid_ipv4(&val)
+            } else {
+                crate::addr::normalize_ipv6(&val).is_some()
+            };
+            if !ok {
+                return Err(format!("{} 不是合法的 DNS 地址：『{}』", k, val));
+            }
+        }
+
         uci_set(k, &val)?;
     }
     let st = Command::new("uci")
@@ -335,6 +384,13 @@ mod tests {
         assert_eq!(c.v6_mode, d.v6_mode);
         assert!(c.ipv6 && c.auto_dial && c.route_guard);
         assert!(!c.imei_write);
+
+        // 强制 DNS 默认开启，且四条建议值必须与需求一致
+        assert!(c.dns_force);
+        assert_eq!(c.dns4_primary, "119.29.29.29");
+        assert_eq!(c.dns4_secondary, "223.5.5.5");
+        assert_eq!(c.dns6_primary, "2402:4e00::");
+        assert_eq!(c.dns6_secondary, "2400:3200::1");
     }
 
     #[test]
