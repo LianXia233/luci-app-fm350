@@ -104,12 +104,21 @@ pub fn set_rat_order(at: &AtHandle, cfg: &Config, order: &[String]) -> AtResult<
 }
 
 /// 切换 SIM 卡槽。
+///
+/// FM350 只有 0 / 1 两个卡槽；非法值直接拒绝，避免把 `AT+GTDUALSIM=7`
+/// 这类无意义指令发给模组（部分固件会回 OK 但状态不变，用户误以为成功）。
 pub fn set_sim_slot(at: &AtHandle, cfg: &Config, slot: u32) -> AtResult<String> {
+    if slot > 1 {
+        return Err(format!("SIM 卡槽只能是 0 或 1，当前为 {}", slot));
+    }
     run(at, cfg, &at_cmd::set_sim_slot(slot))
 }
 
-/// 在线/飞行模式。
+/// 在线/飞行模式。允许 0（最低功能）、1（在线）、4（飞行模式）。
 pub fn set_cfun(at: &AtHandle, cfg: &Config, mode: u32) -> AtResult<String> {
+    if !matches!(mode, 0 | 1 | 4) {
+        return Err(format!("CFUN 模式只能是 0、1 或 4，当前为 {}", mode));
+    }
     run(at, cfg, &at_cmd::set_cfun(mode))
 }
 
@@ -117,6 +126,11 @@ pub fn set_cfun(at: &AtHandle, cfg: &Config, mode: u32) -> AtResult<String> {
 ///
 /// 注意：切换会触发 USB 重新枚举，AT 口与数据网卡都会短暂消失。
 pub fn set_usb_mode(at: &AtHandle, cfg: &Config, mode: u32) -> AtResult<String> {
+    // 0 不是合法模式值；上限压到 255，防止误输入（如把毫秒当模式）触发
+    // 一次无谓的 USB 重枚举。
+    if !(1..=255).contains(&mode) {
+        return Err(format!("USB 模式必须是 1-255 的十进制值，当前为 {}", mode));
+    }
     run(at, cfg, &at_cmd::set_usb_mode(mode))
 }
 
@@ -148,5 +162,17 @@ mod tests {
         assert_eq!(at_cmd::set_eprartl(&["128", "4"]), "AT+EPRATL=2,128,4");
         // GTACT 的自动是 10，20 是三模全开
         assert_eq!(at_cmd::set_gtact("10"), "AT+GTACT=10");
+    }
+
+    /// 非法参数必须在触碰 AT 口之前就被拒绝（AtHandle 未打开任何端口）。
+    #[test]
+    fn invalid_hardware_args_are_rejected_locally() {
+        let at = AtHandle::new();
+        let cfg = Config::default();
+        assert!(set_sim_slot(&at, &cfg, 2).is_err());
+        assert!(set_cfun(&at, &cfg, 9).is_err());
+        assert!(set_usb_mode(&at, &cfg, 0).is_err());
+        assert!(set_usb_mode(&at, &cfg, 256).is_err());
+        assert!(set_usb_mode(&at, &cfg, 4000).is_err());
     }
 }

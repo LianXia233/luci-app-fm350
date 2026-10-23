@@ -99,12 +99,13 @@ pub fn send(at: &AtHandle, cfg: &Config, number: &str, text: &str) -> AtResult<S
     let _ = run(at, cfg, at_cmd::CSCS_GSM)?;
 
     at.with(cfg, |p| {
-        // 下发 AT+CMGS 后模组回 '>' 提示符，再写入 PDU 与 Ctrl-Z
-        let _ = p.command(&at_cmd::cmgs(tpdu_len));
-        p.wait_for(">", PROMPT_TIMEOUT)?;
+        // 下发 AT+CMGS 后模组回 '>' 提示符，再写入 PDU 与 Ctrl-Z。
+        // 必须用 command_prompt：普通 command() 会等结果码，把 '>' 当成
+        // 中间输出一直等到超时，随后 wait_for 只能拿到空气。
+        p.command_prompt(&at_cmd::cmgs(tpdu_len), ">", PROMPT_TIMEOUT)?;
         p.write_raw(pdu.as_bytes())?;
         p.write_raw(&[CTRL_Z])?;
-        p.wait_for("OK", Duration::from_secs(cfg.at_timeout.max(30)))
+        p.wait_result(Duration::from_secs(cfg.at_timeout.max(30)))
     })
     .map(|r| r.replace('\n', " "))
 }

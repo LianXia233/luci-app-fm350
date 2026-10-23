@@ -16,11 +16,23 @@ const IMEI_FAMILIES: &[&str] = &["EGMREXT", "EGMR", "SIMEI", "CGSN", "SERIALNUM"
 ///   2. 属于该族但为查询形式（`AT+CGSN`、`AT+CGSN?`、`AT+EGMR?`）→ 放行；
 ///   3. 属于该族且首参为 `0` 的读形式（`AT+EGMREXT=0,7`、`AT+EGMR=0,7`）→ 放行；
 ///   4. 其余一切携带参数的写形式（尤其 `AT+EGMREXT=1,...`、
-///      `AT+EGMR=1,7,"xxx"`、`AT+SIMEI=...`、`AT+CGSN=...`）→ 拦截。
+///      `AT+EGMR=1,7,"xxx"`、`AT+SIMEI=...`、`AT+CGSN=...`）→ 拦截；
+///   5. 含多行时**逐行**套用上述规则，任一行命中即拦截。
+///      `AtPort::command` 会把 CR/LF 原样写给模组，不逐行检查就能用
+///      `AT\r\nAT+EGMR=1,7,...` 绕过守卫。
 pub fn is_imei_write(cmd: &str) -> bool {
-    let raw = cmd.trim();
-    let upper = raw.to_uppercase();
-    let body = upper.strip_prefix("AT+").unwrap_or(&upper).trim();
+    // 单条 AT 指令不允许夹带换行：`AT\r\nAT+EGMR=1,7,...` 这类输入会被串口
+    // 原样写出，模组会把每一行都当作独立指令执行。逐行判定而不是简单拦截
+    // 多行输入，既堵住夹带，又不影响确有需要的批量查询。
+    cmd.split(['\r', '\n']).any(is_imei_write_line)
+}
+
+/// 判断单行指令是否为 IMEI / 串号写入。
+fn is_imei_write_line(line: &str) -> bool {
+    let upper = line.trim().to_uppercase();
+    // 允许 `AT+EGMR`、`+EGMR`、裸 `EGMR` 三种写法：宁可多拦，不可漏拦。
+    let body = upper.strip_prefix("AT").unwrap_or(&upper);
+    let body = body.trim_start_matches('+').trim_start();
 
     let family = match IMEI_FAMILIES.iter().find(|f| body.starts_with(*f)) {
         Some(f) => *f,
@@ -44,9 +56,19 @@ pub fn is_imei_write(cmd: &str) -> bool {
 
 /// 解释拦截原因，供 API 返回给前端。
 pub fn block_reason(cmd: &str) -> String {
+    let shown = cmd
+        .trim()
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    if cmd.contains(['\r', '\n']) {
+        return format!(
+            "已拒绝执行多行 AT 指令 `{}`：其中包含 IMEI / 串号写入指令，已被安全策略拦截（只读查询不受影响）",
+            shown
+        );
+    }
     format!(
         "已拒绝执行 `{}`：IMEI / 串号写入指令被安全策略拦截（只读查询不受影响）",
-        cmd.trim()
+        shown
     )
 }
 
@@ -103,8 +125,36 @@ mod tests {
             "AT+CGDCONT=1,\"IPV4V6\",\"cmiot5g\"",
             "AT+CFUN=1,1",
             "AT+GTUSBMODE=40",
+            "AT+CSQ\r\nAT+CGSN",
+            "AT+EGMREXT=0,7\r\nAT+CSQ",
+            "AT+CSQ\r\n",
         ] {
             assert!(!is_imei_write(c), "普通命令被误拦截: {}", c);
         }
+    }
+
+    #[test]
+    fn embedded_newlines_cannot_smuggle_writes() {
+        for c in [
+            "AT\r\nAT+EGMR=1,7,\"861234567890123\"",
+            "AT+CSQ\r\nAT+EGMR=1,7,\"861234567890123\"",
+            "AT+CSQ\nAT+EGMREXT=1,7",
+            "AT+EGMR=0,7\r\nAT+EGMR=1,7,\"861234567890123\"",
+            "AT+CSQ\rAT+SIMEI=861234567890123",
+            "AT+CSQ\r\n+EGMR=1,7,\"x\"",
+            "at+csq\r\nat+egmr=1,7,\"x\"",
+            "AT+CSQ\r\nEGMR=1,7,\"x\"",
+        ] {
+            assert!(is_imei_write(c), "换行夹带未被拦截: {:?}", c);
+        }
+    }
+
+    #[test]
+    fn block_reason_escapes_control_characters() {
+        let reason = block_reason("AT\r\nAT+EGMR=1,7,\"x\"");
+        assert!(reason.contains("多行"));
+        assert!(reason.contains("\\r\\n"));
+        assert!(!reason.contains('\r'));
+        assert!(!reason.contains('\n'));
     }
 }

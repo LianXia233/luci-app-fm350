@@ -223,16 +223,7 @@ impl AtPort {
 
     /// 发送一条 AT 命令并返回规范化响应（自动补 `\r`，剥离回显）。
     pub fn command(&mut self, cmd: &str) -> AtResult<String> {
-        // 限速：保证与上一条命令的发出时刻至少相隔 MIN_CMD_GAP。
-        // 等的是「发令时刻」之差，模组应答本身更慢时自然满足，因此不会把
-        // 原本就慢的命令拖得更慢，只在命令排得很密时才生效。
-        if let Some(prev) = self.last_cmd_at {
-            let gap = prev.elapsed();
-            if gap < MIN_CMD_GAP {
-                std::thread::sleep(MIN_CMD_GAP - gap);
-            }
-        }
-        self.last_cmd_at = Some(Instant::now());
+        self.pace();
 
         let line = if cmd.ends_with('\r') {
             cmd.to_string()
@@ -276,21 +267,74 @@ impl AtPort {
         Ok(normalize(&raw, cmd))
     }
 
-    /// 连续零应答计数（哑口判定依据）。
-    pub fn silent_streak(&self) -> u32 {
-        self.silent_streak
-    }
+    /// 发送一条**以提示符结束**的命令（如 `AT+CMGS` 的 `>`）。
+    ///
+    /// 与 [`command`](Self::command) 的区别：不等结果码，收到提示符立即返回，
+    /// 把随后的数据通道留给调用方（`AT+CMGS` 需要在 `>` 之后写 PDU）。
+    /// 若模组直接回 `ERROR` 等结果码，则立即失败而不是空等到超时。
+    pub fn command_prompt(
+        &mut self,
+        cmd: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> AtResult<String> {
+        self.pace();
 
-    /// 发送原始数据（用于 `AT+CMGS` 的 PDU 阶段）。
-    pub fn write_raw(&mut self, data: &[u8]) -> AtResult<()> {
+        let line = if cmd.ends_with('\r') {
+            cmd.to_string()
+        } else {
+            format!("{}\r", cmd)
+        };
+        let _ = self.drain();
         self.port
-            .write_all(data)
+            .write_all(line.as_bytes())
             .map_err(|e| format!("写入失败: {}", e))?;
-        self.port.flush().map_err(|e| format!("flush 失败: {}", e))
+        let _ = self.port.flush();
+
+        let deadline = Instant::now() + timeout;
+        let mut raw = String::new();
+        let mut buf = [0u8; 256];
+        let mut chunk = Vec::new();
+        let mut received = 0usize;
+        while Instant::now() < deadline {
+            match self.port.read(&mut buf) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(10)),
+                Ok(n) => {
+                    received += n;
+                    self.gate.feed(&buf[..n], &mut chunk);
+                    raw.push_str(&String::from_utf8_lossy(&chunk));
+                    chunk.clear();
+                    if raw.contains(prompt) {
+                        self.silent_streak = 0;
+                        return Ok(normalize(&raw, cmd));
+                    }
+                    if finished(&raw) {
+                        self.silent_streak = 0;
+                        return Err(format!(
+                            "{} 未给出 '{}' 提示符：{}",
+                            cmd,
+                            prompt,
+                            normalize(&raw, cmd)
+                        ));
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        if received == 0 {
+            self.silent_streak = self.silent_streak.saturating_add(1);
+        } else {
+            self.silent_streak = 0;
+        }
+        Err(format!("等待 '{}' 提示符超时", prompt))
     }
 
-    /// 等待出现指定提示符（如 `AT+CMGS` 的 `>`）。
-    pub fn wait_for(&mut self, needle: &str, timeout: Duration) -> AtResult<String> {
+    /// 等待一条结果码（`OK` / `ERROR` / `+CME ERROR` / `+CMS ERROR` 等）。
+    ///
+    /// 与 [`command`](Self::command) 的区别：这里**区分成功与失败**，`OK`
+    /// 返回规范化响应，其它结果码直接作为错误返回，便于上层展示真实原因。
+    /// 用于 `AT+CMGS` 写完 PDU 之后的收尾。
+    pub fn wait_result(&mut self, timeout: Duration) -> AtResult<String> {
         let deadline = Instant::now() + timeout;
         let mut raw = String::new();
         let mut buf = [0u8; 256];
@@ -302,14 +346,46 @@ impl AtPort {
                     self.gate.feed(&buf[..n], &mut chunk);
                     raw.push_str(&String::from_utf8_lossy(&chunk));
                     chunk.clear();
-                    if raw.contains(needle) {
-                        return Ok(raw);
+                    if finished(&raw) {
+                        let out = normalize(&raw, "");
+                        return if last_line(&out) == "OK" {
+                            Ok(out)
+                        } else {
+                            Err(out)
+                        };
                     }
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
-        Err(format!("等待 '{}' 超时", needle))
+        Err("等待模组结果码超时".to_string())
+    }
+
+    /// 命令限速：保证与上一条命令的发出时刻至少相隔 [`MIN_CMD_GAP`]。
+    ///
+    /// 等的是「发令时刻」之差，模组应答本身更慢时自然满足，因此不会把原本
+    /// 就慢的命令拖得更慢，只在命令排得很密时才生效。
+    fn pace(&mut self) {
+        if let Some(prev) = self.last_cmd_at {
+            let gap = prev.elapsed();
+            if gap < MIN_CMD_GAP {
+                std::thread::sleep(MIN_CMD_GAP - gap);
+            }
+        }
+        self.last_cmd_at = Some(Instant::now());
+    }
+
+    /// 连续零应答计数（哑口判定依据）。
+    pub fn silent_streak(&self) -> u32 {
+        self.silent_streak
+    }
+
+    /// 发送原始数据（用于 `AT+CMGS` 的 PDU 阶段）。
+    pub fn write_raw(&mut self, data: &[u8]) -> AtResult<()> {
+        self.port
+            .write_all(data)
+            .map_err(|e| format!("写入失败: {}", e))?;
+        self.port.flush().map_err(|e| format!("flush 失败: {}", e))
     }
 }
 
@@ -337,6 +413,11 @@ fn normalize(raw: &str, cmd: &str) -> String {
         .filter(|l| *l != echo)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 取规范化响应的最后一行（结果码所在行）。
+fn last_line(text: &str) -> &str {
+    text.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 
 /// 端口持有统计（供 `/api/ports` 与排障展示）。
@@ -698,6 +779,13 @@ mod tests {
     fn normalize_strips_echo_and_blank_lines() {
         let out = normalize("AT+CSQ\r+CSQ: 99,99\r\r\nOK\r\n", "AT+CSQ");
         assert_eq!(out, "+CSQ: 99,99\nOK");
+    }
+
+    #[test]
+    fn last_line_returns_terminal_code() {
+        assert_eq!(last_line("+CMGS: 5\nOK"), "OK");
+        assert_eq!(last_line("+CMS ERROR: 500"), "+CMS ERROR: 500");
+        assert_eq!(last_line(""), "");
     }
 
     #[test]

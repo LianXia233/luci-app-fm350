@@ -55,13 +55,15 @@ uci -q set network."$IFACE".auto=1
 if [ "$IPV6" = "1" ] && [ -n "$IFACE_V6" ] && [ "$V6_MODE" != "off" ]; then
 	if [ "$(uci -q get network."$IFACE_V6")" != "interface" ]; then
 		uci -q set network."$IFACE_V6"=interface
+		# 三种模式都必须附着在主接口设备上：缺少 device 时 netifd 会把
+		# IPv6 段当成独立 netdev，RA/DHCPv6 永远等不到报文。
+		uci -q set network."$IFACE_V6".device="@$IFACE"
 		case "$V6_MODE" in
 			ra)
 				uci -q set network."$IFACE_V6".proto=none
 				;;
 			static)
 				uci -q set network."$IFACE_V6".proto=static
-				uci -q set network."$IFACE_V6".device="@$IFACE"
 				;;
 			*)
 				uci -q set network."$IFACE_V6".proto=dhcpv6

@@ -2,6 +2,56 @@
 
 本项目遵循语义化版本号。
 
+## 1.0.18-r1 (2026-10-23)
+
+本版以安全加固与实机可靠性为主：修复短信发送、IMEI 守卫绕过与 PDP 重复查询，
+并把所有会拼进 shell / AT 指令的配置项纳入写入校验。
+
+### 安全加固
+
+- **IMEI 守卫按行检查**：`AtPort::command` 会把 CR/LF 原样写给模组，
+  旧实现只看第一行，`AT\r\nAT+EGMR=1,7,...` 可绕过拦截。现在逐行套用
+  放行/拦截规则，任一行命中写形式即拒绝；拦截信息会转义 CR/LF，
+  避免多行内容污染日志与前端。
+- 配置写入改为**先整体校验、再落盘**：后面的字段非法时，前面的值不会再
+  留在 UCI delta 目录里被下一次 commit 顺带生效。
+- 新增写入校验：网卡名（`iface` / `iface_v6` / `data_dev`）、`gateway`、
+  `netmask`、`apn`、`pdp_type`、`username`、`password`、`auth`、
+  `gateway_mode`、`v6_mode`。这些值会被拼进 `ifup`、`ping -I`、
+  `uci set network...` 或 AT 引号字符串，禁止空格、引号、分号、`$()`、
+  CR/LF 等元字符。
+- 短信中心号码改为白名单（可选前导 `+` + 1-20 位数字），堵住
+  `AT+CSCA="..."` 的引号/换行注入。
+- `/api/sim`、`/api/cfun`、`/api/usbmode` 与 CLI 不再对缺失/非法参数
+  静默取默认值：`sim` 仅 0/1，`cfun` 仅 0/1/4，`usbmode` 为 1-255；
+  u32 参数溢出直接报错而不是截断。
+- ACL：`imei_backup` 从只读组移到写组（它会写 `/etc/fm350/imei.backup`）。
+
+### 修复
+
+- **短信发送**：`AT+CMGS` 的 `>` 提示符不再被普通命令的“等结果码”逻辑
+  吞掉。新增 `AtPort::command_prompt()` 与 `wait_result()`：收到 `>` 立即
+  写 PDU，`ERROR` / `+CMS ERROR` 直接返回真实原因，不再空等到超时。
+- **短信长度**：单条 PDU 的 UDL 只有 1 字节，GSM-7 超过 160 septets、
+  UCS2 超过 140 字节时旧代码会把长度截断后照发（内容残缺）。现在直接
+  报错并提示上限；收件人号码超过 20 位同样拒绝。
+- CLI 转发超时与 rpcd 预算对齐：GET 固定 15 s，POST 收敛到 60-85 s
+  （rpcd 读/写兜底分别为 20/90 s），避免 CLI 自己还没超时、rpcd 已把
+  同步调用掐断。
+- `sms send` 未加引号的多词正文按空格拼接，不再只发第一个词；
+  `sms delete` 缺少/非法序号时明确报错。
+- 首次安装的 IPv6 骨架在 `ra` / `dhcpv6` 模式下也写入
+  `device=@<主接口>`，与运行期 `ensure_iface` 一致，避免 v6 段被 netifd
+  当成独立设备而永远等不到 RA/DHCPv6 报文。
+
+### 优化
+
+- PDP 状态查询不再把 `CGDCONT?` / `CGACT?` / `CGCONTRDP` / `CGPADDR`
+  各发两遍：第一遍解析时同步记录原始回显，单次 `pdp()` 的 AT 往返减半；
+  状态刷新与拨号阶段的多轮地址轮询都受益。
+- 新增/更新单测覆盖换行夹带、配置注入、参数越界、短信长度等分支，
+  `cargo test --locked` 221 passed。
+
 ## 1.0.17-r1 (2026-10-23)
 
 本版新增**拨号成功后强制下发 DNS**，并依据 FM350 AT 手册补齐子网掩码解析。

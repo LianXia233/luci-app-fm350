@@ -191,9 +191,14 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         cid: cfg.cid,
         ..Default::default()
     };
+    // 一次巡检只发四条查询，响应在解析的同时记入 raw。
+    // 旧实现解析完再 run_list 重发同样四条，相当于每条 AT 命令都付两次
+    // 往返；AT 是半双工串行资源，这直接翻倍了状态刷新耗时。
+    let mut raw: Vec<(String, String)> = Vec::new();
 
-    if let Ok(r) = run(at, cfg, at_cmd::CGDCONT_READ) {
-        for row in crate::at::rows(&r, "+CGDCONT") {
+    let cgdcont = record(&mut raw, at_cmd::CGDCONT_READ, run(at, cfg, at_cmd::CGDCONT_READ));
+    if let Some(r) = &cgdcont {
+        for row in crate::at::rows(r, "+CGDCONT") {
             if row.first().and_then(|x| x.parse::<u32>().ok()) == Some(cfg.cid) {
                 st.pdp_type = row.get(1).cloned().unwrap_or_default();
                 st.apn = row.get(2).cloned().unwrap_or_default();
@@ -210,17 +215,20 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     let mut contr_dns: Vec<String> = Vec::new();
 
     // 判据 0（权威）：AT+CGACT?
-    let cgact = run(at, cfg, at_cmd::CGACT_READ)
-        .ok()
-        .and_then(|r| cgact_state(&r, cfg.cid));
+    let cgact_resp = record(&mut raw, at_cmd::CGACT_READ, run(at, cfg, at_cmd::CGACT_READ));
+    let cgact = cgact_resp
+        .as_ref()
+        .and_then(|r| cgact_state(r, cfg.cid));
 
     // CGCONTRDP：只提供地址与 DNS 备用值，不再单独作为激活判据。
+    let cmd_contr = at_cmd::contrdp(cfg.cid);
+    let contr = record(&mut raw, &cmd_contr, run(at, cfg, &cmd_contr));
     let mut contr_ipv4 = String::new();
     let mut contr_ipv6 = String::new();
     let mut contr_mask4 = String::new();
     let mut contr_gw4 = String::new();
     let mut contr_gw6 = String::new();
-    if let Ok(r) = run(at, cfg, &at_cmd::contrdp(cfg.cid)) {
+    if let Some(r) = &contr {
         for row in crate::at::rows(&r, "+CGCONTRDP") {
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
             //
@@ -277,12 +285,14 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     // `0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1`（::1 占位）。只要该位出现过，就以它
     // 为准 —— 是占位就判定「无 IPv6」，绝不回落到 CGCONTRDP 的残留值，
     // 否则会拿陈旧地址配出一条永远不通的 v6 默认路由。
+    let cmd_addr = at_cmd::pdp_addr(cfg.cid);
+    let addr_resp = record(&mut raw, &cmd_addr, run(at, cfg, &cmd_addr));
     let mut addr_ipv4 = String::new();
     let mut addr_ipv6 = String::new();
     let mut v6_slot_seen = false;
-    if let Ok(r) = run(at, cfg, &at_cmd::pdp_addr(cfg.cid)) {
+    if let Some(r) = &addr_resp {
         // +CGPADDR: <cid>,<PDP_addr>[,<PDP_addr6>]
-        let row = crate::at::first(&r, "+CGPADDR");
+        let row = crate::at::first(r, "+CGPADDR");
         for item in row.iter().skip(1) {
             if looks_v6(item) {
                 v6_slot_seen = true;
@@ -300,7 +310,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
             }
         }
         if addr_ipv4.is_empty() {
-            if let Some(x) = crate::at::first_ipv4(&r) {
+            if let Some(x) = crate::at::first_ipv4(r) {
                 if is_valid_ipv4(&x) {
                     addr_ipv4 = x;
                 }
@@ -368,17 +378,28 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         }
     }
 
-    st.raw = super::run_list(
-        at,
-        cfg,
-        &[
-            at_cmd::CGDCONT_READ,
-            at_cmd::CGACT_READ,
-            &at_cmd::contrdp(cfg.cid),
-            &at_cmd::pdp_addr(cfg.cid),
-        ],
-    );
+    st.raw = raw;
     st
+}
+
+/// 把一次查询的结果记入 raw 回显，同时把响应交给解析逻辑。
+///
+/// 失败时沿用 `run_list` 的 `ERR: ...` 形态，保证前端展示与旧版一致。
+fn record(
+    raw: &mut Vec<(String, String)>,
+    cmd: &str,
+    res: AtResult<String>,
+) -> Option<String> {
+    match res {
+        Ok(r) => {
+            raw.push((cmd.to_string(), r.clone()));
+            Some(r)
+        }
+        Err(e) => {
+            raw.push((cmd.to_string(), format!("ERR: {}", e)));
+            None
+        }
+    }
 }
 
 /// 拨号结果：除了 PDP 状态，还带出失败时的诊断信息。

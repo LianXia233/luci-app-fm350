@@ -14,8 +14,7 @@
 					"config",
 					"ports",
 					"sshfwd",
-					"imei_read",
-					"imei_backup"
+					"imei_read"
 				],
 				"luci.fm350.sms": [
 					"list",
@@ -44,6 +43,7 @@
 					"set",
 					"modexec",
 					"sshbootstrap",
+					"imei_backup",
 					"imei_write"
 				],
 				"luci.fm350.sms": [

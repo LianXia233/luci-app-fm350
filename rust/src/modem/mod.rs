@@ -95,8 +95,20 @@ pub fn status(at: &AtHandle, cfg: &Config) -> Status {
 }
 
 /// 写短信中心号码。
+///
+/// 号码会以 `AT+CSCA="<number>",<type>` 的形式拼进命令行，因此必须先做
+/// 白名单校验：只允许可选的前导 `+` 与 1-20 位数字。否则一个带引号和
+/// CRLF 的号码就能在 AT 口上追加任意指令。
 pub fn set_sms_center(at: &AtHandle, cfg: &Config, number: &str) -> AtResult<String> {
-    run(at, cfg, &at::at_cmd::set_sms_center(number))
+    let n = number.trim();
+    let digits = n.strip_prefix('+').unwrap_or(n);
+    if digits.is_empty() || digits.len() > 20 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "短信中心号码『{}』非法：只允许可选的前导 + 与 1-20 位数字",
+            number
+        ));
+    }
+    run(at, cfg, &at::at_cmd::set_sms_center(n))
 }
 
 /// 读一次数据通道绑定方向（`AT+EMBIND?`）。
@@ -108,4 +120,26 @@ pub fn set_sms_center(at: &AtHandle, cfg: &Config, number: &str) -> AtResult<Str
 /// 「方向正确」。
 pub fn bind_status(at: &AtHandle, cfg: &Config) -> Option<BindState> {
     bind::read(at, cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 短信中心号码直接拼进 AT 指令，必须挡住引号 / 换行 / 非数字。
+    #[test]
+    fn sms_center_rejects_injection() {
+        let at = AtHandle::new();
+        let cfg = Config::default();
+        for n in [
+            "",
+            "abc",
+            "+",
+            "10086\"\r\nAT+CFUN=0",
+            "10086\nAT+CFUN=0",
+            "123456789012345678901",
+        ] {
+            assert!(set_sms_center(&at, &cfg, n).is_err(), "应拒绝: {:?}", n);
+        }
+    }
 }
