@@ -40,9 +40,10 @@ var PRESET_GROUPS = [
 			/* 手册 §11.1.9：`+CEMODE: <mode>`，UE 的 EPS 工作模式。 */
 			{ label: _('EPS 工作模式'), cmd: 'AT+CEMODE?' },
 			/* 手册 §11.1.11：`+ERAT:<Act>,<GPRS status>,<RAT mode>,<prefer_rat>`。
-			   可用来**验证 `AT+EPRATL` 的优先制式是否真的生效**，
-			   与上方「优先制式」（AT+EPRATL?）互为印证。 */
-			{ label: _('当前 RAT 与优先制式生效值'), cmd: 'AT+ERAT?' },
+			   注意：手册明写 `<prefer_rat>` 为 **ignore（3GPP RAT 下被丢弃）**，
+			   不能用它验证 AT+EPRATL 的优先制式是否生效（生效值请读 AT+EPRATL?）；
+			   本命令只能看到 <RAT mode> 反映的当前 RAT 模式配置。 */
+			{ label: _('当前 RAT 模式与 GPRS 状态'), cmd: 'AT+ERAT?' },
 			/* 手册 §18.4：`=<zone_id>`，0 = 一次回全部五个热区
 			   （1 CPU、2 PA1、3 PA2、4 Transceiver、5 PMIC）的历史最高温。
 			   与 AT+GTSENRDTEMP=0（瞬时温度）互补，降频/限速排障必看。 */
