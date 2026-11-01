@@ -35,8 +35,8 @@
 | 修改类型 | AP 侧：atproxy v2 EMBIND 强制绑定 + usb.init ADB 补丁 + dropbear SSH（见第 1 节） |
 | 文件名 | `Generic_29.24.02_F27.zip` |
 | 大小 | 50,525,259 字节（约 48.2 MiB） |
-| MD5 | `60e04e7dddb15df9bdc7d339b17505f7` |
-| SHA-256 | `9f9159efc5e6dd530fc61e9b3439f00289fd905a95b5bda4d036adfb47f779f0` |
+| MD5 | `92059c8243a309d3aba2f777b4fdc355` |
+| SHA-256 | `2abf8670dd202b9c323c0f5ea3bc30c9d37ddffd3cd4cb03f82dff816a384326` |
 
 刷入前请务必校验上述哈希值，不匹配则停止操作。关键镜像分项校验：
 
@@ -44,6 +44,13 @@
 |---|---|
 | `modem.img` | `9dfb1f11d206fd32b93e8384b62d3c63` |
 | `root.squashfs` | `677b62c6b251a2d7459df5ec1053b6bb` |
+
+### 配套工具与文档（随本 Release 附件提供）
+
+| 文件 | 说明 | 大小 | MD5 | SHA-256 |
+|---|---|---|---|---|
+| `MTK_Windows_USB_Driver_v17.6.0.6.exe` | MediaTek Windows USB 驱动，供主机在刷机模式（BootROM / DA 模式）下识别模组 | 5,674,427 字节（约 5.4 MiB） | `f6c6b674d72c4f3a7b08c27926dcf259` | `9726952e95bc501bc3778203a6d7b38bd68a7e124bbdb5fb6be0452d4397e4b1` |
+| `FM350-GL刷机方法-240812改.pptx` | FM350-GL 刷机方法演示文档（SP Flash Tool 线刷流程） | 2,191,498 字节（约 2.1 MiB） | `559e6b745edca2194eb205719e8f8d7a` | `cca4b68b9353856d6a89e9ceddc5e4d620e63d0652ac1d7d301608eb2e9ca84b` |
 
 ## 3. ⚠️ 刷入前必须备份 IMEI / SN 分区
 
