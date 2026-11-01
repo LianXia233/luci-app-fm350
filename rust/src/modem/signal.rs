@@ -7,8 +7,11 @@
 //!   是**阶梯索引**而非物理值，且只有当前制式对应的那几个索引有效；
 //! * 制式（`<rat>`）必须来自 `AT+GTCCINFO?` 的服务小区行 —— 只有知道制式，
 //!   才知道该读 CESQ 的哪几个下标、用哪张换算表；
-//! * LTE 没有 SINR 索引，`+GTCCINFO` 服务小区第 10 个字段是 `<rssnr_value>`，
-//!   该值**直接就是 dB**，不再走阶梯换算。
+//! * LTE 在 CESQ 里没有 SINR 项，只能取 `+GTCCINFO` 服务小区的 `<rssnr_value>`。
+//!   **该字段手册与固件不一致**：手册 §11.1.15 定义为 0.5 dB 阶梯索引，
+//!   实机却上报 dB 原值。判定过程与实机采样记在下方 `signal()` 里，
+//!   结论是采信实机（同一行里 ss_rsrp / ss_rsrq 确实严格走手册阶梯，
+//!   只有信噪比这一位不走）。
 
 use super::band;
 use super::run;
@@ -165,7 +168,7 @@ pub fn cell_rat_text(rat: &str) -> &'static str {
     }
 }
 
-/// 注册状态码转文字（3GPP TS 27.007）。
+/// 注册状态码转文字（3GPP TS 27.007；手册 §11.1.5 的 `<stat>` 完整枚举了 0..10）。
 pub fn reg_text(state: &str) -> &'static str {
     match state {
         "0" => "未注册",
@@ -174,14 +177,23 @@ pub fn reg_text(state: &str) -> &'static str {
         "3" => "注册被拒绝",
         "4" => "未知",
         "5" => "已注册（漫游）",
+        // 手册 §11.1.5 还定义了 6..10，旧实现全部落到「未知」。
+        // 其中 8（仅紧急承载服务已附着）在排障上很有意义：它说明模组
+        // 已经附着但拿不到普通业务，与「未注册」是完全不同的故障方向。
+        "6" => "已注册（仅短信，归属网络）",
+        "7" => "已注册（仅短信，漫游）",
+        "8" => "仅紧急承载服务已附着",
+        "9" => "已注册（不首选 CSFB，归属网络）",
+        "10" => "已注册（不首选 CSFB，漫游）",
         _ => "未知",
     }
 }
 
-/// 接入技术代码转文字。
+/// 接入技术代码转文字（手册 §11.1.5 的 `<AcT>`）。
 pub fn act_text(act: &str) -> &'static str {
     match act {
         "0" => "GSM",
+        "1" => "GSM Compact",
         "2" => "UTRAN",
         "3" => "GSM/EGPRS",
         "4" => "UTRAN HSDPA",
@@ -427,17 +439,26 @@ pub fn signal(at: &AtHandle, cfg: &Config) -> Signal {
         s.arfcn = cget(6);
         s.pci = cget(7);
 
-        let raw_band = cget(8);
-        let raw_bw = cget(9);
-
         // 后两个字段是**编码值而非人可读名**：实机 NR 服务小区返回
         // `...,504990,128,5041,500,...` —— `5041` 是 `50|41` = n41、
         // `500` 是带宽的 1/5 = 100 MHz。解不出来时保留原始码并显式标注，
         // 不把未识别的值伪装成频段名或带宽值。
+        //
+        // 手册 §11.1.15 对**每种制式单独定义了字段布局**，索引 8/9 的含义
+        // 并不通用：
+        //   UMTS 服务小区(15 字段)：8 = <band>（<umts_band>，1..10）、9 = <ecno>
+        //   LTE  服务小区(14 字段)：8 = <band>（101..171）、       9 = <bandwidth>
+        //   NR   服务小区(14 字段)：8 = <band>（"50"+n）、          9 = <bandwidth>
+        // 旧实现无条件把索引 9 当带宽，于是在 WCDMA 下会把 `<ecno>` 的阶梯索引
+        // （如 30）原样显示成「频段带宽档位 30」—— 看似有值、实则无意义。
+        let raw_band = cget(8);
+        let raw_bw = if cell_rat == "2" { String::new() } else { cget(9) };
+
         if !raw_band.is_empty() {
             let decoded = match cell_rat.as_str() {
                 "9" => band::nr_band_from_code(&raw_band),
                 "4" => band::lte_band_from_code(&raw_band),
+                "2" => band::umts_band_from_code(&raw_band),
                 _ => None,
             };
             match decoded {
@@ -474,12 +495,24 @@ pub fn signal(at: &AtHandle, cfg: &Config) -> Signal {
         "4" => {
             s.rsrp = ci(5).and_then(lte_rsrp_dbm);
             s.rsrq = ci(4).and_then(lte_rsrq_db);
-            // GTCCINFO LTE 服务小区第 10 个字段为 <rssnr_value>，
-            // 单位 dB（-100..100，255 = 无效），不再走阶梯换算。
+            // GTCCINFO LTE 服务小区第 11 个字段（索引 10）为 <rssnr_value>。
+            //
+            // **手册与固件在此处不一致**，采信实机：手册 §11.1.15 把
+            // <rssnr_value> / <ss_sinr> 定义为 0.5 dB 阶梯索引（-100 → ≤ -50 dB、
+            // 1 → (0, 0.5] dB、100 → > 50 dB、255 → 无效），但实机上报的是 dB 原值。
+            // 判据是文件头那组背靠背采样（同一时刻先 CESQ 再 GTCCINFO）：
+            //   服务小区索引 10 = 16，CESQ 的 ss_sinr = 77 → -23 + 76×0.5 = 15.0 dB
+            //   • 按 dB 原值读      → 16.0 dB，Δ1.0（与另两个字段的量化误差同级）
+            //   • 按手册 ss_sinr 阶梯 → -15.5 dB，Δ30.5
+            //   • 按手册 rssnr/2 阶梯 → 8.0 dB，Δ7.0
+            // 同一样本里 ss_rsrp（索引 12）与 ss_rsrq（索引 13）确实严格遵循手册阶梯
+            // （69 → -88 dBm vs CESQ -87；64 → -11.5 dB vs CESQ -11.0），
+            // 说明不是整行偏移，而是**只有信噪比这一位不走阶梯**。
+            // 255 为手册明写的无效值；超出物理可信区间的一律当未测量。
             s.sinr = cell
                 .get(10)
                 .and_then(|x| x.parse::<i32>().ok())
-                .filter(|v| (-100..=100).contains(v))
+                .filter(|v| *v != 255 && (-100..=100).contains(v))
                 .map(|v| v as f32);
             if s.rsrp.is_some() {
                 s.source = "AT+CESQ (LTE)".to_string();

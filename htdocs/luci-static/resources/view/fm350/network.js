@@ -23,15 +23,32 @@
  *        → 倒数第 1 位 64 → 信号质量 -11.5 dB    对上 -11.0 dB
  *    三者误差均不超过 1 dB，属模组的整数量化噪声，映射成立。
  *
- * 2. 倒数第 2 位与倒数第 3 位在实机全部 8 行小区上恒等（69/69、126/126等），
- *    是同一个量的重复上报，非信噪比。信噪比严格取倒数第 4 位的原始 dB 值；
- *    邻区行无此字段，一律显示「未测量」。
+  * 2. 倒数第 2 位与倒数第 3 位在实机全部 8 行小区上恒等（69/69、126/126等），
+ *    是同一个量的重复上报，非信噪比。这一点可由手册印证：§11.1.15 把 NR 的
+ *    <rxlev> 直接定义成 SS-RSRP 阶梯，与 <ss_rsrp> 同表，故两者必然相等。
+ *    信噪比取服务小区行的 <ss_sinr>/<rssnr_value> 位；**邻区行不取信噪比**
+ *    （LTE 邻区该位置是 <bandwidth>，UMTS 邻区是 <ecno>，语义完全不同）。
  *
- * 3. 索引 126 / 127 / 255 是「未测量」哨兵值，一律标记为未测量，严禁误算。
+ *    注意：手册把这一位定义为 0.5 dB 阶梯索引（-100 → ≤ -50 dB，100 → > 50 dB），
+ *    但实机上报的是 dB 原值。用上面那组背靠背采样判定：索引 10 = 16，
+ *    按 dB 原值读得 16.0 dB（与 CESQ 的 15.0 dB 相差 1 dB，和另两个字段的
+ *    量化误差同级）；按手册阶梯读得 -15.5 dB（相差 30.5 dB）或 8.0 dB（相差 7 dB）。
+ *    故此处采信实机、按 dB 原值处理，属**手册与固件的已知分歧**。
+ *
+ * 3. 索引 255 一律是「未测量」哨兵；99 为 rxlev/ber 的「未测量」。
+ *    注意 126 / 127 **不是**哨兵：手册明确 126 = ≥ -31 dBm（ss_rsrp）、
+ *    126 = [19.5,20) dB（ss_rsrq）、127 = ≥ 40 dB（ss_sinr），都是有效强信号档，
+ *    误判成未测量会把最好的信号显示成空白。
  *
  * 4. 载波聚合 AT+GTCAINFO? 在本模组上只回 OK，无数据 —— 面板如实标注「不可用」。
+ *    （手册 §11.1.16 其实完整定义了 PCC/SCC1/SCC2 的字段结构，一旦固件开始上报，
+ *    后端 signal.rs 应按该结构解析，而不是原样透出行文本。）
  *
- * 5. 制式选择经由 AT+GTACT 的 mode 统一控制；制式优先级模组不支持，不做虚假按键。
+ * 5. 制式选择经由 AT+GTACT 的 <rat> 控制。**制式优先级模组是支持的**：
+ *    一是 AT+GTACT 的 <PreferredAct1>/<PreferredAct2> 两个位置参数
+ *    （手册 §11.1.14 的 RAT Combination Table，合法值仅 2/3/6）；
+ *    二是 AT+EPRATL=<RATnum>,<rat…>（手册 §11.1.13，编码 2/4/128），
+ *    后端 modem::lock::set_rat_order 已实现，`fm350d rat` 可读写。
  */
 
 /* ================================================================
@@ -51,32 +68,50 @@ function fmtNum(v, digits, unit) {
 	return unit ? (s + ' ' + unit) : s;
 }
 
-/* 3GPP 阶梯索引 → 物理量。idx <= 0 或达到上限哨兵时返回 null（未测量）。 */
+/* 3GPP 阶梯索引 → 物理量。
+ *
+ * 手册的阶梯定义统一为：索引 0 表示「低于 base」，索引 n≥1 对应
+ * [base+(n-1)*step, base+n*step)，取**区间下界**（保守估计，与后端
+ * signal.rs 的 idx_lower 一致）。索引 0 因此是合法读数，不是「未测量」；
+ * 真正的哨兵只有 255（部分字段额外有 99），由调用方先行滤除。 */
 function idxToLinear(idx, base, step, maxIdx) {
 	if (idx == null) return null;
 	var n = parseInt(idx, 10);
-	if (!isFinite(n) || n <= 0) return null;
+	if (!isFinite(n) || n < 0) return null;
+	if (n === 255) return null;
 	if (maxIdx != null && n > maxIdx) return null;
-	return base + (n - 1) * step;
+	return n <= 0 ? base - step : base + (n - 1) * step;
 }
 
-/* 信号强度 RSRP：索引 1 → -156 dBm，步长 1 dB；126 及以上为哨兵 */
+/* 信号强度：按制式选表（手册 §11.1.2 / §11.1.15）
+ *   LTE ：<rsrp>     索引 1 → -140 dBm，步长 1 dB，97 为最高有效档
+ *   NR  ：<ss_rsrp>  索引 1 → -156 dBm，步长 1 dB，126 为最高有效档
+ *   WCDMA：<rscp>    索引 1 → -120 dBm，步长 1 dB，96 为最高有效档 */
 function rsrpFromIdx(idx, rat) {
-	if (rat === 4) return idxToLinear(idx, -140, 1, 97);      // LTE（-140 ~ -44 dBm）
-	return idxToLinear(idx, -156, 1, 125);                     // NR（-156 ~ -32 dBm）
+	if (rat === 4) return idxToLinear(idx, -140, 1, 97);
+	if (rat === 2) return idxToLinear(idx, -120, 1, 96);
+	return idxToLinear(idx, -156, 1, 126);
 }
 
-/* 信号质量 RSRQ：索引 1 → -43 dB，步长 0.5 dB；126 及以上为哨兵 */
+/* 信号质量：按制式选表
+ *   LTE ：<rsrq>      索引 1 → -19.5 dB，步长 0.5 dB，34 为最高有效档
+ *   NR  ：<ss_rsrq>   索引 1 → -43 dB，  步长 0.5 dB，126 为最高有效档
+ *   WCDMA：<Ec/Io_lev> 索引 1 → -24 dB， 步长 0.5 dB，49 为最高有效档 */
 function rsrqFromIdx(idx, rat) {
-	if (rat === 4) return idxToLinear(idx, -19.5, 0.5, 34);    // LTE（-19.5 ~ -3 dB）
-	return idxToLinear(idx, -43, 0.5, 125);                    // NR（-43 ~ 20 dB）
+	if (rat === 4) return idxToLinear(idx, -19.5, 0.5, 34);
+	if (rat === 2) return idxToLinear(idx, -24, 0.5, 49);
+	return idxToLinear(idx, -43, 0.5, 126);
 }
 
-/* 信噪比 SINR：模组直接上报 dB 原值（-100 ~ 100） */
+/* 信噪比：见文件头设计前提 2。
+ *
+ * 实机在服务小区行上报的是 **dB 原值**，而不是手册定义的 0.5 dB 阶梯索引，
+ * 故此处不做阶梯换算。255 为手册明写的无效值；超出物理可信区间（SINR
+ * 不可能低于 -100 dB 或高于 100 dB）一律当作未测量，不拿垃圾值入图。 */
 function sinrFromRaw(v) {
 	if (v == null || v === '') return null;
 	var n = parseInt(v, 10);
-	if (!isFinite(n)) return null;
+	if (!isFinite(n) || n === 255) return null;
 	if (n < -100 || n > 100) return null;
 	return n;
 }
@@ -85,57 +120,126 @@ function sinrFromRaw(v) {
  * 二、制式与频段映射
  * ================================================================ */
 
+/* <rat> 取值以手册 §11.1.15 的 Defined Values 为权威：
+ *   0 = Invalid network（**不是 2G GSM**）、2 = WCDMA、4 = LTE、9 = NR-RAN。
+ * 手册未定义 3 / 5，FM350-GL 也不支持 TD-SCDMA / CDMA，故不再自行编造
+ * 制式名。与后端 signal.rs::cell_rat_text 保持一致。 */
 var RAT_NAME = {
-	0: '2G GSM', 2: '3G WCDMA', 3: '3G TD-SCDMA',
-	4: '4G LTE', 5: '2G CDMA', 9: '5G NR'
+	0: '无网络', 2: '3G WCDMA', 4: '4G LTE', 9: '5G NR'
 };
 
+/* AT+GTACT 的 <rat>，手册 §11.1.14 Defined Values 共 8 个合法值。
+ *
+ * **10 才是 Automatic，20 是「NR/WCDMA/LTE 三模全开」**。两者极易混淆，
+ * 因为手册 Note 6 明写：下发 10 之后查询会回显 20 —— 所以读到 20 时
+ * 无法区分用户当初设的是 10 还是 20，界面必须把这个不确定性说出来，
+ * 不能把 20 标成「自动」。 */
 var GTACT_MODE = {
-	2: { label: '仅 4G（LTE）', desc: '仅驻留 4G 网络，5G 不可用' },
+	1:  { label: '仅 3G（UMTS）', desc: '仅驻留 UMTS，无 3G 覆盖时脱网' },
+	2:  { label: '仅 4G（LTE）', desc: '仅驻留 4G 网络，5G 不可用' },
+	4:  { label: '4G + 3G', desc: 'LTE/UMTS 双模，5G 不可用' },
+	10: { label: '自动（Automatic）', desc: '手册定义的自动模式；注意设置后查询会回显为 20（手册 Note 6）' },
 	14: { label: '仅 5G（NR）', desc: '仅驻留 5G 网络，无 5G 覆盖时脱网' },
-	20: { label: '自动（推荐）', desc: '基站与模组自协商最佳连接' }
+	16: { label: '5G + 3G', desc: 'NR-RAN/WCDMA，不含 LTE' },
+	17: { label: '5G + 4G', desc: 'NR-RAN/LTE，不含 WCDMA（国内常用组合）' },
+	20: { label: '5G + 4G + 3G（三模全开）', desc: '并非「自动」，而是三种制式同时允许。设置 10 后查询也会回显 20（手册 Note 6），故读到 20 时无法反推原设置' }
 };
+
+/* <PreferredAct1> / <PreferredAct2>，手册 §11.1.14：合法值仅 2 / 3 / 6。 */
+var PREF_ACT_NAME = { 2: 'WCDMA 优先', 3: 'LTE 优先', 6: 'NR 优先' };
 
 /* 频段编码 -> 频段名。
  *
- * 模组在 AT+GTACT / AT+GTCCINFO 里上报的是**编码**而非频段名，且同一个数字
- * 在两种制式下含义不同，必须按制式选表：
- *   LTE：`100 + n`（101 = B1 …… 171 = B71），另有 band 号直写（3 = B3）；
- *   NR ：数值加法三档（5000 + n / 500 + n / 100 + n），
- *        以及 `50` 前缀拼接（50512 = n512）。
- * rat 省略时按 NR 优先解析，与本次新增前的行为一致，不影响锁频段 UI。
+ * 权威定义在手册 §11.1.14（+GTACT）与 §11.1.16（+GTCAINFO），两处一致：
+ *   LTE：`100 + n`，101 = BAND_LTE_1 … **171 = BAND_LTE_71**（上限就是 171）；
+ *   NR ：字符串 `50` 直接拼接 band 号，501 = BAND_NR_1 … 509 = BAND_NR_9、
+ *        5010 = BAND_NR_10 … **50512 = BAND_NR_512**。
+ *
+ * 注意 NR 是**字符串拼接而不是数值加法**：`5010` 是 "50"+"10" = n10，
+ * 而数值加法会算成 5000+10 或 500+10 而漏掉 n100 以上的频段（如 50512）。
+ * 解不出来时返回「编号 n」，**绝不把一个无法确认的编码伪装成频段名**。
+ *
+ * rat 省略时先试 NR 再试 LTE（与改动前行为一致）。
  */
+function nrBandNo(n) {
+	/* NR band 号是否可解。
+	 *
+	 * FR1（1..105）取「3GPP TS 38.101-1 已分配集合」并上「手册明列的 9 / 10」：
+	 * 手册 §11.1.14 / §11.1.16 直接写出了 `509 BAND_NR_9` 与 `5010 BAND_NR_10`，
+	 * 属于本文档的权威定义，不能因为 3GPP 未分配就拒解。
+	 * 旧实现用的是一份不完整的「未分配」黑名单，会把 `504` 解成
+	 * 根本不存在的 n4、`5017` 解成 n17（那是 LTE 频段）。
+	 *
+	 * FR2 与扩展区间沿用实机 `AT+GTACT=?` 回显佐证的范围，不自行放宽。
+	 * 权威依据始终是模组自己回的候选列表，本表只是离线兜底。
+	 * 与后端 band.rs::nr_band_no_is_valid 保持完全一致。 */
+	var FR1 = [1,2,3,5,7,8,9,10,12,13,14,18,20,25,26,28,29,30,34,38,39,40,41,
+	           46,48,65,66,67,68,69,70,71,73,74,75,76,77,78,79,80,81,82,83,84,
+	           85,86,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105];
+	if (n >= 1 && n <= 105) return FR1.indexOf(n) >= 0;
+	return (n >= 256 && n <= 269) || (n >= 510 && n <= 512) || (n >= 670 && n <= 710);
+}
+
+function nrBandName(code) {
+	var c = ('' + code).trim();
+	if (!/^50\d+$/.test(c)) return null;          // 手册：NR 编码必为 "50"+n
+	var n = parseInt(c.slice(2), 10);
+	if (!isFinite(n) || !nrBandNo(n)) return null;
+	return 'n' + n;
+}
+
+function lteBandName(n) {
+	/* 手册定义的 100+n，上限 171（BAND_LTE_71）；越界不猜 */
+	if (n >= 101 && n <= 171) return 'B' + (n - 100);
+	/* 实机另观测到 band 号直写形态（3 = B3、41 = B41），保留为兜底。
+	 * B16 在 3GPP 未分配，一并排除。 */
+	if (n >= 1 && n <= 88 && n !== 16) return 'B' + n;
+	return null;
+}
+
 function bandName(code, rat) {
-	var n = parseInt(code, 10);
-	if (!isFinite(n)) return 'B' + code;
-	if (rat === 4) {
-		if (n > 100 && n - 100 <= 88) return 'B' + (n - 100);
-		if (n >= 1 && n <= 88) return 'B' + n;
-		return '编号 ' + n;
-	}
-	if (n >= 5000 && n <= 5079) return 'n' + (n - 5000);
-	if (n >= 500 && n <= 599) return 'n' + (n - 500);
-	if (n >= 101 && n <= 199) return 'n' + (n - 100);
-	if (n >= 1 && n <= 88) return 'B' + n;
-	return '编号 ' + n;
+	var c = ('' + code).trim();
+	var n = parseInt(c, 10);
+	if (!isFinite(n)) return '编号 ' + c;
+	if (rat === 4) return lteBandName(n) || ('编号 ' + n);
+	if (rat === 9) return nrBandName(c) || ('编号 ' + n);
+	return nrBandName(c) || lteBandName(n) || ('编号 ' + n);
 }
 
+/* 频段分组：判定依据与 bandName 一致（手册 §11.1.14 / §11.1.16）。
+ * 旧实现把 101..199 归为 NR，但手册明写 101..171 是 **LTE** 编码
+ * （101 = BAND_LTE_1 … 171 = BAND_LTE_71），会把 B41 错分到 5G 矩阵里。 */
 function bandGroup(code) {
-	var n = parseInt(code, 10);
+	var c = ('' + code).trim();
+	if (nrBandName(c)) return 'nr';
+	var n = parseInt(c, 10);
 	if (!isFinite(n)) return 'other';
-	if (n >= 5000 && n <= 5079) return 'nr';
-	if (n >= 500 && n <= 599) return 'nr';
-	if (n >= 101 && n <= 199) return 'nr';
-	if (n >= 1 && n <= 88) return 'lte';
-	return 'other';
+	return lteBandName(n) ? 'lte' : 'other';
 }
 
+/* 一键预设。
+ *
+ * **参数位序是手册硬性规定的位置参数**，不能省（§11.1.14 Syntax）：
+ *
+ *     AT+GTACT=<rat>,<PreferredAct1>,<PreferredAct2>,<band_1>,<band_2>,…
+ *
+ * 且 Note 3 明写：三模（rat=20）下 PreferredAct1/2 只有手册
+ * 「RAT Combination Table」里那十种组合合法，**其余一律 rejected**。
+ * 旧版本的预设写成 `20,5041,5078,5079`，模组会把 5041 当成
+ * PreferredAct1、把 5078 当成 PreferredAct2，只把 5079 当频段 ——
+ * 按 Note 3 应当直接被拒；即使固件容错，锁到的也只是单个 n79。
+ * 不需要优先制式时必须用**空位占位**（`20,,,<band…>`）把前两位让出来。
+ *
+ * LTE 频段号同样必须用手册编码：B1/B3/B5/B8 = **101/103/105/108**。
+ * 旧版本直写 `1,3,5,8`，而 1..10 在手册里是 <umts_band>
+ * （1 = BAND_UMTS_I），rat=20 含 WCDMA，极易被当成锁 3G 频段。
+ */
 var BAND_PRESETS = [
-	{ id: 'auto', label: '恢复默认（全频段）', hint: '解除频段限制，由模组自适应', args: '20' },
-	{ id: 'nr_main', label: '5G 主力频段', hint: 'n41 / n78 / n79，覆盖国内 5G 核心主频', args: '20,5041,5078,5079' },
-	{ id: 'nr_all', label: '5G 全频段', hint: '锁定模组支持的全部 5G 频段', args: '20,5020,5025,5028,5030,5038,5040,5041,5048,5066,5071,5077,5078,5079' },
-	{ id: 'lte_main', label: '4G 主力频段', hint: 'B1 / B3 / B5 / B8 国内主流频段', args: '20,1,3,5,8' },
-	{ id: 'mixed', label: '5G + 4G 黄金组合', hint: '兼顾速率与基站回落覆盖', args: '20,1,3,5,8,5041,5078,5079' }
+	{ id: 'auto', label: '恢复默认（全频段）', hint: '三模全开、不限频段（手册 RAT 组合表合法行：20 + 两个优先位未填）', args: '20' },
+	{ id: 'nr_main', label: '5G 主力频段', hint: 'n41 / n78 / n79，国内 5G 核心主频；NR 优先于 LTE', args: '20,6,3,5041,5078,5079' },
+	{ id: 'nr_all', label: '5G 全频段', hint: '锁定模组支持的全部 5G 频段；NR 优先于 LTE', args: '20,6,3,5020,5025,5028,5030,5038,5040,5041,5048,5066,5071,5077,5078,5079' },
+	{ id: 'lte_main', label: '4G 主力频段', hint: 'B1 / B3 / B5 / B8；LTE 优先于 NR。注意手册 Note 5：锁 LTE 频段不影响 NR 频段配置，如需彻底禁用 5G 请改用「仅 4G」制式', args: '20,3,6,101,103,105,108' },
+	{ id: 'mixed', label: '5G + 4G 黄金组合', hint: 'B1/B3/B5/B8 + n41/n78/n79，兼顾速率与回落覆盖；NR 优先于 LTE', args: '20,6,3,101,103,105,108,5041,5078,5079' }
 ];
 
 function arfcnToBandLabel(arfcn, rat) {
@@ -153,14 +257,29 @@ function arfcnToBandLabel(arfcn, rat) {
 		if (n >= 39650 && n <= 41589) return 'B41';
 		return null;
 	}
-	var freq = n * 0.005;
+	/* NR-ARFCN 是**两段式全局频率栅格**（3GPP TS 38.104 §5.4.2.1）：
+	 *   0 … 599999        → F = N × 5 kHz            （0 – 3000 MHz）
+	 *   600000 … 2016666  → F = 3000 + (N-600000) × 15 kHz （3000 – 24250 MHz）
+	 * 旧实现全程只乘 0.005，于是 3 GHz 以上的频段全部推不出来：
+	 * n78 的 ARFCN 633333 会被算成 3166.7 MHz（落在 n77/n78 区间外）而返回 null，
+	 * 国内 5G 主力频之一因此永远显示不出频段名。与后端 band.rs 保持一致。 */
+	var freq;
+	if (n <= 599999) freq = n * 0.005;
+	else if (n <= 2016666) freq = 3000 + (n - 600000) * 0.015;
+	else return null;
+
+	/* n38（2570-2620）整体落在 n41（2496-2690）内，n78（3300-3800）落在
+	 * n77（3300-4200）内 —— 仅凭 ARFCN 无法区分，显式标注重叠而不二选一。 */
 	if (freq >= 2110 && freq <= 2170) return 'n1';
 	if (freq >= 1805 && freq <= 1880) return 'n3';
 	if (freq >= 869 && freq <= 894) return 'n5';
 	if (freq >= 925 && freq <= 960) return 'n8';
-	if (freq >= 791 && freq <= 862) return 'n20';
+	if (freq >= 791 && freq <= 821) return 'n20';
 	if (freq >= 758 && freq <= 803) return 'n28';
-	if (freq >= 2570 && freq <= 2620) return 'n38';
+	if (freq >= 1880 && freq <= 1920) return 'n39';
+	if (freq >= 2010 && freq <= 2025) return 'n34';
+	if (freq >= 2300 && freq <= 2400) return 'n40';
+	if (freq >= 2570 && freq <= 2620) return 'n38/n41';
 	if (freq >= 2496 && freq <= 2690) return 'n41';
 	if (freq >= 3300 && freq <= 4200) return 'n77/n78';
 	if (freq >= 4400 && freq <= 5000) return 'n79';
@@ -171,25 +290,94 @@ function arfcnToBandLabel(arfcn, rat) {
  * 三、AT 响应解析
  * ================================================================ */
 
+/* AT+GTCCINFO? 的字段布局。
+ *
+ * 手册 §11.1.15 按「制式 × 服务/邻区」定义了 **6 种互不相同的布局**，
+ * 字段数和同一位置的语义都不同，因此必须按布局取索引，
+ * 不能用「倒数第 N 位」猜（旧实现就是这么做的，后果见下）：
+ *
+ *   UMTS 服务(15)：0 IsServiceCell,1 rat,2 mcc,3 mnc,4 lac,5 cellid,6 uarfcn,
+ *                  7 psc,8 band,9 ecno,10 rscp,11 rac,12 rxlev,13 reserved,14 Ec/Io_lev
+ *   UMTS 邻区(15)：… 7 psc,8 cell_type,9 rank_pos,10 ranking_status,11 ecno,
+ *                  12 pathloss,13 rxlev,14 rscp
+ *   LTE  服务(14)：… 8 band,9 bandwidth,10 rssnr_value,11 rxlev,12 rsrp,13 rsrq
+ *   LTE  邻区(12)：… 7 physicalcellId,8 bandwidth,9 rxlev,10 rsrp,11 rsrq
+ *   NR   服务(14)：… 8 band,9 bandwidth,10 ss_sinr,11 rxlev,12 ss_rsrp,13 ss_rsrq
+ *   NR   邻区(12)：… 7 physicalcellId,8 ss_sinr,9 rxlev,10 ss_rsrp,11 ss_rsrq
+ *
+ * 旧实现用 len-4 / len-3 / len-1 定位信噪比与信号，并无条件把 f[8] 当频段，
+ * 对照上表可得三类误读：
+ *   • LTE 邻区的 f[8] 是 **<bandwidth>**，f[len-4] 也是它 —— 带宽码 25
+ *     会被当成「频段 B25」与「信噪比 25 dB」同时显示；
+ *   • NR 邻区的 f[8] 是 **<ss_sinr>**，会被渲染成「B77」之类的假频段；
+ *   • UMTS 服务小区的 f[len-4]=f[11] 是 **<rac>**（路由区码 0-255），
+ *     会被当成信噪比；f[8] 是 <band>，但那是 <umts_band>（1..10）编码，
+ *     按 LTE/NR 表解会得到错误的频段名。
+ * 因此邻区一律不取信噪比（与文件头设计前提 2 的声明保持一致）。
+ */
+function gtccinfoLayout(rat, isServing) {
+	if (rat === 2) {
+		return isServing
+			? { len: 15, band: 8, bw: null, sinr: null, rsrp: 10, rsrq: 14, bandEnc: 'umts' }
+			: { len: 15, band: null, bw: null, sinr: null, rsrp: 14, rsrq: null, bandEnc: 'umts' };
+	}
+	if (rat === 4) {
+		return isServing
+			? { len: 14, band: 8, bw: 9, sinr: 10, rsrp: 12, rsrq: 13, bandEnc: 'lte' }
+			: { len: 12, band: null, bw: 8, sinr: null, rsrp: 10, rsrq: 11, bandEnc: 'lte' };
+	}
+	if (rat === 9) {
+		return isServing
+			? { len: 14, band: 8, bw: 9, sinr: 10, rsrp: 12, rsrq: 13, bandEnc: 'nr' }
+			: { len: 12, band: null, bw: null, sinr: null, rsrp: 10, rsrq: 11, bandEnc: 'nr' };
+	}
+	return null;
+}
+
+/* <umts_band>：手册 §11.1.14 定义为 1 = BAND_UMTS_I … 10 = BAND_UMTS_X，
+ * 与 LTE/NR 的编码体系完全不同，必须单独走这张表。 */
+var UMTS_BAND_NAME = {
+	1: 'B1 (I)', 2: 'B2 (II)', 3: 'B3 (III)', 4: 'B4 (IV)', 5: 'B5 (V)',
+	6: 'B6 (VI)', 7: 'B7 (VII)', 8: 'B8 (VIII)', 9: 'B9 (IX)', 10: 'B10 (X)'
+};
+
 function parseGtccinfo(text) {
 	var out = { serving: null, neighbors: [], rawOk: false };
 	if (typeof text !== 'string') return out;
 	var lines = text.split('\n');
 	for (var i = 0; i < lines.length; i++) {
 		var line = lines[i].trim();
-		if (!line || line === 'OK' || line.indexOf('+GTCCINFO') === 0) continue;
-		if (!/^[0-9]/.test(line)) continue;
-		var f = line.split(',');
+		/* **必须先剥掉 `+GTCCINFO:` 前缀**。
+		 *
+		 * `AT+GTCCINFO?` 的每一行数据恰恰都以这个前缀开头，旧实现却把
+		 * 「以 +GTCCINFO 开头」当成噪声行直接 continue —— 于是所有小区行全被
+		 * 跳过，serving / neighbors 永远为空，整张邻区扫描表长期无数据。
+		 * 后端 signal.rs::service_cell 早就修过同一处死代码并在文档里记了案，
+		 * 前端这一份漏掉了。此处与后端保持一致：先剥前缀，再按首字段筛服务小区，
+		 * 同时兼容「前缀已被上层剥掉」的输入形态。 */
+		var body = line.indexOf('+GTCCINFO:') === 0
+			? line.slice('+GTCCINFO:'.length).trim()
+			: line;
+		if (!body || !/^[0-9]/.test(body)) continue;
+		var f = body.split(',');
 		if (f.length < 8) continue;
 		out.rawOk = true;
 
-		var isServing = f[0] === '1';
+		var isServing = f[0].trim() === '1';
 		var rat = parseInt(f[1], 10);
-		var len = f.length;
-		var sinrRaw = len >= 4 ? (f[len - 4] || '').trim() : '';
-		var rsrpRaw = len >= 3 ? (f[len - 3] || '').trim() : '';
-		var rsrqRaw = len >= 1 ? (f[len - 1] || '').trim() : '';
+		var L = gtccinfoLayout(rat, isServing);
 
+		/* 按布局取字段；未定义的位置为 null，不拿相邻字段凑数 */
+		function pick(idx) {
+			if (idx == null || idx >= f.length) return '';
+			return (f[idx] || '').trim();
+		}
+		function pickIdx(idx) {
+			var v = parseInt(pick(idx), 10);
+			return isFinite(v) ? v : null;
+		}
+
+		var rawBand = L ? pick(L.band) : '';
 		var cell = {
 			serving: isServing,
 			rat: rat,
@@ -200,21 +388,28 @@ function parseGtccinfo(text) {
 			cellId: f[5] || '',
 			arfcn: f[6] || '',
 			pci: f[7] || '',
-			band: (f[8] || '').trim(),
-			rsrpIdx: isFinite(parseInt(rsrpRaw, 10)) ? parseInt(rsrpRaw, 10) : null,
-			rsrqIdx: isFinite(parseInt(rsrqRaw, 10)) ? parseInt(rsrqRaw, 10) : null
+			bandwidth: L ? pickIdx(L.bw) : null,
+			rsrpIdx: L ? pickIdx(L.rsrp) : null,
+			rsrqIdx: L ? pickIdx(L.rsrq) : null,
+			/* 字段数与手册布局不符时标记出来，不把可疑数据当真 */
+			layoutOk: !!(L && f.length >= L.len)
 		};
 		cell.rsrp = rsrpFromIdx(cell.rsrpIdx, rat);
 		cell.rsrq = rsrqFromIdx(cell.rsrqIdx, rat);
-		cell.sinr = sinrFromRaw(sinrRaw);
-		if (!cell.band) {
+		cell.sinr = L ? sinrFromRaw(pick(L.sinr)) : null;
+
+		if (!rawBand) {
 			var guess = arfcnToBandLabel(cell.arfcn, rat);
 			cell.band = guess || '';
 			cell.bandGuessed = !!guess;
+		} else if (L && L.bandEnc === 'umts') {
+			var ub = parseInt(rawBand, 10);
+			cell.band = UMTS_BAND_NAME[ub] || ('编号 ' + rawBand);
+			cell.bandGuessed = false;
 		} else {
 			/* 模组上报的是编码：必须解码后再展示，否则同表内会出现
 			 * 「5041」（上报，未解码）与「n41 (推算)」两种写法并存。 */
-			cell.band = bandName(cell.band, rat);
+			cell.band = bandName(rawBand, rat);
 			cell.bandGuessed = false;
 		}
 		if (isServing) out.serving = cell;
@@ -223,8 +418,20 @@ function parseGtccinfo(text) {
 	return out;
 }
 
+/* AT+GTACT? 回显解析。
+ *
+ * 手册 §11.1.14 的读写响应同构，都是位置参数：
+ *     +GTACT: <rat>,<PreferredAct1>,<PreferredAct2>,<band_1>,<band_2>,…
+ * 所以第 2、3 位是**优先制式**（合法值仅 2/3/6，空 = 未指定），
+ * 从第 4 位起才是频段。
+ *
+ * 旧实现从 index 1 开始全部当成频段，于是 `+GTACT: 20,6,3,5078`
+ * 会解出 bands = [6, 3, 5078]，进而把 PreferredAct 渲染成两个
+ * 幽灵频段芯片（B6 / B3）列在「4G 频段矩阵」里；用户一旦勾选它们，
+ * 下发的是 `20,6,3,6,3,…` —— 6/3 在手册里是 <umts_band>，
+ * 结果是去锁了两个 3G 频段。 */
 function parseGtact(text) {
-	var out = { mode: null, modeLabel: '未知', modeDesc: '', bands: [], raw: '' };
+	var out = { mode: null, modeLabel: '未知', modeDesc: '', pref: [], prefNames: [], bands: [], raw: '' };
 	if (typeof text !== 'string') return out;
 	var m = text.match(/\+GTACT:\s*([^\r\n]*)/);
 	if (!m) return out;
@@ -238,8 +445,15 @@ function parseGtact(text) {
 		if (info) { out.modeLabel = info.label; out.modeDesc = info.desc; }
 		else { out.modeLabel = '自定义模式（' + mode + '）'; }
 	}
-	for (var i = 1; i < parts.length; i++) {
-		var v = parts[i].trim();
+	for (var i = 1; i <= 2 && i < parts.length; i++) {
+		var pv = parts[i].trim();
+		if (!/^\d+$/.test(pv)) continue;      // 空位 = 未指定，跳过
+		var pn = parseInt(pv, 10);
+		out.pref.push(pn);
+		out.prefNames.push(PREF_ACT_NAME[pn] || ('非法优先值 ' + pn));
+	}
+	for (var j = 3; j < parts.length; j++) {
+		var v = parts[j].trim();
 		if (v === '' || !/^\d+$/.test(v)) continue;
 		out.bands.push(parseInt(v, 10));
 	}
@@ -764,7 +978,7 @@ function buildSituation(state, host) {
 		kpiBox('无线信噪比 SINR', fmtNum(s ? s.sinr : null, 1), 'dB',
 			E('span', { 'class': 'fm350-badge ' + sinrGrade.cls }, sinrGrade.text)
 		),
-		kpiBox('小区锁定状态', state.gtact.modeLabel || '未知', null,
+		kpiBox('小区锁定状态', gtactSummary(state.gtact), null,
 			E('span', { 'class': lockBadge }, state.emm.locked ? '已物理锁定' : '自由驻留')
 		)
 	];
@@ -1114,11 +1328,18 @@ function setAutoScan(state, host, ms) {
  * 区块三：锁频段 (Frequency Band Lock)
  * ---------------------------------------------------------------- */
 function buildBandLock(state, host) {
-	var supported = state.gtact.bands || [];
+	/* 这里的编码来自 `AT+GTACT?`，语义是**当前已配置的频段锁定**
+	 * （实机回显形如 `20,6,3,…,101,102,…`），不是「模组支持的全部频段」。
+	 * 后者要靠测试形式 `AT+GTACT=?`（手册 §11.1.14：依次给出
+	 * supported <Rat>s / <PreferredAct1>s / <PreferredAct2>s / <gsm_band>s /
+	 * <umts_band>s / <lte_band>s / <cdma_band>s / <evdo_band>s / <nr_band>s），
+	 * 已加入 AT 控制台快捷入口。parseGtact 已修正为跳过前两个
+	 * PreferredAct 位，不再把它们当成频段渲染出幽灵芯片。 */
+	var lockedCodes = state.gtact.bands || [];
 	var groups = { lte: [], nr: [], other: [] };
 	var seen = {};
 
-	supported.forEach(function(b) {
+	lockedCodes.forEach(function(b) {
 		if (bandGroup(b) === 'other') { groups.other.push(b); return; }
 		var name = bandName(b);
 		if (seen[name]) return;
@@ -1178,7 +1399,7 @@ function buildBandLock(state, host) {
 	return E('div', { 'class': 'fm350-glass-card' }, [
 		E('div', { 'class': 'fm350-card-header' }, [
 			E('h3', { 'class': 'fm350-net2-title' }, [DYNAMIC_ICONS.band(), '工作频段限定与锁定 (Band Lock)']),
-			E('span', { 'class': 'fm350-badge lock' }, '当前：' + (state.gtact.modeLabel || '未知'))
+			E('span', { 'class': 'fm350-badge lock' }, '当前：' + gtactSummary(state.gtact))
 		]),
 		E('p', { 'class': 'fm350-net2-sub' },
 			'强行约束射频只在指定载波频段驻留。用于避开拥堵基站或锁定专属大带宽频段。'),
@@ -1285,6 +1506,18 @@ function validateCell(pci, arfcn, state) {
 /* ----------------------------------------------------------------
  * 区块五：网络制式锁定
  * ---------------------------------------------------------------- */
+
+/* 制式锁定状态的完整文字：除了 <rat>，把手册 §11.1.14 的
+ * <PreferredAct1>/<PreferredAct2> 一并说出来。
+ *
+ * 这两个位置参数决定了多模并存时的**驻留优先顺序**（手册 RAT Combination
+ * Table），旧版完全不展示，用户看到「三模全开」却不知道其实 NR 优先。 */
+function gtactSummary(g) {
+	var label = (g && g.modeLabel) || '未知';
+	if (!g || !g.prefNames || !g.prefNames.length) return label;
+	return label + '·' + g.prefNames.join(' > ');
+}
+
 function buildRat(state, host) {
 	var cur = state.gtact.mode;
 	var modeBtns = Object.keys(GTACT_MODE).map(function(k) {
@@ -1306,10 +1539,12 @@ function buildRat(state, host) {
 	return E('div', { 'class': 'fm350-glass-card' }, [
 		E('div', { 'class': 'fm350-card-header' }, [
 			E('h3', { 'class': 'fm350-net2-title' }, [DYNAMIC_ICONS.gear(), '蜂窝制式首选项 (RAT Mode)']),
-			E('span', { 'class': 'fm350-badge ok' }, state.gtact.modeLabel || '自适应')
+			E('span', { 'class': 'fm350-badge ok' }, gtactSummary(state.gtact))
 		]),
 		E('p', { 'class': 'fm350-net2-sub' },
-			'指定模组与基站交互的协议世代。设定将写入模组 NVRAM 实时生效。'),
+			'指定模组与基站交互的协议世代。设定将写入模组 NVRAM 实时生效。'
+			+ '注：手册 Note 6 说明设置「自动（10）」后查询会回显为 20，'
+			+ '因此两者在回读时无法区分，当前状态以模组回显为准。'),
 		E('div', { 'class': 'fm350-chips-flex' }, modeBtns)
 	]);
 }

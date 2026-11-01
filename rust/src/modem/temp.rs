@@ -7,9 +7,11 @@
 //! 表示一次返回全部 23 路传感器。返回值单位为 0.001 ℃
 //! （实测 `+GTSENRDTEMP: 10,46066` → 46.066 ℃）。
 //!
-//! 传感器编号（手册 18.3 表）：1 = soc_max，2-4 = cpu_little0-2，7 = gpu1，
-//! 8 = dramc，9 = mmsys，10 = md_5g（5G 基带），13 = soc_dram_ntc，
-//! 14 = ltepa_ntc，15 = nrpa_ntc，16 = rf_ntc，19-22 = pmic 系列。
+//! 传感器编号（手册 §18.3 的完整 23 路表，一个不漏）：
+//! 1 soc_max、2-5 cpu_little0-3、6 gpu0、7 gpu1、8 dramc、9 mmsys、
+//! 10 md_5g（5G 基带）、11 md_4g、12 md_3g、13 soc_dram_ntc、14 ltepa_ntc、
+//! 15 nrpa_ntc、16 rf_ntc、17 md_rf、18 conn_gps、19 pmic、20 pmic_vcore、
+//! 21 pmic_vproc、22 pmic_vgpu、23 crystal。
 //! **读数为 0 表示该路未装配**，必须跳过而不是记成 0 ℃。
 
 use crate::at::{at_cmd, AtHandle};
@@ -32,25 +34,37 @@ pub struct Temperature {
     pub sensors: Vec<(u32, f64)>,
 }
 
-/// 传感器编号 → 名称（手册 18.3 表；未列出的编号返回空串）。
+/// 传感器编号 → 名称（手册 §18.3 的完整 23 路表；表外编号返回空串）。
+///
+/// 旧实现只映射了 16 路，缺了 5 cpu_little3、6 gpu0、11 md_4g、12 md_3g、
+/// 17 md_rf、18 conn_gps、23 crystal —— 而 `AT+GTSENRDTEMP=0` 一次就会回全部
+/// 23 路，这几路在界面上只能显示成裸编号。其中 **11 md_4g / 12 md_3g /
+/// 17 md_rf 恰好是射频频温升最关键的几路**，缺名字直接影响排障可读性。
 pub fn sensor_name(id: u32) -> &'static str {
     match id {
         1 => "soc_max",
         2 => "cpu_little0",
         3 => "cpu_little1",
         4 => "cpu_little2",
+        5 => "cpu_little3",
+        6 => "gpu0",
         7 => "gpu1",
         8 => "dramc",
         9 => "mmsys",
         10 => "md_5g",
+        11 => "md_4g",
+        12 => "md_3g",
         13 => "soc_dram_ntc",
         14 => "ltepa_ntc",
         15 => "nrpa_ntc",
         16 => "rf_ntc",
+        17 => "md_rf",
+        18 => "conn_gps",
         19 => "pmic",
         20 => "pmic_vcore",
         21 => "pmic_vproc",
         22 => "pmic_vgpu",
+        23 => "crystal",
         _ => "",
     }
 }
@@ -110,9 +124,24 @@ mod tests {
         assert_eq!(sensor_name(10), "md_5g");
         assert_eq!(sensor_name(1), "soc_max");
         assert_eq!(sensor_name(15), "nrpa_ntc");
-        assert_eq!(sensor_name(5), "");
         assert_eq!(sensor_name(0), "");
         assert_eq!(sensor_name(999), "");
+    }
+
+    /// 手册 §18.3 完整枚举了 1..=23 共 23 路，一路都不能缺；
+    /// 0（全部传感器）与 24 以上不在表内。
+    #[test]
+    fn sensor_table_covers_all_23_channels() {
+        const EXPECT: [&str; 23] = [
+            "soc_max", "cpu_little0", "cpu_little1", "cpu_little2", "cpu_little3",
+            "gpu0", "gpu1", "dramc", "mmsys", "md_5g", "md_4g", "md_3g",
+            "soc_dram_ntc", "ltepa_ntc", "nrpa_ntc", "rf_ntc", "md_rf", "conn_gps",
+            "pmic", "pmic_vcore", "pmic_vproc", "pmic_vgpu", "crystal",
+        ];
+        for (i, want) in EXPECT.iter().enumerate() {
+            assert_eq!(sensor_name(i as u32 + 1), *want, "传感器 {} 名称不符", i + 1);
+        }
+        assert_eq!(sensor_name(24), "");
     }
 
     #[test]
