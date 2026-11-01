@@ -31,6 +31,9 @@ pub fn nr_band_from_arfcn(arfcn: i64) -> Option<&'static str> {
         _ if (1805.0..=1880.0).contains(&mhz) => "n3",
         _ if (869.0..=894.0).contains(&mhz) => "n5",
         _ if (925.0..=960.0).contains(&mhz) => "n8",
+        // n20（791-821）与 n28（758-803）在 791-803 MHz 重叠，同样标注而不猜。
+        _ if (791.0..=803.0).contains(&mhz) => "n20/n28",
+        _ if (791.0..=821.0).contains(&mhz) => "n20",
         _ if (758.0..=803.0).contains(&mhz) => "n28",
         _ if (2010.0..=2025.0).contains(&mhz) => "n34",
         // n38 的下行频段（2570-2620 MHz）整体落在 n41（2496-2690 MHz）内，

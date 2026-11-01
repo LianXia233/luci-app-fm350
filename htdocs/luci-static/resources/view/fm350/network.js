@@ -26,8 +26,10 @@
   * 2. 倒数第 2 位与倒数第 3 位在实机全部 8 行小区上恒等（69/69、126/126等），
  *    是同一个量的重复上报，非信噪比。这一点可由手册印证：§11.1.15 把 NR 的
  *    <rxlev> 直接定义成 SS-RSRP 阶梯，与 <ss_rsrp> 同表，故两者必然相等。
- *    信噪比取服务小区行的 <ss_sinr>/<rssnr_value> 位；**邻区行不取信噪比**
- *    （LTE 邻区该位置是 <bandwidth>，UMTS 邻区是 <ecno>，语义完全不同）。
+ *    信噪比取服务小区行的 <ss_sinr>/<rssnr_value> 位；LTE/UMTS 邻区该位
+ *    分别是 <bandwidth> / <ecno>，语义完全不同，不取。**NR 邻区第 8 位是
+ *    手册 §11.1.15 明列的 <ss_sinr>，按手册解析照取**（实机行为与服务小区
+ *    行一致：dB 原值而非阶梯索引，见文件头设计前提 2 的判定）。
  *
  *    注意：手册把这一位定义为 0.5 dB 阶梯索引（-100 → ≤ -50 dB，100 → > 50 dB），
  *    但实机上报的是 dB 原值。用上面那组背靠背采样判定：索引 10 = 16，
@@ -217,6 +219,39 @@ function bandGroup(code) {
 	return lteBandName(n) ? 'lte' : 'other';
 }
 
+/* AT+GTACT? 回显频段编码的分类（手册 §11.1.14）。
+ *
+ * 注意 GTACT 回显的编码体系**与 GTCCINFO 的 <band> 不同**：GTACT 里
+ * 0 = 自动选频、1..10 = <umts_band>、101..171 = <lte_band>、"50"+n = <nr_band>
+ * （手册没有 GTCCINFO 那套 band 号直写形态）。
+ *
+ * 实机回显形如 `20,6,3,1,2,4,…,101,102,…`（CHANGELOG 1.0.0-r17）：其中
+ * `1,2,4…` 是 **UMTS 频段**（1 = BAND_UMTS_I …）。若沿用 bandGroup 的
+ * LTE 直写兜底，它们会被渲染成「4G B1/B2/B4」芯片——用户勾选后再下发，
+ * 名义上锁的是 4G 频段，模组实际收到的却是 3G 编码，正是 BAND_PRESETS
+ * 修正说明里点名要防的那类错误。 */
+function gtactBandKind(code) {
+	var c = ('' + code).trim();
+	if (!/^[0-9]+$/.test(c)) return 'other';
+	var n = parseInt(c, 10);
+	if (n === 0) return 'auto';
+	if (n >= 1 && n <= 10) return 'umts';
+	if (nrBandName(c)) return 'nr';
+	if (n >= 101 && n <= 171) return 'lte';
+	return 'other';
+}
+
+/* GTACT 回显编码 → 展示名（UMTS 走罗马数字表，0 显式标注）。 */
+function gtactBandLabel(code) {
+	var kind = gtactBandKind(code);
+	if (kind === 'umts') {
+		var ub = parseInt(code, 10);
+		return UMTS_BAND_NAME[ub] || ('编号 ' + code);
+	}
+	if (kind === 'auto') return '自动选频';
+	return bandName(code) || ('编号 ' + code);
+}
+
 /* 一键预设。
  *
  * **参数位序是手册硬性规定的位置参数**，不能省（§11.1.14 Syntax）：
@@ -269,11 +304,13 @@ function arfcnToBandLabel(arfcn, rat) {
 	else return null;
 
 	/* n38（2570-2620）整体落在 n41（2496-2690）内，n78（3300-3800）落在
-	 * n77（3300-4200）内 —— 仅凭 ARFCN 无法区分，显式标注重叠而不二选一。 */
+	 * n77（3300-4200）内，n20（791-821）与 n28（758-803）在 791-803 重叠 ——
+	 * 仅凭 ARFCN 无法区分，显式标注重叠而不二选一。 */
 	if (freq >= 2110 && freq <= 2170) return 'n1';
 	if (freq >= 1805 && freq <= 1880) return 'n3';
 	if (freq >= 869 && freq <= 894) return 'n5';
 	if (freq >= 925 && freq <= 960) return 'n8';
+	if (freq >= 791 && freq <= 803) return 'n20/n28';
 	if (freq >= 791 && freq <= 821) return 'n20';
 	if (freq >= 758 && freq <= 803) return 'n28';
 	if (freq >= 1880 && freq <= 1920) return 'n39';
@@ -313,7 +350,8 @@ function arfcnToBandLabel(arfcn, rat) {
  *   • UMTS 服务小区的 f[len-4]=f[11] 是 **<rac>**（路由区码 0-255），
  *     会被当成信噪比；f[8] 是 <band>，但那是 <umts_band>（1..10）编码，
  *     按 LTE/NR 表解会得到错误的频段名。
- * 因此邻区一律不取信噪比（与文件头设计前提 2 的声明保持一致）。
+ *    因此 LTE / UMTS 邻区一律不取信噪比；NR 邻区第 8 位是手册明列的
+ *    <ss_sinr>，与布局表一致，照取。
  */
 function gtccinfoLayout(rat, isServing) {
 	if (rat === 2) {
@@ -329,7 +367,10 @@ function gtccinfoLayout(rat, isServing) {
 	if (rat === 9) {
 		return isServing
 			? { len: 14, band: 8, bw: 9, sinr: 10, rsrp: 12, rsrq: 13, bandEnc: 'nr' }
-			: { len: 12, band: null, bw: null, sinr: null, rsrp: 10, rsrq: 11, bandEnc: 'nr' };
+			/* NR 邻区手册明列 12 字段：8 = <ss_sinr>、9 = <rxlev>、10 = <ss_rsrp>、
+			 * 11 = <ss_rsrq>。该位**确实带信噪比**（LTE 邻区同一位置是
+			 * <bandwidth>、UMTS 邻区是 <ecno>，语义完全不同），必须按手册解析。 */
+			: { len: 12, band: null, bw: null, sinr: 8, rsrp: 10, rsrq: 11, bandEnc: 'nr' };
 	}
 	return null;
 }
@@ -1264,7 +1305,11 @@ function refreshTable(state, host) {
 		}
 
 		tbody.appendChild(E('tr', { 'class': cls.join(' ') }, [
-			E('td', {}, c.serving ? E('span', { 'class': 'fm350-badge ok' }, '服务小区') : E('span', { 'class': 'fm350-badge muted' }, '邻近候选')),
+			E('td', {}, [
+				c.serving ? E('span', { 'class': 'fm350-badge ok' }, '服务小区') : E('span', { 'class': 'fm350-badge muted' }, '邻近候选'),
+				/* layoutOk=false 表示该行字段数与手册布局不符，数据不可信，显式标注 */
+				c.layoutOk === false ? E('span', { 'class': 'fm350-badge warn' }, '布局异常') : ''
+			]),
 			E('td', {}, E('span', { 'class': c.rat === 9 ? 'fm350-badge nr' : 'fm350-badge ok' }, c.ratName)),
 			E('td', {}, c.band ? (c.band + (c.bandGuessed ? ' (推算)' : '')) : '—'),
 			E('td', { 'style': 'font-family:monospace;font-weight:600;' }, c.arfcn || '—'),
@@ -1329,25 +1374,29 @@ function setAutoScan(state, host, ms) {
  * ---------------------------------------------------------------- */
 function buildBandLock(state, host) {
 	/* 这里的编码来自 `AT+GTACT?`，语义是**当前已配置的频段锁定**
-	 * （实机回显形如 `20,6,3,…,101,102,…`），不是「模组支持的全部频段」。
+	 * （实机回显形如 `20,6,3,1,2,4,…,101,102,…`），不是「模组支持的全部频段」。
 	 * 后者要靠测试形式 `AT+GTACT=?`（手册 §11.1.14：依次给出
 	 * supported <Rat>s / <PreferredAct1>s / <PreferredAct2>s / <gsm_band>s /
 	 * <umts_band>s / <lte_band>s / <cdma_band>s / <evdo_band>s / <nr_band>s），
 	 * 已加入 AT 控制台快捷入口。parseGtact 已修正为跳过前两个
-	 * PreferredAct 位，不再把它们当成频段渲染出幽灵芯片。 */
+	 * PreferredAct 位，不再把它们当成频段渲染出幽灵芯片。
+	 *
+	 * 回显中的 1..10 是 <umts_band>（CHANGELOG r17 实机回显），必须单独分组
+	 * 并走罗马数字表，见 gtactBandKind。 */
 	var lockedCodes = state.gtact.bands || [];
-	var groups = { lte: [], nr: [], other: [] };
+	var groups = { lte: [], nr: [], umts: [], other: [] };
 	var seen = {};
 
 	lockedCodes.forEach(function(b) {
-		if (bandGroup(b) === 'other') { groups.other.push(b); return; }
-		var name = bandName(b);
+		var kind = gtactBandKind(b);
+		if (kind === 'other') { groups.other.push(b); return; }
+		var name = gtactBandLabel(b);
 		if (seen[name]) return;
 		seen[name] = true;
-		groups[bandGroup(b)].push(b);
+		groups[kind].push(b);
 	});
 
-	function chipRow(list, isNr) {
+	function chipRow(list, dotColor) {
 		if (!list.length) return E('div', { 'class': 'fm350-net2-sub' }, '模组未上报此类可用频段。');
 		return E('div', { 'class': 'fm350-chips-flex' }, list.map(function(b) {
 			var on = !!state.selectedBands[b];
@@ -1359,8 +1408,8 @@ function buildBandLock(state, host) {
 					renderAll(host, state);
 				}
 			}, [
-				E('i', { 'class': 'fm350-dot', 'style': 'background:' + (on ? '#fff' : (isNr ? '#7c3aed' : '#0284c7')) }),
-				bandName(b)
+				E('i', { 'class': 'fm350-dot', 'style': 'background:' + (on ? '#fff' : dotColor) }),
+				gtactBandLabel(b)
 			]);
 		}));
 	}
@@ -1409,11 +1458,15 @@ function buildBandLock(state, host) {
 		]),
 		E('div', { 'style': 'margin-top:14px;' }, [
 			E('div', { 'style': 'font-size:12px;font-weight:600;margin-bottom:8px;color:#7c3aed' }, '5G NR 频段矩阵:'),
-			chipRow(groups.nr, true)
+			chipRow(groups.nr, '#7c3aed')
+		]),
+		E('div', { 'style': 'margin-top:14px;' }, [
+			E('div', { 'style': 'font-size:12px;font-weight:600;margin-bottom:8px;color:#d97706' }, '3G UMTS 频段矩阵:'),
+			chipRow(groups.umts, '#d97706')
 		]),
 		E('div', { 'style': 'margin-top:14px;' }, [
 			E('div', { 'style': 'font-size:12px;font-weight:600;margin-bottom:8px;color:#0284c7' }, '4G LTE 频段矩阵:'),
-			chipRow(groups.lte, false)
+			chipRow(groups.lte, '#0284c7')
 		]),
 		E('div', { 'class': 'fm350-ctrl-row', 'style': 'margin-top:16px;' }, [
 			applyBtn,

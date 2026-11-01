@@ -53,6 +53,19 @@ const GTACT_PREFS: [u32; 3] = [2, 3, 6];
 
 /// 校验 `AT+GTACT` 的位置参数。不合法时返回可直接展示的中文错误。
 fn validate_gtact(args: &[String]) -> AtResult<()> {
+    // CRLF 是 AT 的换行符：参数内出现即意味着提前截断当前命令行、把后续
+    // 文本当成新命令注入。注意 trim() 与 parse::<u32>() 都会吞掉**尾随**
+    // 的 CR/LF，必须先于它们在原始参数上拒绝（`"5078\r"` 这类载荷否则会
+    // 绕过 `parse` 校验被拼进 AT+GTACT=…）。
+    for (k, item) in args.iter().enumerate() {
+        if item.bytes().any(|b| b == b'\r' || b == b'\n') {
+            return Err(format!(
+                "第 {} 个参数含 CRLF（{:?}），可在 AT 口上注入额外指令，已拒绝",
+                k + 1,
+                item
+            ));
+        }
+    }
     let tok = |i: usize| args.get(i).map(|s| s.trim()).unwrap_or("");
 
     // 第 1 位：<rat>
@@ -92,6 +105,33 @@ fn validate_gtact(args: &[String]) -> AtResult<()> {
     };
     let p1 = pref(1)?;
     let p2 = pref(2)?;
+
+    // 手册 §11.1.14 Defined Values：<PreferredAct> 的「Selected parameter must
+    // be a part of <Act>」—— 优先制式不能选在所选 <rat> 的组合之外
+    // （例如 NR/LTE 双模 + WCDMA 优先，模组无从执行）。本校验的意义是：
+    // 这类参数会先花掉一次 CFUN 下电上电才被模组拒绝，本地拦住更划算。
+    // <rat>=10（Automatic）在手册中语义未明，不收紧。
+    if rat != 10 {
+        let acts: &[u32] = match rat {
+            1 => &[2],
+            2 => &[3],
+            4 => &[2, 3],
+            14 => &[6],
+            16 => &[2, 6],
+            17 => &[3, 6],
+            20 => &[2, 3, 6],
+            _ => &[2, 3, 6],
+        };
+        if let Some(p) = p1 {
+            if !acts.contains(&p) {
+                return Err(format!(
+                    "<PreferredAct1>={} 不属于 <rat>={} 的制式组合（手册要求 Selected parameter \
+                     must be a part of <Act>，合法集合 {:?}）",
+                    p, rat, acts
+                ));
+            }
+        }
+    }
 
     // 手册 Note 3 + RAT Combination Table：三模下只有这十种组合合法
     if rat == 20 {
@@ -135,9 +175,44 @@ fn validate_gtact(args: &[String]) -> AtResult<()> {
 }
 
 /// 锁小区 / PCI（`AT+EMMCHLCK=1,<...>,<arfcn>,<pci>,<...>`，取消为 `=0`）。
+///
+/// AT+EMMCHLCK 参数原样拼进 AT 口：必须挡掉非数字（含 CRLF 注入）。
+///
+/// 陷阱：`trim()` 与 `parse::<u32>()` 都会吞掉**尾随**的 CR/LF，于是
+/// `"627264\r"` 这类「CR 紧贴参数边界」的注入载荷能绕过校验；必须先于
+/// trim 在原始参数上拒绝一切 CR/LF（AT 口以 CR 换行，参数内出现即意味着
+/// 提前截断当前命令行、把后续文本当成新命令注入）。
 pub fn lock_cell(at: &AtHandle, cfg: &Config, args: &[String]) -> AtResult<Vec<(String, String)>> {
     if args.is_empty() {
         return Err("缺少 AT+EMMCHLCK 参数，例如 1,11,0,627264,280,3 或 0（取消）".to_string());
+    }
+    for (k, item) in args.iter().enumerate() {
+        if item.bytes().any(|b| b == b'\r' || b == b'\n') {
+            return Err(format!(
+                "第 {} 个参数含 CRLF（{:?}），可在 AT 口上注入额外指令，已拒绝",
+                k + 1,
+                item
+            ));
+        }
+    }
+    if !matches!(args[0].trim(), "1" | "0") {
+        return Err(format!(
+            "AT+EMMCHLCK 第一个参数只能是 1（锁定）或 0（取消），当前为 {:?}",
+            args[0].trim()
+        ));
+    }
+    for (k, item) in args.iter().enumerate().skip(1) {
+        let t = item.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.parse::<u32>().is_err() {
+            return Err(format!(
+                "第 {} 个参数 {:?} 不是非负整数（AT+EMMCHLCK 参数会原样拼进 AT 口）",
+                k + 1,
+                t
+            ));
+        }
     }
     offline_apply(at, cfg, &at_cmd::set_emmchclk(&args.join(",")))
 }
@@ -201,10 +276,10 @@ pub fn rat_order(at: &AtHandle, cfg: &Config) -> AtResult<String> {
 /// 旧实现无法表达这一档（空列表直接被拒），于是用户一旦设了优先级
 /// 就只能再设一组、没法恢复默认。现支持传 `0` / `none` / `off` / `clear` 显式清除。
 pub fn set_rat_order(at: &AtHandle, cfg: &Config, order: &[String]) -> AtResult<String> {
-    // 清除优先级：AT+EPRATL=0
+    // 清除优先级：AT+EPRATL=0（字面量统一走 at_cmd::set_eprartl，保持唯一出处）
     let only = order.first().map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
     if order.len() == 1 && matches!(only.as_str(), "0" | "none" | "off" | "clear" | "auto") {
-        return run(at, cfg, "AT+EPRATL=0");
+        return run(at, cfg, &at_cmd::set_eprartl(&[]));
     }
 
     let mut codes: Vec<&'static str> = Vec::new();
@@ -349,6 +424,54 @@ mod tests {
         assert!(validate_gtact(&s(&["20", "4", ""])).is_err());
         // 频段参数必须是非负整数
         assert!(validate_gtact(&s(&["20", "6", "3", "n78"])).is_err());
+        // CRLF 是 AT 换行符：参数内出现即注入，必须在拼接前拒绝
+        //（trim/parse 都会吞掉尾随 CR，故在原始参数上校验）
+        assert!(validate_gtact(&s(&["20", "6", "3", "5078\r"])).is_err());
+        assert!(validate_gtact(&s(&["20", "6", "\r3"])).is_err());
+    }
+
+    /// 手册 §11.1.14：<PreferredAct> 「Selected parameter must be a part of
+    /// <Act>」—— 优先制式不能选在所选 <rat> 的组合之外，否则白付一次
+    /// CFUN 下电上电才被模组拒绝。
+    #[test]
+    fn gtact_pref_must_be_part_of_act() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // WCDMA 优先不在 NR/LTE 双模组合内
+        assert!(validate_gtact(&s(&["17", "2"])).is_err());
+        // NR 优先不在 LTE 单模组合内
+        assert!(validate_gtact(&s(&["2", "6"])).is_err());
+        // UMTS 优先不在 LTE 单模组合内
+        assert!(validate_gtact(&s(&["2", "2"])).is_err());
+        // 合法：各自组合内
+        assert!(validate_gtact(&s(&["16", "2"])).is_ok());
+        assert!(validate_gtact(&s(&["16", "6"])).is_ok());
+        assert!(validate_gtact(&s(&["17", "3"])).is_ok());
+        assert!(validate_gtact(&s(&["17", "6"])).is_ok());
+        assert!(validate_gtact(&s(&["4", "2"])).is_ok());
+        assert!(validate_gtact(&s(&["4", "3"])).is_ok());
+        assert!(validate_gtact(&s(&["1", "2"])).is_ok());
+        assert!(validate_gtact(&s(&["14", "6"])).is_ok());
+        // 自动模式（10）手册语义未明，不收紧 PreferredAct 归属（值仍限 2/3/6）
+        assert!(validate_gtact(&s(&["10", "6"])).is_ok());
+    }
+
+    /// AT+EMMCHLCK 参数原样拼进 AT 口：必须挡掉非数字（含 CRLF 注入）。
+    #[test]
+    fn lock_cell_rejects_non_numeric_args() {
+        let at = AtHandle::new();
+        let cfg = Config::default();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let e = lock_cell(&at, &cfg, &s(&["1", "11", "0", "627264\r", "280", "3"])).unwrap_err();
+        assert!(e.contains("CRLF"), "{}", e);
+        let e = lock_cell(&at, &cfg, &s(&["1", "11", "0", "627264\nAT+CFUN=0", "280", "3"])).unwrap_err();
+        assert!(e.contains("CRLF"), "{}", e);
+        let e = lock_cell(&at, &cfg, &s(&["2", "11"])).unwrap_err();
+        assert!(e.contains("1（锁定）或 0"), "{}", e);
+        let e = lock_cell(&at, &cfg, &s(&["1", "11", "0", "n78"])).unwrap_err();
+        assert!(e.contains("非负整数"), "{}", e);
+        // 取消路径 `0` 应通过参数校验（其后错误来自 AT 口，而非校验）
+        let e = lock_cell(&at, &cfg, &s(&["0"])).unwrap_err();
+        assert!(!e.contains("第一个参数"), "{}", e);
     }
 
     /// 手册 §11.1.13 的 `<RAT num>` = 0 表示 No prefer，应能下发清除命令。
