@@ -50,7 +50,7 @@
 | 文件 | 说明 | 大小 | MD5 | SHA-256 |
 |---|---|---|---|---|
 | `MTK_Windows_USB_Driver_v17.6.0.6.exe` | MediaTek Windows USB 驱动，供主机在刷机模式（BootROM / DA 模式）下识别模组 | 5,674,427 字节（约 5.4 MiB） | `f6c6b674d72c4f3a7b08c27926dcf259` | `9726952e95bc501bc3778203a6d7b38bd68a7e124bbdb5fb6be0452d4397e4b1` |
-| `FM350-GL刷机方法-240812改.pptx` | FM350-GL 刷机方法演示文档（SP Flash Tool 线刷流程） | 2,191,498 字节（约 2.1 MiB） | `559e6b745edca2194eb205719e8f8d7a` | `cca4b68b9353856d6a89e9ceddc5e4d620e63d0652ac1d7d301608eb2e9ca84b` |
+| `FM350-GL-Flash-Guide-240812.pptx` | FM350-GL 刷机方法演示文档（SP Flash Tool 线刷流程；原文件名 `FM350-GL刷机方法-240812改.pptx`，因 GitHub 附件不支持中文文件名而重命名） | 2,191,498 字节（约 2.1 MiB） | `559e6b745edca2194eb205719e8f8d7a` | `cca4b68b9353856d6a89e9ceddc5e4d620e63d0652ac1d7d301608eb2e9ca84b` |
 
 ## 3. ⚠️ 刷入前必须备份 IMEI / SN 分区
 
