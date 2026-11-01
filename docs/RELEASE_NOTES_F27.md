@@ -2,6 +2,17 @@
 
 > 本固件由 [LianXia233/luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 项目维护发布，为 Fibocom FM350-GL（MediaTek MT6880）官方 F27 固件的修改版本。
 
+## 下载（本 Release 附件）
+
+| 文件 | 说明 | 大小 | 下载 |
+|---|---|---|---|
+| `Generic_29.24.02_F27.zip` | 修改版固件本体 | 约 48.2 MiB | [⬇ 下载固件包](https://github.com/LianXia233/luci-app-fm350/releases/download/firmware-29.24.02_F27/Generic_29.24.02_F27.zip) |
+| `MTK_Windows_USB_Driver_v17.6.0.6.exe` | MediaTek Windows USB 驱动（线刷识别模组用） | 约 5.4 MiB | [⬇ 下载驱动](https://github.com/LianXia233/luci-app-fm350/releases/download/firmware-29.24.02_F27/MTK_Windows_USB_Driver_v17.6.0.6.exe) |
+| `FM350-GL-Flash-Guide-240812.pptx` | SP Flash Tool 刷机方法演示文档 | 约 2.1 MiB | [⬇ 下载刷机文档](https://github.com/LianXia233/luci-app-fm350/releases/download/firmware-29.24.02_F27/FM350-GL-Flash-Guide-240812.pptx) |
+
+> [!WARNING]
+> 刷入前务必：**① 校验哈希**（见第 2 节）→ **② 备份 IMEI / SN**（第 3 节警告必须先读）→ **③ 按第 4 节与刷机文档操作**。
+
 ## 1. 说明
 
 本固件基于 Fibocom 官方 **`no-OTA_29.24.02_F27`** 固件包修改（"no-OTA" 为官方发布的固件包变体名称，指该包不含 OTA 升级镜像，非本项目的修改），**修改目的为更适配 [luci-app-fm350](https://github.com/LianXia233/luci-app-fm350) 插件**，让数据面拨号与插件功能开箱可用。
