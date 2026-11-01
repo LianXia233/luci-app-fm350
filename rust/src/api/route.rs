@@ -341,7 +341,7 @@ pub fn dispatch(
                 let n = arg_str(payload, q, "number").unwrap_or_default();
                 at_err(crate::modem::set_sms_center(at, cfg, &n))
             } else {
-                at_err(at.with(cfg, |p| p.command("AT+CSCA?")))
+                at_err(at.with(cfg, |p| p.command(crate::at::at_cmd::CSCA_READ)))
             }
         }
 
