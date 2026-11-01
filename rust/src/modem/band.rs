@@ -31,6 +31,9 @@ pub fn nr_band_from_arfcn(arfcn: i64) -> Option<&'static str> {
         _ if (1805.0..=1880.0).contains(&mhz) => "n3",
         _ if (869.0..=894.0).contains(&mhz) => "n5",
         _ if (925.0..=960.0).contains(&mhz) => "n8",
+        // n20（791-821）与 n28（758-803）在 791-803 MHz 重叠，同样标注而不猜。
+        _ if (791.0..=803.0).contains(&mhz) => "n20/n28",
+        _ if (791.0..=821.0).contains(&mhz) => "n20",
         _ if (758.0..=803.0).contains(&mhz) => "n28",
         _ if (2010.0..=2025.0).contains(&mhz) => "n34",
         // n38 的下行频段（2570-2620 MHz）整体落在 n41（2496-2690 MHz）内，
@@ -64,89 +67,105 @@ pub fn lte_band_from_earfcn(earfcn: i64) -> Option<&'static str> {
     })
 }
 
-/// 判定 NR 频段号是否为 3GPP 已分配编号。
+/// 判定 NR 频段号是否可解。
 ///
-/// `<band>` 的编码解出候选频段号后，必须先过这一关：
-/// 否则 `5006` 会被解成根本不存在的 `n6`。
-/// 未分配编号的依据是 3GPP TS 38.101-1 / 38.101-2，
-/// 与实机佐证一致 —— `AT+GTACT` 回显的 `101..171` 序列里
-/// 106/109/110/111/115/116/121~124/127 全部缺席。
+/// FR1（1..=105）取「3GPP TS 38.101-1 已分配集合」并上「手册明列的 9 / 10」：
+/// 手册 §11.1.14 与 §11.1.16 都直接写出了 `509 BAND_NR_9`、`5010 BAND_NR_10`，
+/// 属于本文档的权威定义，不能因为 3GPP 未分配就拒解。
+///
+/// 旧实现用的是一份不完整的「未分配」**黑名单**（只列了 6/9/10/11/15/16/
+/// 21~24/27），于是 `504` 会被解成根本不存在的 `n4`、`5017` 解成 `n17`
+/// （n17 是 LTE 频段）—— 恰恰是黑名单想拦的那类假阳性。
+/// 改成白名单后不再依赖「记得住哪些编号不存在」。
+///
+/// FR2 与扩展区间沿用实机 `AT+GTACT=?` 回显佐证的范围，不自行放宽。
+/// **权威依据始终是模组自己回的候选列表**（手册 §11.1.14 的测试形式会给出
+/// `(list of supported <nr_band>s)`），本表只是离线兜底。
+/// 与前端 `network.js::nrBandNo` 保持完全一致。
 fn nr_band_no_is_valid(n: i32) -> bool {
-    // FR1 低段 1..=105 中 3GPP 未分配的编号
-    const UNASSIGNED: [i32; 11] = [6, 9, 10, 11, 15, 16, 21, 22, 23, 24, 27];
+    const FR1_ASSIGNED: [i32; 63] = [
+        1, 2, 3, 5, 7, 8, 9, 10, 12, 13, 14, 18, 20, 25, 26, 28, 29, 30, 34, 38, 39, 40,
+        41, 46, 48, 65, 66, 67, 68, 69, 70, 71, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+        83, 84, 85, 86, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+        104, 105,
+    ];
     if (1..=105).contains(&n) {
-        return !UNASSIGNED.contains(&n);
+        return FR1_ASSIGNED.contains(&n);
     }
-    // FR2 与后续补充频段只按已分配区间放行，不做「任意数字都算合法」的宽松处理
     (256..=269).contains(&n) || (510..=512).contains(&n) || (670..=710).contains(&n)
 }
 
 /// 由 `AT+GTCCINFO?` 的 `<band>` 编码反解 NR 频段名。
 ///
-/// 该字段存在**两套生成规则**：
+/// 手册 §11.1.14 与 §11.1.16 给出的是**十进制字符串拼接**这一条规则：
+/// `50` 直接后接 band 号 —— `501` = BAND_NR_1 … `509` = BAND_NR_9、
+/// `5010` = BAND_NR_10 … `50512` = BAND_NR_512。
 ///
-/// 1. **数值加法**：`基数 + 频段号`，基数分三档 ——
-///    `141` = 100 + 41 = n41、`101` = 100 + 1 = n1、`171` = 100 + 71 = n71；
-///    `501` = 500 + 1 = n1；`5041` = 5000 + 41 = n41。
-///    实机 NR 服务小区上报的 `5041` 即属此列。
-/// 2. **十进制字符串拼接**：`50` 直接后接频段号。实机 `AT+GTACT` 候选列表里
-///    出现过 `50512`，按数值加法无解（5000 + 512 = 5512 ≠ 50512），
-///    而 `50` 接 `512` 恰好成立。
-///
-/// 两套规则在部分取值上同解（`5041` 两种解释都指向 n41），故先试数值加法、
-/// 再试字符串拼接；候选频段号一律经过已分配性校验。
+/// 旧实现把「数值加法」当成第一优先规则（基数 5000 / 500 / 100），其中
+/// 5000+n、500+n 与字符串规则同解，但 **基数 100 这一档与手册相冲**：
+/// 手册明写 `101..171` 是 **LTE** 编码（101 = BAND_LTE_1），把 `141` 解成
+/// `n41` 是在 NR 语境下凭空造出一个手册未定义的编码。现只保留手册规则，
+/// 解不出来就返回 `None`，由调用方保留原始码并显式标注「编码未识别」。
 pub fn nr_band_from_code(code: &str) -> Option<String> {
     let c = code.trim();
-    if c.is_empty() || c.len() > 6 || !c.bytes().all(|b| b.is_ascii_digit()) {
+    // 手册规则：`50` + band 号（至少一位）
+    let rest = c.strip_prefix("50")?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let v: i32 = c.parse().ok()?;
-
-    // 规则 1：数值加法。基数从大到小试，先命中先返回。
-    for base in [5000, 500, 100] {
-        if v > base && nr_band_no_is_valid(v - base) {
-            return Some(format!("n{}", v - base));
-        }
+    let n: i32 = rest.parse().ok()?;
+    if n < 1 || !nr_band_no_is_valid(n) {
+        return None;
     }
-
-    // 规则 2：字符串拼接。前缀按长度降序，避免 `5041` 被 `50` 先行吃掉后误判。
-    for prefix in ["500", "100", "50"] {
-        if let Some(rest) = c.strip_prefix(prefix) {
-            if rest.is_empty() {
-                continue;
-            }
-            if let Ok(n) = rest.parse::<i32>() {
-                if nr_band_no_is_valid(n) {
-                    return Some(format!("n{}", n));
-                }
-            }
-        }
-    }
-    None
+    Some(format!("n{}", n))
 }
 
 /// 由 `AT+GTCCINFO?` 的 `<band>` 编码反解 LTE 频段名。
 ///
-/// 两套编码：
-/// - **数值加法**：`100 + 频段号` —— `101` = B1 …… `171` = B71；
-/// - **band 号直写** —— `1` = B1、`3` = B3、`41` = B41。
+/// 手册 §11.1.14 / §11.1.16：`101` = BAND_LTE_1 … **`171` = BAND_LTE_71**，
+/// 即 `100 + n`，上限就是 171。旧实现写成 `v > 100 && (1..=88).contains(&(v-100))`，
+/// 等价于放行到 188，会把 `188` 这种手册未定义的编码解成 `B88`。
 ///
-/// 两者都要求频段号落在 3GPP 已分配区间（LTE 为 1..=88，其中 16 未分配）。
+/// 另保留实机观测到的 band 号直写形态（`3` = B3、`41` = B41）作为兜底，
+/// 频段号需落在 3GPP 已分配区间（1..=88，其中 16 未分配）。
 pub fn lte_band_from_code(code: &str) -> Option<String> {
     let c = code.trim();
     if c.is_empty() || c.len() > 6 || !c.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let v: i32 = c.parse().ok()?;
-    let accept = |n: i32| (1..=88).contains(&n) && n != 16;
 
-    if v > 100 && accept(v - 100) {
+    // 手册定义的 100 + n，上限 171
+    if (101..=171).contains(&v) {
         return Some(format!("B{}", v - 100));
     }
-    if accept(v) {
+    // 实机 band 号直写兜底
+    if (1..=88).contains(&v) && v != 16 {
         return Some(format!("B{}", v));
     }
     None
+}
+
+/// 由 `AT+GTCCINFO?` 的 `<band>` 编码反解 UMTS 频段名。
+///
+/// 手册 §11.1.14 的 `<umts_band>` 是一张**独立的 1..10 小表**，与 LTE 的
+/// `100 + n`、NR 的 `"50" + n` 互不相干：
+/// `1` = BAND_UMTS_I、`2` = BAND_UMTS_II … `10` = BAND_UMTS_X（罗马数字）。
+///
+/// 旧实现完全没处理这一档（`match` 里只有 "9" 与 "4"），WCDMA 下会把
+/// 原始编码直接当频段名透出。另需注意：同一串数字在 `<rat>=20` 的
+/// `AT+GTACT` 里会被模组当成 UMTS 频段（参见 BAND_PRESETS 的修正说明）。
+pub fn umts_band_from_code(code: &str) -> Option<String> {
+    let n: i32 = code.trim().parse().ok()?;
+    // 先卡区间再下标：`n as usize - 1` 在 n = 0 时会整数下溢 panic，
+    // 而 AT 回显里出现 0 / 空值 / 负数是常事，不能拿它直接做下标。
+    if !(1..=10).contains(&n) {
+        return None;
+    }
+    const ROMAN: [&str; 10] = [
+        "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X",
+    ];
+    Some(format!("B{} ({})", n, ROMAN[(n - 1) as usize]))
 }
 
 /// 把服务小区的 `<bandwidth>` 编码换算为可读带宽。
@@ -229,32 +248,62 @@ mod tests {
     }
 
     #[test]
-    fn nr_band_code_decodes_all_three_encodings() {
-        assert_eq!(nr_band_from_code("5041").as_deref(), Some("n41"));
+    fn nr_band_code_follows_the_manual_string_rule() {
+        // 手册 §11.1.14 / §11.1.16：NR 编码 = "50" 拼接 band 号
         assert_eq!(nr_band_from_code("501").as_deref(), Some("n1"));
-        assert_eq!(nr_band_from_code("141").as_deref(), Some("n41"));
+        assert_eq!(nr_band_from_code("509").as_deref(), Some("n9"));   // 手册明列
+        assert_eq!(nr_band_from_code("5010").as_deref(), Some("n10")); // 手册明列
+        assert_eq!(nr_band_from_code("5041").as_deref(), Some("n41"));
         assert_eq!(nr_band_from_code("5078").as_deref(), Some("n78"));
         assert_eq!(nr_band_from_code("5079").as_deref(), Some("n79"));
+        assert_eq!(nr_band_from_code("50100").as_deref(), Some("n100"));
         assert_eq!(nr_band_from_code("50512").as_deref(), Some("n512"));
-        // 未分配编号与非法输入必须返回 None，不得猜
-        assert_eq!(nr_band_from_code("5006"), None); // n6 未分配
-        assert_eq!(nr_band_from_code("5027"), None); // n27 未分配
+        assert_eq!(nr_band_from_code("50257").as_deref(), Some("n257")); // FR2
+
+        // 101..171 是手册定义的 **LTE** 编码，在 NR 语境下不得解成 n41；
+        // 解不出来就返回 None，由调用方保留原始码并标注「编码未识别」。
+        assert_eq!(nr_band_from_code("141"), None);
+
+        // 3GPP 未分配且手册也未明列的编号，不得凭空造出频段名
+        assert_eq!(nr_band_from_code("504"), None);  // n4 不存在
+        assert_eq!(nr_band_from_code("5006"), None); // n6 不存在
+        assert_eq!(nr_band_from_code("5017"), None); // n17 是 LTE 频段
+        assert_eq!(nr_band_from_code("5027"), None); // n27 不存在
+
+        // 非法输入
         assert_eq!(nr_band_from_code("500"), None);
+        assert_eq!(nr_band_from_code("50"), None);
         assert_eq!(nr_band_from_code(""), None);
         assert_eq!(nr_band_from_code("n41"), None);
     }
 
     #[test]
-    fn lte_band_code_decodes_both_encodings() {
+    fn lte_band_code_follows_the_manual_range() {
         assert_eq!(lte_band_from_code("101").as_deref(), Some("B1"));
-        assert_eq!(lte_band_from_code("171").as_deref(), Some("B71"));
-        assert_eq!(lte_band_from_code("3").as_deref(), Some("B3"));
+        assert_eq!(lte_band_from_code("171").as_deref(), Some("B71")); // 手册上限
+        assert_eq!(lte_band_from_code("3").as_deref(), Some("B3"));    // 实机直写兜底
         assert_eq!(lte_band_from_code("41").as_deref(), Some("B41"));
-        // B16 未分配；越界与非法输入同样返回 None
-        assert_eq!(lte_band_from_code("116"), None);
-        assert_eq!(lte_band_from_code("16"), None);
+        // 手册的 101..171 是连续枚举，按字面解码（模组不支持的编号
+        // 本来就不会出现在 `AT+GTACT=?` 的候选列表里）
+        assert_eq!(lte_band_from_code("116").as_deref(), Some("B16"));
+        // 超出手册上限不得解成 B88
+        assert_eq!(lte_band_from_code("188"), None);
+        assert_eq!(lte_band_from_code("16"), None); // 直写形态下 B16 未分配
         assert_eq!(lte_band_from_code(""), None);
         assert_eq!(lte_band_from_code("B3"), None);
+    }
+
+    #[test]
+    fn umts_band_uses_its_own_table() {
+        // 手册 §11.1.14 <umts_band>：1 = BAND_UMTS_I … 10 = BAND_UMTS_X
+        assert_eq!(umts_band_from_code("1").as_deref(), Some("B1 (I)"));
+        assert_eq!(umts_band_from_code("3").as_deref(), Some("B3 (III)"));
+        assert_eq!(umts_band_from_code("8").as_deref(), Some("B8 (VIII)"));
+        assert_eq!(umts_band_from_code("10").as_deref(), Some("B10 (X)"));
+        // 越界与非法输入一律 None，不猜
+        assert_eq!(umts_band_from_code("0"), None);
+        assert_eq!(umts_band_from_code("11"), None);
+        assert_eq!(umts_band_from_code(""), None);
     }
 
     #[test]

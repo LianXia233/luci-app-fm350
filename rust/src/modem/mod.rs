@@ -35,7 +35,10 @@ pub mod temp;
 use crate::at::{self, AtHandle, AtResult};
 use crate::config::Config;
 
-pub use band::{bandwidth_text, lte_band_from_code, lte_band_from_earfcn, nr_band_from_code, nr_band_from_arfcn, operator_name};
+pub use band::{
+    bandwidth_text, lte_band_from_code, lte_band_from_earfcn, nr_band_from_arfcn,
+    nr_band_from_code, operator_name, umts_band_from_code,
+};
 pub use bind::{rebind_to_host, BindState};
 pub use info::{info, ModemInfo};
 pub use lock::{

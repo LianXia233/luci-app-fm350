@@ -15,15 +15,17 @@
 //!
 //! | 命令 | 读形式 | 写形式 | 备注 |
 //! |---|---|---|---|
-//! | `+GTUSBMODE` | `?` 可用 | `=40/41` | 会引起 USB 重枚举，AT 口会短暂消失 |
+//! | `+GTUSBMODE` | `?` 可用 | `=40/41`（手册只定义这两档） | 会引起 USB 重枚举，AT 口会短暂消失 |
 //! | `+GTDUALSIM` | `?` 可用 | `=<0|1>` | 切卡 |
-//! | `+GTACT` | `?` 可用 | `=<rat>,...` | 需先 `CFUN=0`，写完 `CFUN=1` |
+//! | `+GTACT` | `?` 可用，`=?` 回候选表 | `=<rat>[,[<PA1>],[<PA2>][,<band…>]]` | **位置参数**，频段前必须给 PA1/PA2 留位；需先 `CFUN=0`，写完 `CFUN=1` |
 //! | `+EMMCHLCK` | `?` 可用 | `=1,.../ =0` | 锁 PCI，同上需下电 |
 //! | `+EPRATL` | `?` **可用** | `=<n>,<rat...>` | 手册只写了写形式，实机读形式可回 `+EPRATL:2,128,4` |
 //! | `+GTSENRDTEMP` | `?` **不可用** | `=0` | 读形式回 `+CME ERROR: phone failure` |
 //! | `+CGACT` | `?` 可用 | `=1/0,<cid>` | 激活判据的权威来源 |
 //! | `+CGCONTRDP` | `=<cid>` | — | 未激活时仍回上一轮残留地址 |
 //! | `+CGPADDR` | `=<cid>` | — | 地址权威来源；无 v6 时第三位给 `::1` 占位 |
+//! | `+GTCCINFO` | `?` 可用 | — | **服务小区与邻区、不同制式的字段布局各不相同**（手册 §11.1.15 共 6 种），必须按布局取索引 |
+//! | `+GTCAINFO` | `?` 可用 | — | 手册 §11.1.16 完整定义了 PCC/SCC1/SCC2 结构；本模组实机只回 OK，故暂原样透出 |
 //! | `+EMBIND` | `?` 可用 | `=1,"<L2P>",<cid>` | 数据通道绑定，按 cid 生效；由 MD 侧 D2RM 执行，合法性随 RAT 变化 |
 
 use crate::config::Config;
@@ -59,7 +61,13 @@ pub const GTUSBMODE_READ: &str = "AT+GTUSBMODE?";
 pub const GTDUALSIM_READ: &str = "AT+GTDUALSIM?";
 pub const CSCA_READ: &str = "AT+CSCA?";
 
-/// USB 模式写入（40 = RNDIS+AT；41 为另一档 RNDIS 组合）。
+/// USB 模式写入。手册 §13.1.1 对本机型只定义了两档：
+///
+/// * `40` = RNDIS+AT+AP(GNSS)+META+DEBUG+NPT+ADB
+/// * `41` = 在 40 基础上额外开 AP(LOG)+AP(META)（**出厂默认值**）
+///
+/// 两档都含 RNDIS，因此本机型没有 MBIM 可选（参见 `L2P_MBIM` 的说明）。
+/// 合法值校验在 [`crate::modem::lock::set_usb_mode`]，此处只负责拼命令。
 ///
 /// **副作用**：切换会触发 USB 重新枚举，AT 口与数据网卡都会短暂消失。
 /// 调用方必须在下发后等待重枚举完成，不能立即追问。
@@ -104,8 +112,23 @@ pub const CREG_READ: &str = "AT+CREG?";
 pub const COPS_READ: &str = "AT+COPS?";
 /// 服务小区 / 邻区（Fibocom 扩展，手册 11.1.15）。
 pub const GTCCINFO_READ: &str = "AT+GTCCINFO?";
-/// 载波聚合。
+/// 载波聚合。手册 §11.1.16 完整定义了回显结构：
+/// `PCC: <band>,<physical cellId>,<earfcn|narfcn>,<dl_bandwidth>,<dl_mimo>,`
+/// `<ul_mimo>,<dl_modulation>,<ul_modulation>,<rsrp>`，以及可选的
+/// `SCC1:/SCC2: <scell_state>,<ul_configured>,<band>,…`。
+/// 实机目前只回 `OK`，故 `signal.rs` 暂按原始行透出；一旦固件开始上报，
+/// 应按上述结构解析而不是继续透出行文本。
 pub const GTCAINFO_READ: &str = "AT+GTCAINFO?";
+
+/// 频段候选表（**测试形式**）。手册 §11.1.14 定义它依次给出九组列表：
+/// supported `<Rat>s` / `<PreferredAct1>s` / `<PreferredAct2>s` /
+/// `<gsm_band>s` / `<umts_band>s` / `<lte_band>s` / `<cdma_band>s` /
+/// `<evdo_band>s` / `<nr_band>s`。
+///
+/// 与读形式 `AT+GTACT?` 的区别很关键：读形式回的是**当前已配置的锁定**
+/// （实机形如 `20,6,3,…,101,102,…`），本命令回的才是**模组支持的全部频段**。
+/// `band.rs` 里的频段合法性白名单只是离线兜底，真正的权威依据是本命令。
+pub const GTACT_TEST: &str = "AT+GTACT=?";
 
 // ---------------------------------------------------------------- PDP 与拨号
 
@@ -278,11 +301,21 @@ pub const GTACT_READ: &str = "AT+GTACT?";
 pub const EMMCHLCK_READ: &str = "AT+EMMCHLCK?";
 pub const EPRATL_READ: &str = "AT+EPRATL?";
 
-/// `AT+GTACT=<rat>[,<pre1>[,<pre2>[,<band...>]]]`
+/// `AT+GTACT=<rat>[,[<PreferredAct1>],[<PreferredAct2>][,<band_1>[,<band_2>…]]]`
+///
+/// **四个参数都是位置参数**（手册 §11.1.14 Syntax）：不指定优先制式时
+/// 必须用空位占位，否则频段会被当成 PreferredAct：锁 n41/n78/n79 应写
+/// `20,,,5041,5078,5079` 或 `20,6,3,5041,5078,5079`，而 **`20,5041,5078,5079`
+/// 是错的** —— 模组会读到 PreferredAct1=5041，按 Note 3 直接 rejected。
 ///
 /// `<rat>`：1=UMTS，2=LTE，4=LTE/UMTS，**10=Automatic**，14=NR-RAN，
 /// 16=NR-RAN/WCDMA，17=NR-RAN/LTE，20=NR-RAN/WCDMA/LTE（三模全开）。
 /// 注意 **20 不是自动，10 才是**；下发 10 之后查询会回显 20（手册 Note 6）。
+///
+/// `<PreferredAct1/2>`：仅 2(WCDMA) / 3(LTE) / 6(NR-RAN)，且三模下的组合
+/// 必须落在手册 RAT Combination Table 的十行内。
+///
+/// 参数合法性由 [`crate::modem::lock`] 的 `validate_gtact` 在下发前把关。
 pub fn set_gtact(param: &str) -> String {
     format!("AT+GTACT={}", param)
 }
@@ -295,7 +328,13 @@ pub fn set_emmchclk(param: &str) -> String {
 /// 制式优先顺序：`<rat>` 取 2=UMTS / 4=LTE / 128=NR。
 ///
 /// 编码**与 `+GTACT` 的 `<rat>` 不同**，不要混用。
+///
+/// 手册 §11.1.13 的 `<RAT num>` 还定义了 **0 = No prefer**：此时不能带
+/// 任何 `<rat>`，否则就成了 `AT+EPRATL=0,` 这种尾巴多一个逗号的非法形式。
 pub fn set_eprartl(codes: &[&str]) -> String {
+    if codes.is_empty() {
+        return "AT+EPRATL=0".to_string();
+    }
     format!("AT+EPRATL={},{}", codes.len(), codes.join(","))
 }
 
@@ -380,6 +419,21 @@ mod tests {
     fn epratl_uses_its_own_rat_encoding() {
         // 与 +GTACT 的 1/2/4/10/14/20 完全不同，这里是 2/4/128
         assert_eq!(set_eprartl(&["128", "4"]), "AT+EPRATL=2,128,4");
+        // 手册 §11.1.13：0 = No prefer，此时不能带尾逗号
+        assert_eq!(set_eprartl(&[]), "AT+EPRATL=0");
+    }
+
+    #[test]
+    fn gtact_keeps_positional_slots() {
+        // 不指定优先制式时必须用空位占位，频段才落在第 4 位之后
+        assert_eq!(set_gtact("20,,,5041,5078"), "AT+GTACT=20,,,5041,5078");
+        assert_eq!(set_gtact("20,6,3,5078"), "AT+GTACT=20,6,3,5078");
+    }
+
+    #[test]
+    fn usb_mode_command_is_well_formed() {
+        assert_eq!(set_usb_mode(40), "AT+GTUSBMODE=40");
+        assert_eq!(set_usb_mode(41), "AT+GTUSBMODE=41");
     }
 
     #[test]

@@ -202,25 +202,38 @@ function operatorText(sig) {
 	return sig.operator_name + (sig.operator ? ' (' + sig.operator + ')' : '');
 }
 
-/* 传感器元数据映射：代码与人类友好的中文释义 */
+/* 传感器元数据映射：代码与人类友好的中文释义
+ *
+ * 完整 23 路以手册 §18.3 的表为权威依据（`AT+GTSENRDTEMP=0` 一次就回全部
+ * 23 路）。旧实现只列了 16 路，缺的 5 / 6 / 11 / 12 / 17 / 18 / 23 在界面上
+ * 只能降级显示成「传感器 #11」这种占位名；其中 **11 md_4g、12 md_3g、
+ * 17 md_rf 正是射频频温升最关键的几路**，缺名字直接影响排障可读性。
+ * 与后端 temp.rs::sensor_name 保持逐路一致。 */
 function sensorMeta(id) {
 	var map = {
 		1:  { code: 'soc_max',      name: 'SoC 综合峰值' },
 		2:  { code: 'cpu_little0',  name: 'CPU 核心 0' },
 		3:  { code: 'cpu_little1',  name: 'CPU 核心 1' },
 		4:  { code: 'cpu_little2',  name: 'CPU 核心 2' },
+		5:  { code: 'cpu_little3',  name: 'CPU 核心 3' },
+		6:  { code: 'gpu0',         name: 'GPU 核心 0' },
 		7:  { code: 'gpu1',         name: 'GPU 渲染引擎' },
 		8:  { code: 'dramc',        name: 'DRAM 内存控制' },
 		9:  { code: 'mmsys',        name: '多媒体系统' },
 		10: { code: 'md_5g',        name: '5G 基带核心' },
+		11: { code: 'md_4g',        name: '4G 基带核心' },
+		12: { code: 'md_3g',        name: '3G 基带核心' },
 		13: { code: 'soc_dram_ntc', name: 'SoC/DRAM 热敏' },
 		14: { code: 'ltepa_ntc',    name: '4G LTE 功放 NTC' },
 		15: { code: 'nrpa_ntc',     name: '5G NR 功放 NTC' },
 		16: { code: 'rf_ntc',       name: '射频芯片 NTC' },
+		17: { code: 'md_rf',        name: '基带射频前端' },
+		18: { code: 'conn_gps',     name: '连接/GNSS 子系统' },
 		19: { code: 'pmic',         name: '主电源管理' },
 		20: { code: 'pmic_vcore',   name: 'VCore 核心供电' },
 		21: { code: 'pmic_vproc',   name: 'VProc 处理器供电' },
-		22: { code: 'pmic_vgpu',    name: 'VGPU 显存供电' }
+		22: { code: 'pmic_vgpu',    name: 'VGPU 显存供电' },
+		23: { code: 'crystal',      name: '晶振' }
 	};
 	return map[id] || { code: 'sensor_' + id, name: _('传感器 #') + id };
 }

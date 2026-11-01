@@ -14,7 +14,40 @@ var PRESET_GROUPS = [
 			   发 `AT+GTSENRDTEMP?` 会返回 +CME ERROR: phone failure。
 			   <sensor_id> = 0 表示一次返回全部传感器读数。 */
 			{ label: _('模组温度'), cmd: 'AT+GTSENRDTEMP=0' },
-			{ label: _('读取 IMEI (只读)'), cmd: 'AT+EGMREXT=0,7' }
+			{ label: _('读取 IMEI (只读)'), cmd: 'AT+EGMREXT=0,7' },
+			/* 手册 §3.15：读形式就是 `+SIMTYPE?`，回 `+SIMTYPE: <value>`。 */
+			{ label: _('SIM 卡类型'), cmd: 'AT+SIMTYPE?' },
+			/* 手册 §3.10：执行形式与读形式等价，回 `+CNUM: [<alpha>],<number>,<type>…`。
+			   未写卡时可能直接回 ERROR，属正常现象。 */
+			{ label: _('本机号码 (MSISDN)'), cmd: 'AT+CNUM' },
+			/* 手册 §3.20：一次回 AP 与 MD 两条基线版本，报障时必附。 */
+			{ label: _('基线版本 (AP/MD)'), cmd: 'AT+GTBASELINEVER?' }
+		]
+	},
+	{
+		/* 本组全部为只读查询（`AT+GTZONERDMAXTEMP=0` 虽带 `=`，但语义上
+		   与已在用的 `AT+GTSENRDTEMP=0` 同类，是「读全部」而不是写配置），
+		   用于拨号失败 / 脱网 / 限速类问题的第一轮定位。 */
+		group: _('诊断与排障'),
+		items: [
+			/* 手册 §20.1.2：执行形式，回 `+CEER: <category>[,<cause>,<description>]`。
+			   拨号失败时这是**最有价值的单条命令** —— +CME ERROR 往往只给
+			   「phone failure」，而 CEER 能给出网络侧拒绍的具体原因码。 */
+			{ label: _('扩展错误报告 (拨号失败根因)'), cmd: 'AT+CEER' },
+			/* 手册 §12.2.2：`+CGATT: <state>`，0 = 未附着、1 = 已附着。
+			   未附着时 PDP 激活必然失败，应先查这一条。 */
+			{ label: _('分组域附着状态'), cmd: 'AT+CGATT?' },
+			/* 手册 §11.1.9：`+CEMODE: <mode>`，UE 的 EPS 工作模式。 */
+			{ label: _('EPS 工作模式'), cmd: 'AT+CEMODE?' },
+			/* 手册 §11.1.11：`+ERAT:<Act>,<GPRS status>,<RAT mode>,<prefer_rat>`。
+			   注意：手册明写 `<prefer_rat>` 为 **ignore（3GPP RAT 下被丢弃）**，
+			   不能用它验证 AT+EPRATL 的优先制式是否生效（生效值请读 AT+EPRATL?）；
+			   本命令只能看到 <RAT mode> 反映的当前 RAT 模式配置。 */
+			{ label: _('当前 RAT 模式与 GPRS 状态'), cmd: 'AT+ERAT?' },
+			/* 手册 §18.4：`=<zone_id>`，0 = 一次回全部五个热区
+			   （1 CPU、2 PA1、3 PA2、4 Transceiver、5 PMIC）的历史最高温。
+			   与 AT+GTSENRDTEMP=0（瞬时温度）互补，降频/限速排障必看。 */
+			{ label: _('热区历史最高温'), cmd: 'AT+GTZONERDMAXTEMP=0' }
 		]
 	},
 	{
@@ -40,10 +73,19 @@ var PRESET_GROUPS = [
 			{ label: _('小区与邻区'), cmd: 'AT+GTCCINFO?' },
 			{ label: _('载波聚合'), cmd: 'AT+GTCAINFO?' },
 			{ label: _('锁频段状态'), cmd: 'AT+GTACT?' },
+			/* 上面那条回的是「当前已配置的锁定」（形如 20,6,3,…,101,102,…）；
+			   本条是**测试形式**，手册 §11.1.14 定义它依次给出九组候选列表：
+			   supported <Rat>s / <PreferredAct1>s / <PreferredAct2>s / <gsm_band>s /
+			   <umts_band>s / <lte_band>s / <cdma_band>s / <evdo_band>s / <nr_band>s。
+			   想知道「本机到底支持哪些频段」要看这一条，不是上一条。只读，安全。 */
+			{ label: _('频段候选表（支持哪些频段）'), cmd: 'AT+GTACT=?' },
 			/* 手册 11.1.13 未列 `?` 形式，但实机（FM350-GL）支持：
 			   `AT+EPRATL?` 回读 `+EPRATL:<num>,<rat…>`，如 `2,128,4` = NR 优先于 LTE。 */
 			{ label: _('优先制式'), cmd: 'AT+EPRATL?' },
-			{ label: _('锁小区状态'), cmd: 'AT+EMMCHLCK?' }
+			{ label: _('锁小区状态'), cmd: 'AT+EMMCHLCK?' },
+			/* 手册 §3.14：执行形式，逐行回本固件**实际支持的全部 AT 命令**。
+			   排查「某条命令到底存不存在」时这是唯一权威依据，比任何手册都准。 */
+			{ label: _('列出固件支持的全部命令'), cmd: 'AT+CLAC' }
 		]
 	}
 ];
