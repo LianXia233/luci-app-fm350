@@ -8,6 +8,9 @@
 //! | [`route`] | 路由表与参数提取（同步业务层，跑在阻塞池） |
 //! | [`budget`] | 读/写类请求超时预算 |
 //!
+//! 传输层在 [`crate::rpc`]：newline-JSON over TCP（一请求一连接，
+//! method 与旧 `/api/<路径>` 一一对应，业务信封不变）。
+//!
 //! ## 四条不能破的约定
 //!
 //! 1. **只绑回环地址**。这个口没有任何鉴权，把它暴露到局域网等同于把
@@ -28,7 +31,6 @@ use tokio::net::TcpListener;
 use crate::at::AtHandle;
 use crate::config::Config;
 use crate::log::infof;
-use crate::rt;
 
 pub mod budget;
 pub mod http;
@@ -42,37 +44,16 @@ pub fn bind_addr(cfg: &Config) -> String {
 }
 
 /// 启动 API 服务（async，永不返回除非监听失败）。
+///
+/// 传输与派发都在 [`crate::rpc`]：method → 路径映射、预算、阻塞池 dispatch、
+/// 连接数上限与各类超时。本函数只负责绑定与生命周期。
 pub async fn serve(at: Arc<AtHandle>, cfg_initial: Config) -> Result<(), String> {
     let addr = bind_addr(&cfg_initial);
     let listener = TcpListener::bind(&addr)
         .await
         .map_err(|e| format!("监听 {} 失败: {}", addr, e))?;
     infof(format_args!("API 监听 {}", addr));
-
-    let handler: rt::server::Handler = {
-        let at = Arc::clone(&at);
-        Arc::new(move |req: rt::server::Request| {
-            let at = Arc::clone(&at);
-            Box::pin(async move {
-                // 每个请求都取一次最新配置（内部带缓存）：配置热生效的前提。
-                let cfg = crate::config::load_cached();
-                let budget = budget::for_request(&cfg, req.method, &req.path);
-                let fut = rt::blocking_scope(move || {
-                    route::dispatch(&at, &cfg, &req.method, &req.path, &req.query, &req.payload)
-                });
-                match tokio::time::timeout(budget, fut).await {
-                    Ok(Ok(json)) => json,
-                    Ok(Err(e)) => http::err(&e),
-                    Err(_) => http::err(&format!(
-                        "请求处理超过 {} 秒（串口忙或模组无应答），已放弃本次响应；稍后重试",
-                        budget.as_secs()
-                    )),
-                }
-            })
-        })
-    };
-
-    rt::server::serve(listener, handler).await
+    crate::rpc::serve(listener, at).await
 }
 
 #[cfg(test)]
@@ -95,10 +76,10 @@ mod tests {
         assert!(a.starts_with("127.0.0.1:"), "实际为 {}", a);
     }
 
-    /// 端到端：起服务 → CLI 风格的 HTTP/1.0 请求 → JSON 响应。
-    /// 覆盖 accept → 解析 → dispatch（阻塞池）→ 响应全链路。
+    /// 端到端：起服务 → newline-JSON 请求 → 响应行。
+    /// 覆盖 accept → 行读取 → 解析 → dispatch（阻塞池）→ 响应全链路。
     #[test]
-    fn serve_round_trip_over_http() {
+    fn serve_round_trip_over_rpc() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -126,8 +107,12 @@ mod tests {
             let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
             let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let req = serde_json::json!({
+                "id": 7, "method": "ports",
+                "params": { "probe": "0" },
+            });
             stream
-                .write_all(b"GET /api/ports?probe=0 HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                .write_all(format!("{}\n", req).as_bytes())
                 .await
                 .unwrap();
             let mut buf = Vec::new();
@@ -135,9 +120,91 @@ mod tests {
                 .await
                 .expect("响应超时")
                 .unwrap();
-            let text = String::from_utf8_lossy(&buf);
-            assert!(text.starts_with("HTTP/1.1 200 OK"), "响应: {}", text);
-            assert!(text.contains("\"ports\""), "缺 ports 字段: {}", text);
+            let resp: serde_json::Value = serde_json::from_slice(&buf).expect("响应应为一行 JSON");
+            // 响应行 = 业务体（无外包裹）
+            assert_eq!(resp["ok"], serde_json::Value::Bool(true));
+            assert!(resp["ports"].is_array(), "缺 ports 字段: {}", resp);
+            assert!(buf.ends_with(b"\n"), "响应必须以换行结尾");
+        });
+    }
+
+    /// 非法 JSON 必须回 -32700 且携带 code，连接以一条响应正常收尾。
+    #[test]
+    fn serve_rejects_invalid_json() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let at = Arc::new(AtHandle::new());
+        let mut cfg = Config::default();
+        cfg.api_port = 18767;
+        let srv_cfg = cfg.clone();
+        let _guard = rt.spawn(async move {
+            let _ = serve(at, srv_cfg).await;
+        });
+
+        rt.block_on(async {
+            for _ in 0..40 {
+                if std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
+            let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream.write_all(b"this is not json\n").await.unwrap();
+            let mut buf = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_end(&mut buf))
+                .await
+                .expect("响应超时")
+                .unwrap();
+            let resp: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+            assert_eq!(resp["code"], serde_json::json!(crate::rpc::code::PARSE));
+        });
+    }
+
+    /// 模拟 busybox nc 的行为：写完请求立即 **shutdown 写端**（半关闭），
+    /// 再读响应。实机曾出现「nc 秒退空输出」，本测试验证半关闭路径。
+    #[test]
+    fn serve_responds_to_half_closed_client() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let at = Arc::new(AtHandle::new());
+        let mut cfg = Config::default();
+        cfg.api_port = 18768;
+        let srv_cfg = cfg.clone();
+        let _guard = rt.spawn(async move {
+            let _ = serve(at, srv_cfg).await;
+        });
+
+        rt.block_on(async {
+            for _ in 0..40 {
+                if std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
+            let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream
+                .write_all(b"{\"id\":9,\"method\":\"ping\",\"params\":{}}\n")
+                .await
+                .unwrap();
+            // nc 的关键动作：stdin EOF → shutdown 写端（FIN）
+            stream.shutdown().await.unwrap();
+            let mut buf = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_to_end(&mut buf))
+                .await
+                .expect("响应超时")
+                .unwrap();
+            assert!(!buf.is_empty(), "半关闭后必须仍收到响应");
+            let resp: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(resp["pong"], serde_json::Value::Bool(true));
         });
     }
 }

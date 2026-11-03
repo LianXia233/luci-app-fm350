@@ -1,0 +1,152 @@
+/* ==========================================================================
+   at-webserver LuCI 前端公共样式 - 白色毛玻璃与现代设计系统
+   覆盖：面板 / 字段 / 标签 / 弹窗 / 连接条 / 短信会话 / 终端 / 扫频进度等
+   ========================================================================== */
+
+/* ---------- CSS 变量 ---------- */
+:root {
+	--at-bg-glass: rgba(255, 255, 255, 0.78);
+	--at-bg-glass-hover: rgba(255, 255, 255, 0.90);
+	--at-bg-subtle: rgba(255, 255, 255, 0.60);
+	--at-border-glass: rgba(255, 255, 255, 0.85);
+	--at-border-subtle: rgba(220, 235, 248, 0.75);
+	--at-blur: 24px;
+	--at-saturate: 190%;
+	--at-shadow-sm: 0 4px 16px rgba(18, 48, 86, 0.04), 0 1px 2px rgba(18, 48, 86, 0.03);
+	--at-shadow-md: 0 10px 32px rgba(18, 48, 86, 0.06), 0 2px 8px rgba(18, 48, 86, 0.03);
+	--at-shadow-lg: 0 18px 48px rgba(18, 48, 86, 0.08), 0 4px 14px rgba(18, 48, 86, 0.05);
+	--at-shadow-inset: inset 0 1px 1px rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(18, 48, 86, 0.02);
+	--at-accent: #8b5cf6;
+	--at-accent-hover: #a78bfa;
+	--at-text: #14283e;
+	--at-text-secondary: #5a758d;
+	--at-radius: 18px;
+}html.at-dark {
+		--at-bg-glass: rgba(22, 34, 52, 0.78);
+		--at-bg-glass-hover: rgba(28, 45, 68, 0.88);
+		--at-bg-subtle: rgba(25, 40, 62, 0.65);
+		--at-border-glass: rgba(255, 255, 255, 0.12);
+		--at-border-subtle: rgba(255, 255, 255, 0.08);
+		--at-shadow-sm: 0 4px 16px rgba(0, 0, 0, 0.3);
+		--at-shadow-md: 0 10px 32px rgba(0, 0, 0, 0.38);
+		--at-shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.45);
+		--at-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+		--at-accent: #8b5cf6;
+		--at-accent-hover: #c4b5fd;
+		--at-text: #e2eef9;
+		--at-text-secondary: #9cb4ca;
+	}/* ---------- 字段 ---------- */
+.at-field { display: flex; align-items: flex-start; margin-bottom: 12px; }.at-field-label { flex: 0 0 170px; padding-top: 7px; font-weight: 600; color: var(--at-text); font-size: 13.5px; }.at-field-control { flex: 1 1 auto; }.at-field-control .cbi-input-text, .at-field-control .cbi-input-select, .at-field-control input[type="text"], .at-field-control input[type="number"], .at-field-control input[type="password"], .at-field-control select {
+	width: 100%;
+	max-width: 440px;
+	box-sizing: border-box;
+	height: 36px;
+	padding: 0 12px;
+	border: 1px solid var(--at-border-subtle);
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.85);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	color: var(--at-text);
+	font-size: 13px;
+	line-height: normal;
+	box-shadow: 0 1px 2px rgba(18, 48, 86, 0.03);
+	transition: border-color .2s, box-shadow .2s;
+}.at-field-control .cbi-input-text:focus, .at-field-control .cbi-input-select:focus, .at-field-control input[type="text"]:focus, .at-field-control input[type="number"]:focus, .at-field-control input[type="password"]:focus, .at-field-control select:focus {
+	border-color: var(--at-accent);
+	box-shadow: 0 0 0 3px rgba(41, 169, 225, 0.22);
+	outline: none;
+}.at-field-hint { color: var(--at-text-secondary); font-size: 12px; margin-top: 4px; }/* ---------- 按钮 ---------- */
+.at-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 7px 16px;
+	border-radius: 8px;
+	border: 1px solid var(--at-border-subtle);
+	background: rgba(255, 255, 255, 0.85);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
+	color: var(--at-text);
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+	line-height: 1.4;
+	box-shadow: 0 1px 2px rgba(18, 48, 86, 0.04);
+	transition: all .2s cubic-bezier(0.16, 1, 0.3, 1);
+}.at-btn:hover {
+	background: #ffffff;
+	border-color: rgba(41, 169, 225, 0.45);
+	box-shadow: 0 4px 12px rgba(18, 48, 86, 0.08);
+	transform: translateY(-1px);
+}.at-btn:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(18, 48, 86, 0.04); }.at-btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }.at-btn-primary {
+	background: linear-gradient(135deg, #087cba, #29a9e1);
+	border-color: rgba(8, 124, 186, 0.8);
+	color: #fff;
+	box-shadow: 0 4px 14px rgba(8, 124, 186, 0.25);
+}.at-btn-primary:hover {
+	background: linear-gradient(135deg, #0a89cd, #3db5eb);
+	border-color: #29a9e1;
+	box-shadow: 0 6px 18px rgba(8, 124, 186, 0.35);
+}.at-btn-danger {
+	background: linear-gradient(135deg, #c83d55, #e47988);
+	border-color: rgba(200, 61, 85, 0.8);
+	color: #fff;
+	box-shadow: 0 4px 14px rgba(200, 61, 85, 0.25);
+}.at-btn-danger:hover {
+	background: linear-gradient(135deg, #d8455e, #ed8896);
+	box-shadow: 0 6px 18px rgba(200, 61, 85, 0.35);
+}.at-btn-action { background: rgba(240, 245, 250, 0.85); border-color: var(--at-border-subtle); }.at-btn-neutral { background: rgba(255, 255, 255, 0.7); }/* ---------- 弹窗 (白色毛玻璃) ---------- */
+.at-modal-mask {
+	position: fixed;
+	inset: 0;
+	background: rgba(15, 23, 42, 0.45);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
+	z-index: 9999;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	animation: at-fade-in 0.2s ease-out;
+}.at-modal {
+	background: var(--at-bg-glass);
+	backdrop-filter: blur(28px) saturate(200%);
+	-webkit-backdrop-filter: blur(28px) saturate(200%);
+	border: 1px solid var(--at-border-glass);
+	border-radius: 18px;
+	width: 100%;
+	max-width: 440px;
+	max-height: 85vh;
+	overflow-y: auto;
+	padding: 22px 24px;
+	box-shadow: var(--at-shadow-lg), var(--at-shadow-inset);
+	animation: at-scale-up 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}.at-modal-wide { max-width: 660px; }.at-modal-title { margin: 0 0 14px; font-size: 17px; font-weight: 700; color: var(--at-text); }.at-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }.at-modal .at-field { margin-bottom: 12px; }@keyframes at-fade-in {from { opacity: 0; }to { opacity: 1; } }@keyframes at-scale-up {from { opacity: 0; transform: scale(0.95); }to { opacity: 1; transform: scale(1); } }/* ---------- 自动刷新 ---------- */
+.at-autorefresh { display: flex; align-items: center; gap: 8px; margin: 8px 0 12px; font-size: 13px; color: var(--at-text-secondary); }.at-autorefresh-label { color: var(--at-text-secondary); font-weight: 500; }/* ---------- 响应式 (PC & PE 移动端) ---------- */
+@media (max-width: 768px) {.at-field { flex-direction: column; gap: 4px; }.at-field-label { flex: none; padding-top: 0; width: 100%; }/* 标签改为上下排列后，控件仍按内容宽度收缩，输入框只剩两百来像素 */
+	.at-field-control { width: 100%; }.at-field-control .cbi-input-text, .at-field-control .cbi-input-select, .at-field-control input[type="text"], .at-field-control input[type="number"], .at-field-control input[type="password"], .at-field-control select { max-width: 100%; }.at-btn { min-height: 38px; }.at-modal-actions { flex-direction: column-reverse; gap: 8px; }.at-modal-actions .at-btn { width: 100%; }
+}/* ---------- 夜间模式兼容（issue #26）----------
+ * 输入框 / 普通按钮此前写死白色底，暗色主题（html.at-dark，
+ * 由 at-webserver/theme.js 判定写入）下白底刺眼、浅字不可读。 */
+html.at-dark .at-field-control .cbi-input-text, html.at-dark .at-field-control .cbi-input-select, html.at-dark .at-field-control input[type="text"], html.at-dark .at-field-control input[type="number"], html.at-dark .at-field-control input[type="password"], html.at-dark .at-field-control select {
+	background: rgba(30, 38, 62, 0.92);
+	color: var(--at-text);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}html.at-dark .at-btn {
+	background: rgba(30, 38, 62, 0.92);
+	color: var(--at-text);
+	border-color: rgba(255, 255, 255, 0.14);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}html.at-dark .at-btn:hover {
+	background: rgba(38, 48, 78, 0.98);
+	border-color: rgba(41, 169, 225, 0.45);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}html.at-dark .at-btn-action { background: rgba(38, 48, 78, 0.85); }html.at-dark .at-btn-neutral { background: rgba(30, 38, 62, 0.7); }
+
+/* ---------- 全局提示条 ----------
+ * 后端未就绪提示条（.mt5700-float-notice）与弹窗可读性修订已统一移至
+ * at-webserver/global.css —— 那份由 mt5700.js 注入，覆盖插件全部页面；
+ * 只 require ui.js 的页面拿不到它，所以不再放在本文件里。
+ */

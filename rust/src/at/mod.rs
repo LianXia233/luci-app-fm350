@@ -343,6 +343,12 @@ impl AtPort {
                     self.gate.feed(&buf[..n], &mut chunk);
                     raw.push_str(&String::from_utf8_lossy(&chunk));
                     chunk.clear();
+                    // 提示符（如 "> "）不带换行，会被 LineGate 留在残余缓冲
+                    // 而不是进 raw —— 除 raw 外必须探测 pending；命中后取走
+                    // 残余并并入 raw，防止它混入后续 PDU 阶段的应答。
+                    if self.gate.pending().windows(prompt.len()).any(|w| w == prompt.as_bytes()) {
+                        raw.push_str(&String::from_utf8_lossy(&self.gate.take_pending()));
+                    }
                     if raw.contains(prompt) {
                         self.silent_streak = 0;
                         return Ok(normalize(&raw, cmd));

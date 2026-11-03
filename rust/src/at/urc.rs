@@ -376,10 +376,42 @@ impl LineGate {
             }
         }
     }
+
+    /// 未闭合的残余字节。
+    ///
+    /// `AT+CMGS` 的 `> ` 提示符**不带换行**（手册 §8.1.16 的交互形态），
+    /// 按「残余不主动放行」的规则它会永远留在缓冲里 —— `command_prompt`
+    /// 必须额外探测这里，否则发送短信永远等不到提示符（实机故障：发送
+    /// 必报「等待 '>' 提示符超时」）。
+    pub fn pending(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// 取走并清空残余（提示符被上层认领后调用，避免混入下一段响应）。
+    pub fn take_pending(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_without_newline_stays_pending_until_taken() {
+        // AT+CMGS 的 '> ' 提示符不带换行：必须留在 pending 里可探测，
+        // take_pending 取走后缓冲清空，不污染下一段应答。
+        let mut g = LineGate::default();
+        let mut out = Vec::new();
+        g.feed(b"\r\n> ", &mut out);
+        // 前导 \r\n 是空行，按设计原样穿过；'> ' 留在残余里
+        assert_eq!(out, b"\r\n");
+        assert_eq!(g.pending(), b"> ");
+        assert_eq!(g.take_pending(), b"> ");
+        assert!(g.pending().is_empty());
+        g.feed(b"\r\n+CMGS: 12\r\n", &mut out);
+        // 空行穿过 + CMGS 行穿过（URC 过滤不命中）
+        assert_eq!(String::from_utf8_lossy(&out), "\r\n\r\n+CMGS: 12\r\n");
+    }
+
     use super::*;
 
     #[test]

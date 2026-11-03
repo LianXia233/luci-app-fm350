@@ -14,16 +14,23 @@
 					"config",
 					"ports",
 					"sshfwd",
-					"imei_read"
+					"imei_read",
+					"ping",
+					"events"
 				],
 				"luci.fm350.sms": [
 					"list",
-					"storage"
+					"storage",
+					"sms"
 				]
 			},
-			"uci": [ "fm350" ],
+			"uci": [
+				"fm350"
+			],
 			"file": {
-				"/usr/sbin/fm350d": [ "exec" ]
+				"/usr/sbin/fm350d": [
+					"exec"
+				]
 			}
 		},
 		"write": {
@@ -44,15 +51,20 @@
 					"modexec",
 					"sshbootstrap",
 					"imei_backup",
-					"imei_write"
+					"imei_write",
+					"ping",
+					"events"
 				],
 				"luci.fm350.sms": [
 					"send",
 					"delete",
-					"storage"
+					"storage",
+					"sms"
 				]
 			},
-			"uci": [ "fm350" ]
+			"uci": [
+				"fm350"
+			]
 		}
 	}
 }

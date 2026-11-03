@@ -8,8 +8,9 @@
 //! * AT 口由 daemon 独占持有，所有 AT 操作串行进入 `AtHandle`，本层不做并发。
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-use crate::rt::server::Method;
+use crate::rpc::Method;
 
 use super::http::{at_err, err, ok, Json};
 use crate::at::AtHandle;
@@ -345,7 +346,303 @@ pub fn dispatch(
             }
         }
 
+        // ---- 短信聚合动作（MT5700 短信中心前端契约）----
+        //
+        // 移植的短信中心页通过单一 POST /api/sms 的 `action` 分派（list/send/
+        // delete/capacity/session_*/store_*），返回形状与 MT5700 后端一致，
+        // 页面数据层不用为两套后端写两套解析。旧细粒度 /api/sms/* 路由保留
+        // （CLI 与旧页兼容）。
+        "/api/sms" => sms_action(at, cfg, payload, q),
+
+        // 事件轮询：当前无推送源，恒回空列表。保留端点让移植的 rpc.js
+        // 轮询链路零改动（后端将来接 CNMI 新短信事件时形状不变）。
+        "/api/events" => ok(serde_json::json!({ "seq": 0, "events": [] })),
+
+        // 配置写（旧 CLI `fm350d set` 的路由化）：键名经 ucode 白名单后仍做
+        // 一次后端校验；config::save 对未知键有自己的校验，错误原样透出。
+        "/api/set" => {
+            let key = arg_str(payload, q, "key").unwrap_or_default();
+            let val = arg_str(payload, q, "value").unwrap_or_default();
+            if key.is_empty() {
+                return err("缺少 key");
+            }
+            let first = key.chars().next().unwrap_or(' ');
+            if !(first.is_ascii_lowercase() || first == '_')
+                || !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return err("键名不合法");
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert(key, Json::String(val));
+            match crate::config::save(&Json::Object(obj)) {
+                Ok(()) => ok(serde_json::json!({ "config": crate::config::load() })),
+                Err(e) => err(&e),
+            }
+        }
+
+        // 模组 shell 双通道执行（旧 CLI `fm350d modexec` 的路由化）
+        "/api/modexec" => {
+            let channel = arg_str(payload, q, "channel").unwrap_or_default();
+            let cmd = arg_str(payload, q, "cmd").unwrap_or_default();
+            if channel != "adb" && channel != "ssh" {
+                return err("通道必须是 adb 或 ssh");
+            }
+            if cmd.trim().is_empty() {
+                return err("缺少要执行的命令");
+            }
+            let r = if channel == "adb" {
+                crate::daemon::sshfwd::adb_exec(&cmd)
+            } else {
+                crate::daemon::sshfwd::ssh_exec(cfg, &cmd)
+            };
+            match r {
+                Ok(v) => ok(serde_json::json!({ "result": v })),
+                Err(e) => err(&e),
+            }
+        }
+
         _ => err(&format!("未知路径: {}", path)),
+    }
+}
+
+// ---------------------------------------------------------------- 短信聚合动作
+
+/// 前台短信会话租约：open/renew/release 纯登记，不做通道门控。
+///
+/// MT5700 用租约暂停后台轮询，是因为它的 AT 客户端允许命令级并发插入；
+/// FM350 的整个发送/列表是**单个邮箱任务**，天然原子，不存在被插队的问题。
+/// 端点照常提供（移植的页面靠它显示前台徽章与心跳），语义上只是登记。
+fn sms_sessions() -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 重复提交保护：同一 dedup_key 在窗口内只接受一次。
+fn sms_dedup() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+const SMS_DEDUP_WINDOW: Duration = Duration::from_secs(10);
+const SMS_SESSION_MAX_TTL: Duration = Duration::from_secs(300);
+static SMS_SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 把模组短信条目适配成 MT5700 短信中心的 entry 契约。
+fn sms_entry(m: &crate::sms::Sms) -> Json {
+    // CMGL status：0/1 = 收到的（未读/已读），2/3 = 存储的发出
+    let direction = if m.status >= 2 { "sent" } else { "received" };
+    serde_json::json!({
+        "index": m.index,
+        "content": m.text,
+        "number": m.sender,
+        "time": if m.timestamp.is_empty() { Json::Null } else { Json::String(m.timestamp.clone()) },
+        "timeApprox": false,
+        "direction": direction,
+        "concat": Json::Null,
+        "error": Json::Null,
+    })
+}
+
+/// 按动作分派短信操作（POST /api/sms）。
+fn sms_action(at: &AtHandle, cfg: &Config, payload: &Json, q: &HashMap<String, String>) -> Json {
+    let action = arg_str(payload, q, "action").unwrap_or_default();
+    match action.as_str() {
+        "list" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
+            match crate::sms::list(at, cfg) {
+                Ok(v) => {
+                    let entries: Vec<Json> = v.iter().map(sms_entry).collect();
+                    let storage = crate::sms::storage(at, cfg)
+                        .map(|s| serde_json::json!({ "used": s.used, "total": s.total }))
+                        .unwrap_or(Json::Null);
+                    ok(serde_json::json!({
+                        "entries": entries,
+                        "totalLines": entries.len(),
+                        "storage": storage,
+                    }))
+                }
+                Err(e) => err(&e),
+            }
+        }
+        "send" => {
+            let number = arg_str(payload, q, "destination").unwrap_or_default();
+            let text = arg_str(payload, q, "message").unwrap_or_default();
+            if number.is_empty() || text.is_empty() {
+                return err("缺少收件人号码或短信内容");
+            }
+            // 重复提交保护：同一号码+正文 10s 内只接受一次（覆盖浏览器重试、
+            // 用户连点、按钮置灰前的第三击）。返回明确错误而非静默吞掉。
+            let dedup_key = arg_str(payload, q, "dedup_key")
+                .unwrap_or_else(|| format!("{}|{}", number, text));
+            {
+                let mut m = sms_dedup().lock().unwrap_or_else(|p| p.into_inner());
+                let now = Instant::now();
+                m.retain(|_, v| now.duration_since(*v) < SMS_DEDUP_WINDOW);
+                if m.contains_key(&dedup_key) {
+                    return err("相同短信刚已提交（10 秒防重复窗口），请勿重复点击");
+                }
+                m.insert(dedup_key, now);
+            }
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
+            match crate::sms::send(at, cfg, &number, &text) {
+                Ok(r) => {
+                    // 模组确认（+CMGS 回执）才归档；写盘失败不影响结论
+                    crate::sms::archive::record_sent(&number, &text);
+                    ok(serde_json::json!({
+                        "outcome": "accepted",
+                        "reference": r,
+                        "parts": [{ "partNumber": 1, "partsCount": 1, "outcome": "accepted" }],
+                        "message": "模组已确认提交",
+                    }))
+                }
+                Err(e) => {
+                    // 分类与 MT5700 一致：网络侧明确拒绝 = rejected；
+                    // 超时静默（结果不明，可能已发走）= unknown，前端绝不自动重发。
+                    let rejected = e.contains("+CMS ERROR") || e.contains("CMS ERROR");
+                    let unknown = e.contains("超时") || e.contains("无应答");
+                    let outcome = if rejected {
+                        "rejected"
+                    } else if unknown {
+                        "unknown"
+                    } else {
+                        "rejected"
+                    };
+                    ok(serde_json::json!({
+                        "outcome": outcome,
+                        "parts": [{ "partNumber": 1, "partsCount": 1, "outcome": outcome }],
+                        "message": e,
+                    }))
+                }
+            }
+        }
+        "delete" => {
+            let Some(indices) = payload.get("indices").and_then(|v| v.as_array()) else {
+                return err("缺少 indices");
+            };
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
+            let mut deleted = 0u32;
+            let mut failed: Vec<Json> = Vec::new();
+            for ix in indices {
+                let Some(i) = ix.as_i64() else { continue };
+                match crate::sms::delete(at, cfg, i) {
+                    Ok(_) => deleted += 1,
+                    Err(e) => failed.push(serde_json::json!({ "index": i, "error": e })),
+                }
+            }
+            ok(serde_json::json!({ "deleted": deleted, "failed": failed }))
+        }
+        "capacity" => {
+            if let Some(e) = modem_absent(cfg) {
+                return err(&e);
+            }
+            match crate::sms::storage(at, cfg) {
+                Ok(s) => ok(serde_json::json!({
+                    "storage": { "mem": s.mem, "used": s.used, "total": s.total }
+                })),
+                Err(e) => err(&e),
+            }
+        }
+        "get_smsc" => at_err(at.with(cfg, |p, _| p.command(crate::at::at_cmd::CSCA_READ))),
+        "set_smsc" => {
+            let n = arg_str(payload, q, "number").unwrap_or_default();
+            if n.is_empty() {
+                return err("缺少短信中心号码");
+            }
+            at_err(crate::modem::set_sms_center(at, cfg, &n))
+        }
+        "session_open" | "session_renew" => {
+            let ttl = payload
+                .get("ttl_ms")
+                .and_then(|v| v.as_u64())
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_secs(60))
+                .min(SMS_SESSION_MAX_TTL);
+            let mut m = sms_sessions().lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            m.retain(|_, deadline| *deadline > now);
+            if action == "session_open" {
+                let id = SMS_SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                m.insert(id, now + ttl);
+                ok(serde_json::json!({ "sessionId": id, "ttlMs": ttl.as_millis() as u64 }))
+            } else {
+                let id = payload
+                    .get("session_id")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| payload.get("sessionId").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                match m.get_mut(&id) {
+                    Some(deadline) => {
+                        *deadline = now + ttl;
+                        ok(serde_json::json!({ "sessionId": id, "ttlMs": ttl.as_millis() as u64 }))
+                    }
+                    None => err("会话不存在或已过期"),
+                }
+            }
+        }
+        "session_release" => {
+            let id = payload
+                .get("session_id")
+                .and_then(|v| v.as_u64())
+                .or_else(|| payload.get("sessionId").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            sms_sessions()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id);
+            ok(Json::Null)
+        }
+        "store_stats" => {
+            let st = crate::sms::archive::stats();
+            ok(serde_json::json!({
+                "count": st.count,
+                "totalBytes": st.total_bytes,
+                "maxBytes": st.max_bytes,
+                "conversations": st.conversations,
+            }))
+        }
+        "store_read" => {
+            let number = arg_str(payload, q, "number").unwrap_or_default();
+            if number.is_empty() {
+                return err("缺少 number");
+            }
+            let recs = crate::sms::archive::read_records(&number);
+            ok(serde_json::json!({ "entries": recs, "count": recs.len() }))
+        }
+        "store_drop" => {
+            let number = arg_str(payload, q, "number").unwrap_or_default();
+            if number.is_empty() {
+                return err("缺少 number");
+            }
+            let all = payload.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            // 前端回传原始字段（direction/content/time），指纹由后端统一计算
+            let fps: Vec<String> = payload
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|it| {
+                            let d = it.get("direction")?.as_str()?;
+                            let c = it.get("content")?.as_str()?;
+                            let t = it.get("time").and_then(|x| x.as_str());
+                            Some(crate::sms::archive::fingerprint(d, &number, t, c))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let n = crate::sms::archive::drop(&number, &fps, all);
+            ok(serde_json::json!({ "dropped": if n == usize::MAX { -1 } else { n as i64 } }))
+        }
+        "" => err("缺少 action"),
+        other => err(&format!("未知短信动作: {}", other)),
     }
 }
 

@@ -1,17 +1,13 @@
 //! Tokio 异步运行时层：事件驱动基础设施，**不含任何业务逻辑**。
 //!
-//! ## 职责边界
-//!
-//! | 模块 | 职责 |
-//! |---|---|
-//! | [`self`] | 运行时构建（[`start`]）与同步段托管（[`blocking_scope`]） |
-//! | [`server`] | 极简异步 HTTP/1.1 服务器（替代 tiny_http，见其模块头） |
+//! 传输层（本地 newline-JSON RPC）在 [`crate::rpc`]；本模块只提供运行时
+//! 构建与同步段托管。
 //!
 //! ## 事件驱动模型（谁跑在哪）
 //!
 //! ```text
 //! tokio current_thread 事件循环（永不阻塞）
-//!   ├─ api::serve accept 循环          每连接一个 task，报文读写全异步
+//!   ├─ rpc::serve accept 循环          每连接一个 task，报文读写全异步
 //!   ├─ daemon 巡检循环                  定时器驱动（tokio::time::sleep）
 //!   │    └─ 每个阻塞段 → blocking_scope 派发到阻塞池
 //!   └─ 请求预算 tokio::time::timeout   超时放弃响应，AT 会话照常完成
@@ -31,8 +27,6 @@
 //! 全部非阻塞，任何一段慢代码都拖不死服务器与巡检节奏。
 
 use std::future::Future;
-
-pub mod server;
 
 /// 构建单线程 Tokio 运行时并阻塞执行根 future。
 ///

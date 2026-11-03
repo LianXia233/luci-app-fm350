@@ -16,14 +16,15 @@
 //! 唯一例外是 `ports`（不触碰 AT 数据，仅枚举）：即使 daemon 不在也应能用，
 //! 因为用户恰恰是在 daemon 拉不起来的时候需要它来排障。
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+
 use std::time::Duration;
+
+use serde_json::Value;
 
 use crate::api::Json;
 use crate::at::AtHandle;
 use crate::config::{self, Config};
-use crate::{daemon, imei, modem, net, sms};
+use crate::{daemon, imei, modem, net, rpc, sms};
 
 /// 连接 daemon 的超时：拿不到就当它没在运行，走本地直连。
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -69,37 +70,45 @@ fm350d —— FM350 模组后端守护与命令行工具
       再显式带 --confirm 才可执行；执行前会自动备份原值。
 ";
 
-/// 通过 daemon 的本地 API 执行（daemon 未运行时返回 None）。
+/// 通过 daemon 的本地 RPC 执行（daemon 未运行时返回 None）。
 ///
+/// newline-JSON 一行协议（见 [`crate::rpc`]）：path 形如 `/api/status`，
+/// 这里剥掉 `/api/` 前缀作为 RPC method；读类带 query 参数时拼进 params。
 /// `read_timeout` 由调用方按语义决定：AT 类命令需要覆盖命令往返时间
 /// （最长 at_timeout），而 `ports` 这类纯枚举命令给短超时 —— daemon
 /// 无响应时快速回落到本地扫描，避免 LuCI 页面长时间转圈。
 fn via_daemon(
     cfg: &Config,
-    method: &str,
+    _method: &str,
     path: &str,
     payload: Option<&Json>,
     read_timeout: Duration,
 ) -> Option<Json> {
     let addr = format!("127.0.0.1:{}", cfg.api_port);
-    let mut stream = TcpStream::connect_timeout(&addr.parse().ok()?, DAEMON_CONNECT_TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(read_timeout)).ok()?;
-
-    let body = payload.map(|p| p.to_string()).unwrap_or_default();
-    let req = format!(
-        "{} {} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        method,
-        path,
-        body.len(),
-        body
-    );
-    stream.write_all(req.as_bytes()).ok()?;
-    stream.flush().ok()?;
-
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).ok()?;
-    let payload = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-    serde_json::from_str(payload).ok()
+    // path = /api/<seg>[?k=v]：query 参数对写类无意义（它们在 payload 里），
+    // 读类的 k=v 平铺进 params 与 ucode 侧行为一致。
+    let (p, q) = match path.split_once('?') {
+        Some((a, b)) => (a, b),
+        None => (path, ""),
+    };
+    let rpc_method = p.strip_prefix("/api/").unwrap_or(p);
+    let mut params = payload.cloned().unwrap_or(serde_json::json!({}));
+    if let Value::Object(ref mut m) = params {
+        for kv in q.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            m.insert(
+                k.to_string(),
+                Value::String(v.replace("%2B", "+").replace("%20", " ")),
+            );
+        }
+    }
+    rpc::call(
+        &addr,
+        rpc_method,
+        &params,
+        DAEMON_CONNECT_TIMEOUT,
+        read_timeout,
+    )
 }
 
 /// 序列化成功值（无需 Result 包装）。
@@ -425,7 +434,11 @@ pub fn run() {
                 eprintln!("用法: fm350d set <键> <值>");
                 std::process::exit(2);
             }
-            match config::save(&serde_json::json!({ key: val })) {
+            // 键名必须动态构造：json!({key: val}) 的裸 `key` 是**字面量** "key"，
+            // 不是变量 —— 旧写法永远在写 "key" 这个字段，真正的键从没落盘。
+            let mut obj = serde_json::Map::new();
+            obj.insert(key.clone(), serde_json::Value::String(val));
+            match config::save(&serde_json::Value::Object(obj)) {
                 Ok(()) => print_json(&serde_json::json!({ "ok": true, "config": config::load() })),
                 Err(e) => print_json(&serde_json::json!({ "ok": false, "error": e })),
             }

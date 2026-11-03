@@ -3,8 +3,8 @@
 //! ## 分层
 //!
 //! ```text
-//! cli / api          入口：命令行与 HTTP（rpcd 经 ucode 转发）
-//!   └─ rt            Tokio 运行时 + 异步 HTTP 服务器（事件驱动基础设施）
+//! cli / rpc / api    入口：CLI 与本地 RPC（newline-JSON；rpcd 经 ucode/nc 转发）
+//!   └─ rt            Tokio 运行时（事件驱动基础设施）
 //!   └─ daemon        周期巡检：拨号、保活、IPv4/IPv6 连通性维护、自愈
 //!        ├─ modem   模组状态与动作（AT 指令的业务语义）
 //!        │    └─ at AT 端口独占持有（工作线程 + 邮箱）+ 响应解析
@@ -44,5 +44,6 @@ pub mod imei;
 pub mod log;
 pub mod modem;
 pub mod net;
+pub mod rpc;
 pub mod rt;
 pub mod sms;

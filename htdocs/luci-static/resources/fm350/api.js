@@ -110,6 +110,20 @@ function timeout(p, ms) {
 	]);
 }
 
+/* 全局弹窗样式（MT5700 骨架）：模块加载即注入，早于任何 render ——
+ * 保证整个 LuCI（旧页 + 短信页）的弹窗（含 LuCI 原生 .modal）一个长相，
+ * PC 与手机端同一套响应式规则。短信页由 fm350/mt5700.js 注入同一文件。 */
+(function () {
+	if (document.getElementById('fm350-dialog-css'))
+		return;
+	var dl = document.createElement('link');
+	dl.id = 'fm350-dialog-css';
+	dl.rel = 'stylesheet';
+	dl.type = 'text/css';
+	dl.href = L.resource('fm350/css/dialog.css');
+	document.head.appendChild(dl);
+})();
+
 return baseclass.extend({
 	/* ---- 只读 ---- */
 	status: wrap(OBJ, 'status', [], 'status'),
@@ -188,6 +202,16 @@ return baseclass.extend({
 		link.type = 'text/css';
 		link.href = L.resource('fm350/css/fm350.css');
 		document.head.appendChild(link);
+		/* 全局弹窗样式（MT5700 骨架）：本模块被全部页面 require，
+		 * 在这里注入一次即覆盖整个 LuCI 的弹窗（PC + 手机端）。 */
+		if (!document.getElementById('fm350-dialog-css')) {
+			var dl = document.createElement('link');
+			dl.id = 'fm350-dialog-css';
+			dl.rel = 'stylesheet';
+			dl.type = 'text/css';
+			dl.href = L.resource('fm350/css/dialog.css');
+			document.head.appendChild(dl);
+		}
 	},
 
 	/* 统一的成功/失败提示 */

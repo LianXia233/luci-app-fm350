@@ -1,0 +1,191 @@
+/* ==========================================================================
+   at-webserver 全局视觉修订层（global.css）
+   --------------------------------------------------------------------------
+   本文件由 at-webserver/mt5700.js 注入 —— **插件所有页面都会 require mt5700**，
+   因此放在这里的规则对 12 个页面（终端/短信/拨号/扫描/日志/设置/升级/编排…）
+   一视同仁，不需要各页各自引入。
+
+   为什么单列一个文件：这些规则不是「某个页面的排版」，而是**全局组件**的
+   可读性修订 —— 弹窗（Mt5700.confirm / Ui.prompt / LuCI cbi / 主题 modal 四套
+   结构都可能弹）与后端未就绪提示条。它们原先分别散落在 mt5700.css 与 at.css：
+     · 弹窗段在 mt5700.css → 恰好所有页面都加载，能生效；
+     · 提示条段在 at.css   → 只有 require ui.js 的页面加载，配置页（service.js
+       只 require mt5700）拿不到样式，提示条会掉成无样式的一行文本。
+   合并到由 mt5700.js 统一注入的文件后，两段的可达页面完全一致，不会再出现
+   「A 页好看、B 页裸奔」。
+
+   约束（沿用上一版约定）：**只调颜色，不动版式** —— 尺寸/内边距/圆角/边框/
+   阴影/模糊/动画一律沿用各组件既有规则。
+   ========================================================================== */
+
+/* ==========================================================================
+   全局弹窗文字可见性（只调颜色，不动版式）
+   --------------------------------------------------------------------------
+   症状（实机截图）：弹窗标题够深，正文/列表却是浅灰，叠在毛玻璃底上几乎
+   看不清 —— 正文颜色走的是主题的 secondary 文本色，用户主题（Argon 一类）
+   把它设成浅灰时，后半段 `#475569` 的兜底也救不回来（主题规则特异性更高）。
+   「取消」键是 #6366f1 的浅靛蓝，白底毛玻璃上对比同样只有 3:1 上下。
+
+   约束：**弹窗样式不动** —— 尺寸、内边距、圆角、边框、阴影、模糊、动画
+   全部沿用上面已有的规则，本段只覆盖 color / 占位符颜色，不改任何盒模型
+   属性。覆盖四套结构，保证从任何入口弹出的窗对比度一致：
+     · .mt5700-modal   插件自绘（Mt5700.confirm 等）
+     · .at-modal       ui.js 的 promptModal
+     · .cbi-modal      LuCI 原生表单弹窗
+     · .modal          LuCI 主题自带的通用弹窗
+   ========================================================================== */
+
+:root {
+  /* 正文墨色：比 #475569 再深一档，落在浅灰毛玻璃（约 #b0b2be）上仍有 ~7:1 */
+  --mt5700-modal-ink: #141a24;
+  --mt5700-modal-ink-soft: #333c4b;
+  /* 说明性小字：比正文浅一档但仍过 4.5:1，不能再用 text-muted 那一档 */
+  --mt5700-modal-ink-hint: #3b4350;
+  --mt5700-modal-ghost-ink: #3730a3;
+  --mt5700-modal-link-ink: #1d4ed8;
+  --mt5700-modal-placeholder: #5b6678;
+}
+html.at-dark, .at-dark {
+  --mt5700-modal-ink: #f4f7fc;
+  --mt5700-modal-ink-soft: #d7deea;
+  --mt5700-modal-ink-hint: #b7c2d1;
+  --mt5700-modal-ghost-ink: #c9bcff;
+  --mt5700-modal-link-ink: #93c5fd;
+  --mt5700-modal-placeholder: #9aa7b8;
+}
+
+/* ---------- 标题 ---------- */
+.mt5700-modal-title, .cbi-modal-title, .modal-title, .at-modal-title {
+  color: var(--mt5700-modal-ink) !important;
+}
+
+/* ---------- 正文：段落 / 列表 / 定义列表 / 表格 ---------- */
+.mt5700-modal-body, .cbi-modal-body, .modal-body, .at-modal-body,
+.mt5700-modal-body p, .mt5700-modal-body li, .mt5700-modal-body ol, .mt5700-modal-body ul,
+.mt5700-modal-body dl, .mt5700-modal-body dt, .mt5700-modal-body dd,
+.mt5700-modal-body td, .mt5700-modal-body th,
+.cbi-modal-body p, .cbi-modal-body li, .cbi-modal-body td, .cbi-modal-body th,
+.modal-body p, .modal-body li,
+.at-modal-body p, .at-modal-body li {
+  color: var(--mt5700-modal-ink-soft) !important;
+}
+/* 强调文字要比正文更实，不能被主题压成同色 */
+.mt5700-modal-body strong, .mt5700-modal-body b,
+.cbi-modal-body strong, .cbi-modal-body b,
+.at-modal-body strong, .at-modal-body b {
+  color: var(--mt5700-modal-ink) !important;
+}
+/* 链接与等宽块：主题里这两类经常是浅色，单独兜一层 */
+.mt5700-modal-body a, .cbi-modal-body a, .at-modal-body a {
+  color: var(--mt5700-modal-link-ink) !important;
+}
+.mt5700-modal-body code, .mt5700-modal-body pre, .mt5700-modal-body kbd,
+.cbi-modal-body code, .cbi-modal-body pre,
+.at-modal-body code, .at-modal-body pre {
+  color: var(--mt5700-modal-ink) !important;
+}
+
+/* ---------- 说明性小字：允许浅一档，但不允许浅到看不清 ---------- */
+.mt5700-modal .mt5700-hint,
+.mt5700-modal .mt5700-form-hint,
+.at-modal .mt5700-hint,
+.cbi-modal .mt5700-hint {
+  color: var(--mt5700-modal-ink-hint) !important;
+}
+
+/* ---------- 输入控件：文字与占位符 ---------- */
+.mt5700-modal input, .mt5700-modal select, .mt5700-modal textarea,
+.cbi-modal input, .cbi-modal select, .cbi-modal textarea,
+.at-modal input, .at-modal select, .at-modal textarea {
+  color: var(--mt5700-modal-ink) !important;
+}
+.mt5700-modal ::placeholder,
+.cbi-modal ::placeholder,
+.at-modal ::placeholder {
+  color: var(--mt5700-modal-placeholder) !important;
+  opacity: 1 !important;
+}
+
+/* ---------- 「取消」这类文字按钮：靛蓝加深一档 ----------
+   .mt5700-sms-modal 有自己的蓝灰按钮配色，这里显式排除，避免把它改掉。 */
+.mt5700-modal:not(.mt5700-sms-modal) .mt5700-modal-footer .mt5700-btn-ghost,
+.mt5700-modal:not(.mt5700-sms-modal) .mt5700-modal-footer .mt5700-btn:not(.mt5700-btn-primary):not(.mt5700-btn-danger),
+.at-modal .at-modal-actions .at-btn:not(.at-btn-primary):not(.at-btn-danger) {
+  color: var(--mt5700-modal-ghost-ink) !important;
+}
+
+
+/* ---------- 后端未就绪提示条（ui.js: Ui.degradedNotice）----------
+ * 原来是往页面里插一个 LuCI 原生 .alert-message：它在文档流里，出现/消失会把
+ * 整页内容整体上下推 —— 后端探活抖动一次页面就跳一次，填到一半的表单跟着移动。
+ * 现在改成视口悬浮：fixed 脱离文档流，页面内容一像素都不动；消失时也不留空档。
+ *
+ * 层级压在插件弹窗（9400+）与 toast（10000）之下，只盖内容；
+ * top 由 ui.js 按「主题头部是否吸顶」实测写入，主题的固定头部不会把它盖住。
+ * 这里同时用 !important 压掉主题 .alert-message 的 margin / border / 背景。 */
+.mt5700-float-notice {
+	position: fixed !important;
+	top: 12px;
+	left: 50% !important;
+	right: auto !important;
+	margin: 0 !important;
+	box-sizing: border-box;
+	width: min(720px, calc(100vw - 24px)) !important;
+	max-width: calc(100vw - 24px) !important;
+	z-index: 9000;
+	padding: 10px 34px 10px 12px !important;
+	border: 1px solid rgba(245, 158, 11, 0.45) !important;
+	border-radius: 12px !important;
+	background: var(--at-bg-glass, var(--mt5700-glass-bg, rgba(255, 255, 255, 0.86))) !important;
+	color: var(--at-text, var(--mt5700-text, #14283e)) !important;
+	font-size: 13px;
+	line-height: 1.55;
+	text-align: left;
+	box-shadow: var(--at-shadow-lg, var(--mt5700-shadow-lg, 0 18px 48px rgba(18, 48, 86, 0.14)));
+	backdrop-filter: blur(14px) saturate(180%);
+	-webkit-backdrop-filter: blur(14px) saturate(180%);
+	transform: translateX(-50%);
+	animation: mt5700-notice-drop 0.26s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.mt5700-float-notice > strong { color: #b45309; }
+.mt5700-float-notice-x {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: inherit;
+	opacity: 0.55;
+	font-size: 16px;
+	line-height: 1;
+	cursor: pointer;
+}
+.mt5700-float-notice-x:hover { opacity: 1; background: rgba(127, 127, 127, 0.14); }
+@keyframes mt5700-notice-drop {
+	from { opacity: 0; transform: translate(-50%, -8px); }
+	to { opacity: 1; transform: translate(-50%, 0); }
+}
+html.at-dark .mt5700-float-notice {
+	background: rgba(24, 33, 51, 0.92) !important;
+	border-color: rgba(245, 158, 11, 0.5) !important;
+	color: #eef2f8 !important;
+	box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+html.at-dark .mt5700-float-notice > strong { color: #fbbf24; }
+@media (max-width: 640px) {
+	.mt5700-float-notice {
+		width: calc(100vw - 16px) !important;
+		max-width: calc(100vw - 16px) !important;
+		padding: 9px 30px 9px 10px !important;
+		border-radius: 10px !important;
+		font-size: 12.5px;
+	}
+	.mt5700-float-notice-x { top: 4px; right: 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.mt5700-float-notice { animation: none; }
+}

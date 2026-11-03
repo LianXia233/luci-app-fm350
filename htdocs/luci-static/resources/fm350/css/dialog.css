@@ -1,0 +1,242 @@
+/* ==========================================================================
+   fm350 全局弹窗样式（dialog.css）
+   --------------------------------------------------------------------------
+   来源：MT5700 的弹窗骨架（mt5700.css「全局弹窗样式优化」段）+ 文字可读性层
+   （global.css 弹窗段），按需求裁剪：
+     * 覆盖四套弹窗结构 —— LuCI 原生 .modal / .cbi-modal / 插件 .at-modal /
+       .mt5700-modal —— 让整个 LuCI 的弹窗一个长相；
+     * 输入框/下拉美化**收窄到弹窗内部**，不波及页面表单；
+     * 手机端（≤768px）满宽 + 按钮纵排，≤480px 再收一档边距；
+     * 由 fm350/api.js（全部旧页）与 fm350/mt5700.js（短信中心）注入。
+   ========================================================================== */
+
+/* ---------- 全局弹窗样式优化 (Modal Dialogs) ---------- */
+.mt5700-modal-mask, .cbi-modal, .modal-overlay, .modal-backdrop, .at-modal-mask {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  background: rgba(15, 23, 42, 0.45) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 1000 !important;
+  padding: 20px !important;
+  animation: mt-modal-fade 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}.mt5700-modal, .cbi-modal-dialog, .modal-dialog, .at-modal-dialog, .modal {
+  background: var(--mt5700-card-bg) !important;
+  backdrop-filter: blur(28px) saturate(190%) !important;
+  -webkit-backdrop-filter: blur(28px) saturate(190%) !important;
+  border-radius: var(--mt5700-radius-xl) !important;
+  border: 1.5px solid var(--mt5700-border) !important;
+  box-shadow: 0 25px 60px rgba(124, 58, 237, 0.25) !important;
+  max-width: 540px !important;
+  width: 100% !important;
+  padding: 24px 26px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  animation: mt-modal-pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
+}.mt5700-modal-title, .cbi-modal-title, .modal-title {
+  font-size: 17.5px !important;
+  font-weight: 700 !important;
+  color: #1e1b4b !important;
+  margin: 0 0 12px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+}.mt5700-modal-title::before {
+  content: '' !important;
+  display: inline-block !important;
+  width: 4px !important;
+  height: 16px !important;
+  border-radius: 4px !important;
+  background: linear-gradient(180deg, #a78bfa 0%, #8b5cf6 100%) !important;
+}.mt5700-modal-body, .cbi-modal-body, .modal-body {
+  font-size: 13.5px !important;
+  line-height: 1.6 !important;
+  color: #475569 !important;
+  margin-bottom: 20px !important;
+}.mt5700-modal-footer, .cbi-modal-actions, .modal-footer {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 12px !important;
+  padding-top: 14px !important;
+  border-top: 1px solid rgba(139, 92, 246, 0.1) !important;
+}@keyframes mt-modal-fade {from { opacity: 0; }to { opacity: 1; }
+}@keyframes mt-modal-pop {from { opacity: 0; transform: scale(0.92) translateY(12px); }to { opacity: 1; transform: scale(1) translateY(0); }
+}:root {
+  /* ---- 主题变量兜底（旧页不加载 mt5700.css，这里必须自带） ---- */
+  --mt5700-card-bg: var(--card-background-color, var(--background-color, rgba(255, 255, 255, 0.85)));
+  --mt5700-border: var(--border-color, rgba(255, 255, 255, 0.95));
+  --mt5700-radius-sm: 8px;
+  --mt5700-radius-xl: 24px;
+  /* ---- 弹窗文字墨色 ---- */
+  /* 正文墨色：比 #475569 再深一档，落在浅灰毛玻璃（约 #b0b2be）上仍有 ~7:1 */
+  --mt5700-modal-ink: #141a24;
+  --mt5700-modal-ink-soft: #333c4b;
+  /* 说明性小字：比正文浅一档但仍过 4.5:1，不能再用 text-muted 那一档 */
+  --mt5700-modal-ink-hint: #3b4350;
+  --mt5700-modal-ghost-ink: #3730a3;
+  --mt5700-modal-link-ink: #1d4ed8;
+  --mt5700-modal-placeholder: #5b6678;
+}
+html.at-dark, .at-dark {
+  --mt5700-card-bg: rgba(22, 27, 46, 0.86);
+  --mt5700-border: rgba(139, 92, 246, 0.22);
+  --mt5700-modal-ink: #f4f7fc;
+  --mt5700-modal-ink-soft: #d7deea;
+  --mt5700-modal-ink-hint: #b7c2d1;
+  --mt5700-modal-ghost-ink: #c9bcff;
+  --mt5700-modal-link-ink: #93c5fd;
+  --mt5700-modal-placeholder: #9aa7b8;
+}
+
+/* ---------- 标题 ---------- */
+.mt5700-modal-title, .cbi-modal-title, .modal-title, .at-modal-title {
+  color: var(--mt5700-modal-ink) !important;
+}
+
+/* ---------- 正文：段落 / 列表 / 定义列表 / 表格 ---------- */
+.mt5700-modal-body, .cbi-modal-body, .modal-body, .at-modal-body,
+.mt5700-modal-body p, .mt5700-modal-body li, .mt5700-modal-body ol, .mt5700-modal-body ul,
+.mt5700-modal-body dl, .mt5700-modal-body dt, .mt5700-modal-body dd,
+.mt5700-modal-body td, .mt5700-modal-body th,
+.cbi-modal-body p, .cbi-modal-body li, .cbi-modal-body td, .cbi-modal-body th,
+.modal-body p, .modal-body li,
+.at-modal-body p, .at-modal-body li {
+  color: var(--mt5700-modal-ink-soft) !important;
+}
+/* 强调文字要比正文更实，不能被主题压成同色 */
+.mt5700-modal-body strong, .mt5700-modal-body b,
+.cbi-modal-body strong, .cbi-modal-body b,
+.at-modal-body strong, .at-modal-body b {
+  color: var(--mt5700-modal-ink) !important;
+}
+/* 链接与等宽块：主题里这两类经常是浅色，单独兜一层 */
+.mt5700-modal-body a, .cbi-modal-body a, .at-modal-body a {
+  color: var(--mt5700-modal-link-ink) !important;
+}
+.mt5700-modal-body code, .mt5700-modal-body pre, .mt5700-modal-body kbd,
+.cbi-modal-body code, .cbi-modal-body pre,
+.at-modal-body code, .at-modal-body pre {
+  color: var(--mt5700-modal-ink) !important;
+}
+
+/* ---------- 说明性小字：允许浅一档，但不允许浅到看不清 ---------- */
+.mt5700-modal .mt5700-hint,
+.mt5700-modal .mt5700-form-hint,
+.at-modal .mt5700-hint,
+.cbi-modal .mt5700-hint {
+  color: var(--mt5700-modal-ink-hint) !important;
+}
+
+/* ---------- 输入控件：文字与占位符 ---------- */
+.mt5700-modal input, .mt5700-modal select, .mt5700-modal textarea,
+.cbi-modal input, .cbi-modal select, .cbi-modal textarea,
+.at-modal input, .at-modal select, .at-modal textarea {
+  color: var(--mt5700-modal-ink) !important;
+}
+.mt5700-modal ::placeholder,
+.cbi-modal ::placeholder,
+.at-modal ::placeholder {
+  color: var(--mt5700-modal-placeholder) !important;
+  opacity: 1 !important;
+}
+
+/* ---------- 「取消」这类文字按钮：靛蓝加深一档 ----------
+   .mt5700-sms-modal 有自己的蓝灰按钮配色，这里显式排除，避免把它改掉。 */
+.mt5700-modal:not(.mt5700-sms-modal) .mt5700-modal-footer .mt5700-btn-ghost,
+.mt5700-modal:not(.mt5700-sms-modal) .mt5700-modal-footer .mt5700-btn:not(.mt5700-btn-primary):not(.mt5700-btn-danger),
+.at-modal .at-modal-actions .at-btn:not(.at-btn-primary):not(.at-btn-danger) {
+  color: var(--mt5700-modal-ghost-ink) !important;
+}
+
+/* ---------- 文字输入框深度美化 ---------- */
+.mt5700-modal input[type="text"], .mt5700-modal input[type="password"], .mt5700-modal input[type="number"], .mt5700-modal input[type="search"], .mt5700-modal textarea, .cbi-modal input[type="text"], .cbi-modal input[type="password"], .cbi-modal input[type="number"], .modal input[type="text"], .modal input[type="password"], .modal input[type="number"], .modal textarea, .at-modal input[type="text"], .at-modal input[type="password"], .at-modal textarea {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border: 1.5px solid rgba(199, 210, 254, 0.85) !important;
+  border-radius: var(--mt5700-radius-sm) !important;
+  color: #1e1b4b !important;
+  padding: 8px 14px !important;
+  font-size: 13.5px !important;
+  line-height: 1.4 !important;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  box-sizing: border-box !important;
+  box-shadow: inset 0 1px 2px rgba(124, 58, 237, 0.04) !important;
+}.mt5700-modal input[type="text"]:hover, .cbi-modal input[type="text"]:hover, .modal input[type="text"]:hover, .modal textarea:hover, .at-modal input[type="text"]:hover {
+  border-color: #a78bfa !important;
+  background: #ffffff !important;
+}.mt5700-modal input[type="text"]:focus, .mt5700-modal input[type="password"]:focus, .cbi-modal input[type="text"]:focus, .cbi-modal input[type="password"]:focus, .modal input[type="text"]:focus, .modal input[type="password"]:focus, .modal textarea:focus, .at-modal input[type="text"]:focus, .at-modal input[type="password"]:focus {
+  border-color: #8b5cf6 !important;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.22), inset 0 1px 2px rgba(124, 58, 237, 0.04) !important;
+  outline: none !important;
+  background: #ffffff !important;
+}/* ---------- 下拉选择菜单深度美化 ---------- */
+.mt5700-modal select, .cbi-modal select, .modal select, .at-modal select, .cbi-modal .cbi-input-select, .modal .cbi-input-select {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%238b5cf6'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2.5' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 12px center !important;
+  background-size: 15px 15px !important;
+  border: 1.5px solid rgba(199, 210, 254, 0.85) !important;
+  border-radius: var(--mt5700-radius-sm) !important;
+  color: #1e1b4b !important;
+  padding: 8px 36px 8px 14px !important;
+  font-size: 13.5px !important;
+  line-height: 1.4 !important;
+  cursor: pointer !important;
+  box-sizing: border-box !important;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}.mt5700-modal select:hover, .cbi-modal select:hover, .modal select:hover, .at-modal select:hover {
+  border-color: #a78bfa !important;
+  background-color: #ffffff !important;
+}.mt5700-modal select:focus, .cbi-modal select:focus, .modal select:focus, .at-modal select:focus {
+  border-color: #8b5cf6 !important;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.22) !important;
+  outline: none !important;
+  background-color: #ffffff !important;
+}.mt5700-modal select option, .cbi-modal select option, .modal select option, .at-modal select option {
+  background: #ffffff !important;
+  color: #1e1b4b !important;
+  padding: 8px !important;
+}
+/* ---------- 暗色模式 ---------- */
+html.at-dark .mt5700-modal, html.at-dark .cbi-modal-dialog, html.at-dark .modal-dialog, html.at-dark .modal, .at-dark .mt5700-modal, .at-dark .cbi-modal-dialog, .at-dark .modal {
+  background: rgba(30, 41, 59, 0.96) !important;
+  border-color: rgba(148, 163, 184, 0.28) !important;
+}
+html.at-dark .mt5700-modal-title, html.at-dark .cbi-modal-title, html.at-dark .modal-title, .at-dark .modal-title {
+  color: #f8fafc !important;
+}
+html.at-dark .mt5700-modal-body, html.at-dark .cbi-modal-body, html.at-dark .modal-body, .at-dark .modal-body {
+  color: #cbd5e1 !important;
+}
+
+/* ---------- 手机端（≤768px）：弹窗满宽、操作按钮纵排 ---------- */
+@media (max-width: 768px) {
+  .mt5700-modal, .cbi-modal-dialog, .modal-dialog, .at-modal-dialog, .modal {
+    max-width: 100% !important;
+    padding: 18px 16px !important;
+  }
+  .mt5700-modal-footer, .cbi-modal-actions, .modal-footer, .at-modal-actions {
+    flex-direction: column-reverse !important;
+    gap: 8px !important;
+  }
+  .mt5700-modal-footer .mt5700-btn, .cbi-modal-actions .btn, .modal-footer .btn, .at-modal-actions .at-btn {
+    width: 100% !important;
+  }
+  .mt5700-modal-mask, .cbi-modal, .modal-overlay, .modal-backdrop, .at-modal-mask {
+    padding: 10px !important;
+  }
+}
+@media (max-width: 480px) {
+  .mt5700-modal, .cbi-modal-dialog, .modal-dialog, .at-modal-dialog, .modal {
+    padding: 16px 13px !important;
+  }
+}

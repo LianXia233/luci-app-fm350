@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::rt::server::Method;
+use crate::rpc::Method;
 
 /// 读类预算：健康请求 < 1.5 s，预算给到 10 s 覆盖慢查询；
 /// 必须 < rpcd fm350.uc 的读类兜底（TMO_READ = 12 s）。
@@ -49,6 +49,9 @@ const WRITE_PATHS: &[&str] = &[
     "/api/sms/delete",
     "/api/sms/storage",
     "/api/sms/smsc",
+    "/api/sms",
+    "/api/set",
+    "/api/modexec",
     "/api/sshfwd/exec",
     "/api/sshfwd/bootstrap",
 ];
@@ -65,10 +68,18 @@ pub fn for_request(cfg: &Config, method: Method, path: &str) -> Duration {
     }
 }
 
+/// RPC 传输层的 method 映射判据：该路径属于写类（POST）吗。
+///
+/// `rpc::handle` 用它把 `{"method":"dial"}` 映射成 POST `/api/dial`。
+/// 与 [`WRITE_PATHS`] 单一出处，改写类清单不会漏改映射。
+pub fn is_write_path(path: &str) -> bool {
+    WRITE_PATHS.contains(&path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rt::server::Method as M;
+    use crate::rpc::Method as M;
 
     #[test]
     fn reads_get_fixed_budget() {
