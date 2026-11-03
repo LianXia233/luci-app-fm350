@@ -127,11 +127,15 @@ pub fn dispatch(
         },
         "/api/signal" => match modem_absent(cfg) {
             Some(e) => err(&e),
-            None => ok(serde_json::json!({ "signal": crate::modem::signal(at, cfg) })),
+            None => ok(serde_json::json!({
+                "signal": crate::modem::signal(at, cfg)
+            })),
         },
         "/api/pdp" => match modem_absent(cfg) {
             Some(e) => err(&e),
-            None => ok(serde_json::json!({ "pdp": crate::modem::pdp(at, cfg) })),
+            None => ok(serde_json::json!({
+                "pdp": crate::modem::pdp(at, crate::at::queue::AtPriority::Normal, cfg)
+            })),
         },
         "/api/net" => ok(serde_json::json!({ "net": crate::net::status(cfg) })),
         "/api/cell" => match modem_absent(cfg) {
@@ -234,7 +238,7 @@ pub fn dispatch(
             if let Some(e) = modem_absent(cfg) {
                 return err(&e);
             }
-            at_err(at.with(cfg, move |p, _| p.command(&cmd)))
+            at_err(at.run(crate::at::queue::AtPriority::High, cfg, move |p, _| p.command(&cmd)))
         }
 
         // ---- 锁频 / 锁小区 ----
@@ -342,7 +346,9 @@ pub fn dispatch(
                 let n = arg_str(payload, q, "number").unwrap_or_default();
                 at_err(crate::modem::set_sms_center(at, cfg, &n))
             } else {
-                at_err(at.with(cfg, |p, _| p.command(crate::at::at_cmd::CSCA_READ)))
+                at_err(at.run(crate::at::queue::AtPriority::Normal, cfg, |p, _| {
+                    p.command(crate::at::at_cmd::CSCA_READ)
+                }))
             }
         }
 
@@ -357,6 +363,72 @@ pub fn dispatch(
         // 事件轮询：当前无推送源，恒回空列表。保留端点让移植的 rpc.js
         // 轮询链路零改动（后端将来接 CNMI 新短信事件时形状不变）。
         "/api/events" => ok(serde_json::json!({ "seq": 0, "events": [] })),
+
+        // ---- 异步任务管理（设计文档 §6）：长写操作的可选异步通道 ----
+        //
+        // 提交即回 task_id，任务体经 TaskManager 跑在阻塞池（拨号全流程
+        // 不再占住调用方线程）；同步 /api/dial 保留（前端默认交互不变）。
+        "/api/task/submit" => {
+            let kind = arg_str(payload, q, "kind").unwrap_or_default();
+            match kind.as_str() {
+                "dial" => {
+                    let at2 = at.clone();
+                    let cfg2 = cfg.clone();
+                    match crate::async_runtime::global().spawn("dial", move |_cancel| {
+                        // 与同步 /api/dial 完全一致的业务体（含 MTU 与网络应用）
+                        match crate::modem::dial(&at2, &cfg2) {
+                            Ok(st) => {
+                                let _ = crate::net::apply_mtu(&cfg2, st.mtu);
+                                match crate::net::apply_after_dial(
+                                    &cfg2,
+                                    &st.ipv4,
+                                    &st.ipv6,
+                                    &st.dns,
+                                    &st.gw4,
+                                    &st.netmask4,
+                                ) {
+                                    Ok(_) => Ok(format!(
+                                        "拨号成功 IPv4={} IPv6={}",
+                                        st.ipv4, st.ipv6
+                                    )),
+                                    Err(e) => Err(format!("拨号成功但网络配置失败: {}", e)),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }) {
+                        Ok(id) => ok(serde_json::json!({ "task": id })),
+                        Err(e) => err(&e),
+                    }
+                }
+                "" => err("缺少 kind"),
+                other => err(&format!("未知任务类型: {}", other)),
+            }
+        }
+        // 查询：带 id 返回单个任务，不带返回全部。
+        "/api/task" => {
+            let id = arg_str(payload, q, "id").unwrap_or_default();
+            let tm = crate::async_runtime::global();
+            if id.is_empty() {
+                let tasks = tm.list();
+                ok(serde_json::json!({ "tasks": tasks }))
+            } else {
+                match tm.status(&id) {
+                    Some(info) => ok(serde_json::json!({ "task": info })),
+                    None => err(&format!("任务不存在: {}", id)),
+                }
+            }
+        }
+        "/api/task/cancel" => {
+            let id = arg_str(payload, q, "id").unwrap_or_default();
+            if id.is_empty() {
+                return err("缺少 id");
+            }
+            match crate::async_runtime::global().cancel(&id) {
+                Ok(info) => ok(serde_json::json!({ "task": info })),
+                Err(e) => err(&e),
+            }
+        }
 
         // 配置写（旧 CLI `fm350d set` 的路由化）：键名经 ucode 白名单后仍做
         // 一次后端校验；config::save 对未知键有自己的校验，错误原样透出。
@@ -550,7 +622,9 @@ fn sms_action(at: &AtHandle, cfg: &Config, payload: &Json, q: &HashMap<String, S
                 Err(e) => err(&e),
             }
         }
-        "get_smsc" => at_err(at.with(cfg, |p, _| p.command(crate::at::at_cmd::CSCA_READ))),
+        "get_smsc" => at_err(at.run(crate::at::queue::AtPriority::Normal, cfg, |p, _| {
+            p.command(crate::at::at_cmd::CSCA_READ)
+        })),
         "set_smsc" => {
             let n = arg_str(payload, q, "number").unwrap_or_default();
             if n.is_empty() {

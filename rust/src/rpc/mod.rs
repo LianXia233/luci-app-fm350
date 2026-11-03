@@ -95,16 +95,34 @@ pub fn resp_err(id: &Value, c: i32, msg: &str) -> Value {
     serde_json::json!({ "id": id, "ok": false, "code": c, "error": msg })
 }
 
-/// 启动 RPC 服务（async，永不返回除非监听失败）。
-pub async fn serve(listener: TcpListener, at: Arc<AtHandle>) -> Result<(), String> {
+/// 启动 RPC 服务（async，直到监听失败或收到关闭信号）。
+pub async fn serve(
+    listener: TcpListener,
+    at: Arc<AtHandle>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
     let sem = Arc::new(Semaphore::new(MAX_CONNS));
     loop {
-        let (stream, _peer) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                crate::log::warnf(format_args!("RPC accept 失败: {}", e));
-                continue;
-            }
+        // 关闭信号优先：停止 accept，让在途连接自然收尾（一请求一连接）。
+        // accept 用 1s 超时轮询（不引入 tokio macros），关闭响应 ≤1s。
+        if *shutdown.borrow() {
+            crate::log::infof(format_args!("RPC 停止接受新连接"));
+            return Ok(());
+        }
+        let (stream, _peer) = match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            listener.accept(),
+        )
+        .await
+        {
+            Err(_elapsed) => continue,
+            Ok(v) => match v {
+                Ok(x) => x,
+                Err(e) => {
+                    crate::log::warnf(format_args!("RPC accept 失败: {}", e));
+                    continue;
+                }
+            },
         };
         // 满载快速失败：尝试拿许可，拿不到就回一条 BUSY 后立刻关闭。
         // 不排队 —— 调用方（ucode 预算 / CLI 超时）自己决定何时重试。

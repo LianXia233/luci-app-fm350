@@ -82,13 +82,56 @@ const SSHFWD_TICK: Duration = Duration::from_secs(15);
 pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
     let at = Arc::new(AtHandle::new());
 
+    // 优雅关闭：SIGTERM（procd 重启/停服）与 SIGINT 触发关闭信号 ——
+    // API 停止 accept、巡检循环在当前睡眠点退出，进程正常返回。
+    // Windows 构建无 unix signal（仅本地开发），直接不支持优雅退出。
+    let (sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+    let sd_tx2 = sd_tx.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            // 每个信号一个监听 task（无 select! 依赖）：任一到达即触发关闭。
+            let sd1 = sd_tx2.clone();
+            tokio::spawn(async move {
+                let mut term = signal(SignalKind::terminate()).expect("注册 SIGTERM 失败");
+                let _ = term.recv().await;
+                let _ = sd1.send(true);
+            });
+            let sd2 = sd_tx2.clone();
+            tokio::spawn(async move {
+                let mut int = signal(SignalKind::interrupt()).expect("注册 SIGINT 失败");
+                let _ = int.recv().await;
+                let _ = sd2.send(true);
+            });
+            // 主监听等待两个 task 之一触发（信号到达前挂起，无 CPU 消耗）。
+            let mut sd_self = sd_tx2.subscribe();
+            while !*sd_self.borrow() {
+                if sd_self.changed().await.is_err() {
+                    break;
+                }
+            }
+            return;
+        }
+        #[cfg(not(unix))]
+        {
+            // 非 unix 平台：等待一个永不触发的信号（不优雅关闭）。
+            let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = rx.await;
+        }
+        crate::infof!(format_args!("收到退出信号，正在优雅关闭"));
+        let _ = sd_tx.send(true);
+    });
+    let mut sd_api = sd_rx.clone();
+    let mut sd_loop = sd_rx.clone();
+
     // API 服务独立 task：事件循环同时服务巡检定时器。
     // AT 句柄 Clone 共享，API 侧与巡检侧都进同一个 FIFO 邮箱串行执行。
     tokio::spawn({
         let at = Arc::clone(&at);
         let cfg0 = cfg_initial;
         async move {
-            if let Err(e) = crate::api::serve(at, cfg0).await {
+            if let Err(e) = crate::api::serve(at, cfg0, sd_api).await {
                 warnf!(format_args!("API 退出: {}", e));
             }
         }
@@ -198,6 +241,23 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
         // tokio 定时器：睡眠期间事件循环照常服务 API 请求。
         let sleep = w.6.sleep_interval(interval);
         w.6.consume_accel();
-        tokio::time::sleep(sleep).await;
+        // 睡眠可被关闭信号打断（timeout 轮询形态，不引入 tokio macros）：
+        // 收到即退出主循环（在途巡检段天然结束）。
+        // 睡眠分片轮询关闭信号（500ms 粒度，不引入 tokio macros）：
+        // 收到即退出主循环，在途巡检段天然结束。
+        let mut remaining = sleep;
+        loop {
+            if *sd_loop.borrow() {
+                infof!(format_args!("巡检循环退出，fm350d 已优雅关闭"));
+                return Ok(());
+            }
+            let slice = remaining.min(std::time::Duration::from_millis(500));
+            tokio::time::sleep(slice).await;
+            remaining = remaining.saturating_sub(slice);
+            if remaining.is_zero() {
+                break;
+            }
+        }
     }
 }
+

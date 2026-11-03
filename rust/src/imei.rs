@@ -27,6 +27,7 @@
 use std::fs;
 use std::process::Command;
 
+use crate::at::queue::AtPriority;
 use crate::at::{self, at_cmd, AtHandle, AtResult};
 use crate::config::Config;
 
@@ -77,7 +78,7 @@ pub fn valid_format(imei: &str) -> bool {
 /// 不能把空值当解析失败 —— 否则空 IMEI 模组永远无法写入。
 /// 响应里没有 +EGMREXT 行也找不到 15 位数字时才报错（带原始响应）。
 fn read_raw_text(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    let r = at.with(cfg, |p, _| p.command(at_cmd::EGMREXT_READ_IMEI))?;
+    let r = at.run(AtPriority::Normal, cfg, |p, _| p.command(at_cmd::EGMREXT_READ_IMEI))?;
     // 响应形如：+EGMREXT: "861234567890123"
     let mut saw_ext = false;
     for line in r.lines() {
@@ -202,7 +203,7 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
     // 邮箱任务要求 'static：命令串克隆给闭包，原 cmd 仍用于结果展示
     let resp = {
         let cmd_for_at = cmd.clone();
-        at.with(cfg, move |p, _| p.command(&cmd_for_at))?
+        at.run(AtPriority::High, cfg, move |p, _| p.command(&cmd_for_at))?
     };
     if resp.contains("ERROR") {
         audit(&format!("IMEI 写入失败: {}", resp.replace('\n', " | ")));

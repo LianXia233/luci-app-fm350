@@ -41,6 +41,7 @@ tokio = { version = "1", default-features = false, features = [
     "time",
     "sync",
     "io-util",
+    "signal",
 ] }
 
 [profile.release]

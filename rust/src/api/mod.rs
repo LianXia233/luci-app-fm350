@@ -47,13 +47,17 @@ pub fn bind_addr(cfg: &Config) -> String {
 ///
 /// 传输与派发都在 [`crate::rpc`]：method → 路径映射、预算、阻塞池 dispatch、
 /// 连接数上限与各类超时。本函数只负责绑定与生命周期。
-pub async fn serve(at: Arc<AtHandle>, cfg_initial: Config) -> Result<(), String> {
+pub async fn serve(
+    at: Arc<AtHandle>,
+    cfg_initial: Config,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
     let addr = bind_addr(&cfg_initial);
     let listener = TcpListener::bind(&addr)
         .await
         .map_err(|e| format!("监听 {} 失败: {}", addr, e))?;
     infof(format_args!("API 监听 {}", addr));
-    crate::rpc::serve(listener, at).await
+    crate::rpc::serve(listener, at, shutdown).await
 }
 
 #[cfg(test)]
@@ -88,8 +92,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.api_port = 18766;
         let srv_cfg = cfg.clone();
+        let (_stx, srx) = tokio::sync::watch::channel(false);
         let _guard = rt.spawn(async move {
-            let _ = serve(at, srv_cfg).await;
+            let _ = serve(at, srv_cfg, srx).await;
         });
 
         rt.block_on(async {
@@ -139,8 +144,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.api_port = 18767;
         let srv_cfg = cfg.clone();
+        let (_stx, srx) = tokio::sync::watch::channel(false);
         let _guard = rt.spawn(async move {
-            let _ = serve(at, srv_cfg).await;
+            let _ = serve(at, srv_cfg, srx).await;
         });
 
         rt.block_on(async {
@@ -177,8 +183,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.api_port = 18768;
         let srv_cfg = cfg.clone();
+        let (_stx, srx) = tokio::sync::watch::channel(false);
         let _guard = rt.spawn(async move {
-            let _ = serve(at, srv_cfg).await;
+            let _ = serve(at, srv_cfg, srx).await;
         });
 
         rt.block_on(async {

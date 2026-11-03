@@ -39,6 +39,7 @@
 
 use std::time::Duration;
 
+use crate::at::queue::AtPriority;
 use crate::at::{at_cmd, is_imei_write, AtHandle, AtResult};
 use crate::config::Config;
 
@@ -85,20 +86,20 @@ pub struct Storage {
 ///
 /// 短信模块自己不该被拿去写号，但 `list/send/...` 的命令串有一部分由外部
 /// 参数拼成（如 `AT+CMGD=<index>`），统一过一次守卫成本极低。
-fn run(at: &AtHandle, cfg: &Config, cmd: &str) -> AtResult<String> {
+fn run(at: &AtHandle, prio: AtPriority, cfg: &Config, cmd: &str) -> AtResult<String> {
     if is_imei_write(cmd) {
         return Err(crate::at::imei_block_reason(cmd));
     }
     // 邮箱任务要求 'static：命令串拷贝进闭包（字符串极短，成本可忽略）
     let owned = cmd.to_string();
-    at.with(cfg, move |p, _| p.command(&owned))
+    at.run(prio, cfg, move |p, _| p.command(&owned))
 }
 
 /// 列出全部短信。
 pub fn list(at: &AtHandle, cfg: &Config) -> AtResult<Vec<Sms>> {
-    let _ = run(at, cfg, at_cmd::CMGF_PDU)?;
-    let _ = run(at, cfg, at_cmd::CSCS_GSM)?;
-    let resp = run(at, cfg, at_cmd::CMGL_ALL)?;
+    let _ = run(at, AtPriority::Normal, cfg, at_cmd::CMGF_PDU)?;
+    let _ = run(at, AtPriority::Normal, cfg, at_cmd::CSCS_GSM)?;
+    let resp = run(at, AtPriority::Normal, cfg, at_cmd::CMGL_ALL)?;
     Ok(parse_list(&resp))
 }
 
@@ -120,10 +121,10 @@ pub fn send(at: &AtHandle, cfg: &Config, number: &str, text: &str) -> AtResult<S
     }
     let (pdu, tpdu_len) = pdu::build_submit_pdu(number, text)?;
 
-    let _ = run(at, cfg, at_cmd::CMGF_PDU)?;
-    let _ = run(at, cfg, at_cmd::CSCS_GSM)?;
+    let _ = run(at, AtPriority::High, cfg, at_cmd::CMGF_PDU)?;
+    let _ = run(at, AtPriority::High, cfg, at_cmd::CSCS_GSM)?;
 
-    let r = at.with(cfg, move |p, c| {
+    let r = at.run(AtPriority::High, cfg, move |p, c| {
         // 下发 AT+CMGS 后模组回 '>' 提示符，再写入 PDU 与 Ctrl-Z。
         // 必须用 command_prompt：普通 command() 会等结果码，把 '>' 当成
         // 中间输出一直等到超时，随后 wait_for 只能拿到空气。
@@ -157,18 +158,18 @@ pub fn send(at: &AtHandle, cfg: &Config, number: &str, text: &str) -> AtResult<S
 
 /// 删除指定序号的短信。
 pub fn delete(at: &AtHandle, cfg: &Config, index: i64) -> AtResult<String> {
-    run(at, cfg, &at_cmd::cmgd(index))
+    run(at, AtPriority::High, cfg, &at_cmd::cmgd(index))
 }
 
 /// 查询短信存储用量。
 pub fn storage(at: &AtHandle, cfg: &Config) -> AtResult<Storage> {
-    let r = run(at, cfg, at_cmd::CPMS_READ)?;
+    let r = run(at, AtPriority::Normal, cfg, at_cmd::CPMS_READ)?;
     Ok(parse_storage(&r))
 }
 
 /// 设置短信存储（三处都设成同一个：`AT+CPMS=<mem>,<mem>,<mem>`）。
 pub fn set_storage(at: &AtHandle, cfg: &Config, mem: &str) -> AtResult<String> {
-    run(at, cfg, &at_cmd::cpms_set(mem))
+    run(at, AtPriority::Normal, cfg, &at_cmd::cpms_set(mem))
 }
 
 #[cfg(test)]

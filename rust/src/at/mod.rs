@@ -48,6 +48,7 @@ pub mod handle;
 pub mod parse;
 pub mod port;
 pub mod urc;
+pub mod queue;
 pub mod worker;
 
 use std::io::{Read, Write};
@@ -93,6 +94,8 @@ pub struct AtStats {
     pub releases: u64,
     /// 除本进程外，当前也打开了该 tty 的进程号（空 = 独占有效）。
     pub other_pids: Vec<u64>,
+    /// 优先级调度队列统计（等待分布 / 执行与取消计数 / 最近耗时）。
+    pub queue: queue::QueueSnapshot,
 }
 
 /// 结果码终止标记（手册 2.4.3：响应以结果码结束）。

@@ -2,6 +2,67 @@
 
 本项目遵循语义化版本号。
 
+## 1.2.0 (2026-11-04)
+
+本版以 **AT 优先级调度器**、**异步任务管理**、**优雅关闭** 与 **RPC/前端
+全面接入收尾** 为主（参照 luci-app-mt5700 的调度与任务管理设计，按 FM350
+的线程模型与实机约束改造，未照搬实现）。
+
+### AT 优先级调度器（`at/queue.rs`，全调用点迁移）
+
+- **五级优先级**：P0 紧急恢复 / P1 用户写（拨号、锁频、短信发送、IMEI、
+  AT 透传）/ P2 页面查询 / P3 daemon 巡检 / P4 后台预留。逐调用点显式
+  声明（`AtHandle::run(prio, …)` 取代 `with()`），禁止一律最高。
+- **同级 FIFO + Priority Aging**：每等 5 s 有效优先级 +1（封顶 P0），
+  持续高优先级流量下低级巡检最多 25 s 必获执行，不饿死。
+- **每级队列容量上限**（P0:8 / P1:8 / P2:16 / P3:4 / P4:2）：满即快速
+  失败（明确错误），不排队堆积。
+- **排队超时 + 取消等待**：按优先级给排队预算（P1/P0 60s、P2 15s、
+  P3 10s），超时置取消标记、任务从队列清除**不执行**；已开始的执行
+  不可取消（半途丢弃破坏半双工会话，与 rt 层语义一致）。
+- **事务独占**：拨号链 / 短信发送 / 锁频 CFUN 序列是单个 Job，拿到
+  执行权整段跑完才交还串口。
+- **队列统计透出**：等待分布（各级）、执行/取消/拒绝计数、最近排队与
+  执行耗时，随 `/api/ports` 的 stats 上报。
+- 单测覆盖：优先级序 / 同级 FIFO / aging 升级 / 队满快速失败 / 取消
+  跳过 / worker 串行与高优先级插队（259 项全绿）。
+
+### 异步任务管理器（`async_runtime.rs`）+ 优雅关闭
+
+- **TaskManager**：六态状态机（Pending/Running/Completed/Failed/
+  Cancelled/Timeout）、取消令牌（watch）、创建/开始/结束时刻、结果与
+  错误记录。相对 MT5700 两处硬化：**in-flight 硬上限 8，占满明确拒绝**
+  （非软淘汰）；**超时区分请求侧放弃与底层操作终止**——Timeout 置态 +
+  取消信号后任务体自行收尾，真实结局写回 result/error，绝不谎称已终止。
+- **`/api/task/submit`（kind=dial）、`/api/task`、`/api/task/cancel`**：
+  拨号等长写操作可异步提交，提交即回 task_id（实测 0.12 s），同步
+  `/api/dial` 保留（前端默认交互不变）。ucode 暴露 task_submit/task/
+  task_cancel，ACL 同步开放。
+- **优雅关闭**：SIGTERM（procd 重启）/ SIGINT → 关闭信号 → RPC 停止
+  accept、巡检循环在当前睡眠点退出（500 ms 分片轮询，无 select! 依赖，
+  tokio feature 仅加 signal）。实机验证：restart 时日志出现
+  「巡检循环退出，fm350d 已优雅关闭」。
+
+### RPC 与前端收尾
+
+- **响应行 = 业务体**（修复双重信封）：新 RPC 层曾把业务体再包一层
+  `{id,ok,result}`，前端 `parseRaw` 按旧 CLI 契约解析业务体，取值整体
+  偏移一层 → 状态页全字段 undefined 整页离线。现响应行即
+  `{"ok":true,…}`，传输层错误才用 `{ok:false,code,error}`。
+- 补齐 `/api/set`、`/api/modexec` 路由（此前仅 CLI 本地路径，前端直连
+  必需）；`sshbootstrap` 映射修正到 `/api/sshfwd/bootstrap`。
+- 修 CLI `set` 的 `json!({key: val})` 裸键名 bug（裸 `key` 是字面量
+  "key"，真正的配置键从未落盘）。
+- 修 `Readiness` 日志的 `CEREG=Some(2)` Debug 包装（人类可读化）。
+- 健康检查布尔解包修复（ping 应答经 expect 解包为布尔，误判 degraded）。
+
+### 性能（实机基准，ImmortalWRT / MT7981）
+
+- newline-JSON RPC 串行 ping 40 次 < 1 s（含每次 fork busybox nc 的
+  开销）；6 路并发 ping / ports 各 40 次**零失败**。
+- 常驻 RSS ≈ 1.5 MB；线程数 9（事件循环 + AT worker + 看门狗 + 阻塞池）。
+- 基准脚本随仓库发布：`scripts/bench_rpc.sh`。
+
 ## 1.1.0-r1 (2026-11-04)
 
 本版以 **Tokio 异步事件驱动重构** 与 **实验固件（ImmortalWrt / MT7981 + FM350-GL）

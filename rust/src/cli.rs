@@ -228,7 +228,7 @@ pub fn run() {
             ok_value(modem::signal(a, c))
         }),
         "pdp" => run_cli(&cfg, "GET", "/api/pdp", None, |a, c| {
-            ok_value(modem::pdp(a, c))
+            ok_value(modem::pdp(a, crate::at::queue::AtPriority::Normal, c))
         }),
         "net" => print_json(&serde_json::json!({ "ok": true, "net": net::status(&cfg) })),
         // 端口枚举不占用 AT 口；daemon 在跑时优先走它，探测结果更准
@@ -326,7 +326,9 @@ pub fn run() {
                 }
                 // 邮箱任务要求 'static：命令串克隆进闭包
                 let owned = c.clone();
-                ok_or_err(a.with(cc, move |p, _| p.command(&owned)))
+                ok_or_err(a.run(crate::at::queue::AtPriority::High, cc, move |p, _| {
+                    p.command(&owned)
+                }))
             })
         }
 
@@ -339,7 +341,9 @@ pub fn run() {
                 })
             }
             None => run_cli(&cfg, "GET", "/api/sms/smsc", None, |a, c| {
-                ok_or_err(a.with(c, |p, _| p.command(crate::at::at_cmd::CSCA_READ)))
+                ok_or_err(a.run(crate::at::queue::AtPriority::Normal, c, |p, _| {
+                    p.command(crate::at::at_cmd::CSCA_READ)
+                }))
             }),
         },
 

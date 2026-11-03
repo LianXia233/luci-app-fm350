@@ -349,6 +349,36 @@ return {
 		/* 探活（移植前端的健康检查）：读类零门槛 */
 		'ping': { 'call': function(req) { return rpc_cached('ping', {}, null, 'ping', false); } },
 
+		/* ---- 异步任务管理（设计文档 §6）：提交即回 task_id ----
+		 * submit 本身零耗时（任务体跑在 daemon 阻塞池），读类预算足够；
+		 * 查询/取消同为秒回。同步 /api/dial 保留，前端默认交互不变。 */
+		'task_submit': {
+			'args': { 'kind': '' },
+			'call': function(req) {
+				let kind = s(get_arg(req, 'kind', ''));
+				if (kind == '')
+					return { ok: false, error: '缺少 kind' };
+				return rpc_cached('task/submit', { kind: kind }, TMO_READ, null, true);
+			}
+		},
+		'task': {
+			'args': { 'id': '' },
+			'call': function(req) {
+				let id = s(get_arg(req, 'id', ''));
+				let params = (id == '') ? {} : { id: id };
+				return rpc_cached('task', params, TMO_READ, null, true);
+			}
+		},
+		'task_cancel': {
+			'args': { 'id': '' },
+			'call': function(req) {
+				let id = s(get_arg(req, 'id', ''));
+				if (id == '')
+					return { ok: false, error: '缺少 id' };
+				return rpc_cached('task/cancel', { id: id }, TMO_READ, null, true);
+			}
+		},
+
 		/* 事件轮询（移植前端的新短信通知链路）：后端当前恒回空列表 */
 		'events': {
 			'args': { 'since': '' },

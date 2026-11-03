@@ -33,6 +33,7 @@ pub mod signal;
 pub mod temp;
 
 use crate::at::{self, AtHandle, AtResult};
+use crate::at::queue::AtPriority;
 use crate::config::Config;
 
 pub use band::{
@@ -54,18 +55,30 @@ pub use temp::{sensor_name, Temperature};
 /// 走 IMEI 守卫（[`crate::imei::guard_transparent`]）：未开启 `imei_write`
 /// 时拦截写入形式，开启后放行，便于维护者经内部路径调试。
 /// 对外透传路径（`/api/at`、CLI `at`）则是无条件拦截，二者不冲突。
+/// 用户页面查询类命令：P2 Normal（见 `at::queue::AtPriority` 分级）。
 pub fn run(at: &AtHandle, cfg: &Config, cmd: &str) -> AtResult<String> {
+    run_as(at, AtPriority::Normal, cfg, cmd)
+}
+
+/// 显式指定优先级的命令下发（写操作 / 巡检按需取级，禁止一律最高）。
+pub fn run_as(at: &AtHandle, prio: AtPriority, cfg: &Config, cmd: &str) -> AtResult<String> {
     crate::imei::guard_transparent(cmd, cfg)?;
     // 邮箱任务要求 'static：命令串拷贝进闭包（字符串极短，成本可忽略）
     let owned = cmd.to_string();
-    at.with(cfg, move |p, _| p.command(&owned))
+    at.run(prio, cfg, move |p, _| p.command(&owned))
 }
 
 /// 批量执行并把失败转成可读文本（供「原始命令回显」类接口使用）。
+/// 用户页面查询类批量命令：P2 Normal。
 pub fn run_list(at: &AtHandle, cfg: &Config, cmds: &[&str]) -> Vec<(String, String)> {
+    run_list_as(at, AtPriority::Normal, cfg, cmds)
+}
+
+/// 显式优先级的批量命令。
+pub fn run_list_as(at: &AtHandle, prio: AtPriority, cfg: &Config, cmds: &[&str]) -> Vec<(String, String)> {
     cmds.iter()
         .map(|c| {
-            let r = run(at, cfg, c).unwrap_or_else(|e| format!("ERR: {}", e));
+            let r = run_as(at, prio, cfg, c).unwrap_or_else(|e| format!("ERR: {}", e));
             (c.to_string(), r)
         })
         .collect()
@@ -88,11 +101,11 @@ pub struct Status {
 }
 
 pub fn status(at: &AtHandle, cfg: &Config) -> Status {
-    let ready = at.with(cfg, |p, _| p.command(at::at_cmd::AT)).is_ok();
+    let ready = at.run(AtPriority::Normal, cfg, |p, _| p.command(at::at_cmd::AT)).is_ok();
     Status {
         info: info::info(at, cfg),
         signal: signal::signal(at, cfg),
-        pdp: pdp::pdp(at, cfg),
+        pdp: pdp::pdp(at, AtPriority::Normal, cfg),
         temperature: temp::temperature(at, cfg),
         at_port: cfg.at_port.clone(),
         at_ready: ready,
@@ -113,7 +126,7 @@ pub fn set_sms_center(at: &AtHandle, cfg: &Config, number: &str) -> AtResult<Str
             number
         ));
     }
-    run(at, cfg, &at::at_cmd::set_sms_center(n))
+    run_as(at, AtPriority::High, cfg, &at::at_cmd::set_sms_center(n))
 }
 
 /// 读一次数据通道绑定方向（`AT+EMBIND?`）。

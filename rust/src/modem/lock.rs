@@ -6,7 +6,8 @@
 //! 走 `CFUN=0` → 下发 → `CFUN=1`。中间那条的失败必须冒泡给调用方
 //! （`?`），首尾两条是 best-effort —— 个别固件对重复 `CFUN=0` 回 ERROR。
 
-use super::{run, run_list};
+use super::{run, run_as, run_list};
+use crate::at::queue::AtPriority;
 use crate::at::{at_cmd, AtHandle, AtResult};
 use crate::config::Config;
 
@@ -307,7 +308,7 @@ pub fn set_sim_slot(at: &AtHandle, cfg: &Config, slot: u32) -> AtResult<String> 
     if slot > 1 {
         return Err(format!("SIM 卡槽只能是 0 或 1，当前为 {}", slot));
     }
-    run(at, cfg, &at_cmd::set_sim_slot(slot))
+    run_as(at, AtPriority::High, cfg, &at_cmd::set_sim_slot(slot))
 }
 
 /// 在线/飞行模式。允许 0（最低功能）、1（在线）、4（飞行模式）。
@@ -315,7 +316,7 @@ pub fn set_cfun(at: &AtHandle, cfg: &Config, mode: u32) -> AtResult<String> {
     if !matches!(mode, 0 | 1 | 4) {
         return Err(format!("CFUN 模式只能是 0、1 或 4，当前为 {}", mode));
     }
-    run(at, cfg, &at_cmd::set_cfun(mode))
+    run_as(at, AtPriority::High, cfg, &at_cmd::set_cfun(mode))
 }
 
 /// 设置 USB 模式。
@@ -337,12 +338,12 @@ pub fn set_usb_mode(at: &AtHandle, cfg: &Config, mode: u32) -> AtResult<String> 
             mode
         ));
     }
-    run(at, cfg, &at_cmd::set_usb_mode(mode))
+    run_as(at, AtPriority::High, cfg, &at_cmd::set_usb_mode(mode))
 }
 
 /// 重启模组。
 pub fn reboot(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    run(at, cfg, at_cmd::REBOOT)
+    run_as(at, AtPriority::High, cfg, at_cmd::REBOOT)
 }
 
 #[cfg(test)]

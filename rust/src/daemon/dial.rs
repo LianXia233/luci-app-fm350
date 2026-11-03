@@ -71,7 +71,7 @@ impl DialWatch {
         }
 
         if cfg.auto_dial {
-            let st = modem::pdp(at, cfg);
+            let st = modem::pdp(at, crate::at::queue::AtPriority::Low, cfg);
             v6.note_modem(&st.ipv6);
             // 模组侧 IPv6 轮询：即便本轮不拨号也要跟踪地址变化（auto_dial
             // 关闭时用户仍可能手动拨号，插件需要把新地址写下去）。
@@ -83,7 +83,7 @@ impl DialWatch {
             // 自动拨号关闭：不再碰 PDP，只跟踪模组侧 IPv6 变化。
             // 这里是 `else if` 而非无条件 —— 未到期时不要为了看一眼地址
             // 就每轮都去读 `AT+CGPADDR`（它会返回残留地址，读得越勤误判越多）。
-            let st = modem::pdp(at, cfg);
+            let st = modem::pdp(at, crate::at::queue::AtPriority::Low, cfg);
             v6.note_modem(&st.ipv6);
             v6.sync_modem(cfg, &st.ipv6);
         }

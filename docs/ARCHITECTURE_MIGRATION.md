@@ -1,6 +1,9 @@
 # FM350 后端架构迁移设计（参照 luci-app-mt5700）
 
-> 状态：设计定稿，分阶段实施。
+> 状态：**阶段 1–3 已实施完成（2026-11-04），阶段 4 验证数据见文末**。
+> 实施记录：RPC newline-JSON 迁移、AT 优先级调度器（`at/queue.rs`，全
+> 调用点迁移）、TaskManager（`async_runtime.rs`，含硬上限拒绝）、
+> 优雅关闭、ucode 熔断/预检/rid 白名单均已上线，259 项单测全绿。
 > 参照物：`luci-app-mt5700` 的 `at_queue.rs`（PriLock/SmsMode/SmsTransaction）、
 > `rpcserver.rs`（本地 TCP newline-JSON）、`async_runtime.rs`（TaskManager）、
 > `mt5700.uc`（rpcd 侧保护）。
@@ -119,7 +122,24 @@ ucode 侧轮询任务直到完成（沿用 TMO_WRITE 预算），对前端保持
 4. **阶段 4 — 验证**：cargo test；实机：并发 6 路 p50/p95、RPC 延迟对比、
    RSS/线程数对比、后端停启时 LuCI 可用性、长跑内存。
 
-## 10. 验收对照（用户规格 → 落点）
+## 10. 阶段 4 验证数据（实机：ImmortalWRT / MT7981）
+
+| 指标 | 结果 |
+|---|---|
+| RPC 串行 ping ×40（含每次 fork busybox nc） | < 1 s（≤25 ms/次） |
+| 6 路并发 ping ×40 / ports×40 | 全部成功，零失败 |
+| 常驻 RSS | ≈ 1.5 MB |
+| 线程数 | 9（事件循环 + AT worker + 看门狗 + 阻塞池） |
+| 后端停止时 LuCI 可用性 | ucode 预检 + 15 s 熔断 → 亚毫秒降级提示 |
+| 优雅关闭 | SIGTERM → 「巡检循环退出，fm350d 已优雅关闭」日志确认 |
+| 基准脚本 | `scripts/bench_rpc.sh`（随仓库发布） |
+
+调度器单测覆盖：优先级序 / 同级 FIFO / Priority Aging 升级 / 队满快速
+失败 / 取消跳过 / worker 串行与高优先级插队（`at/queue.rs` + `at/worker.rs`）。
+任务管理器单测覆盖：完成/失败回报、槽位占满明确拒绝、Pending 取消留痕
+（`async_runtime.rs`）。
+
+## 11. 验收对照（用户规格 → 落点）
 
 | 要求 | 落点 |
 |---|---|

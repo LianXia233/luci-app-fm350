@@ -1,4 +1,4 @@
-//! AT 工作线程：串口独占状态机 + 请求邮箱。
+//! AT 工作线程：串口独占状态机 + 优先级调度队列。
 //!
 //! ## 为什么从「Mutex + 闭包」改成「工作线程 + 邮箱」
 //!
@@ -9,25 +9,25 @@
 //! 1. 锁被慢操作（拨号 / 哑口探测）持有时，池线程在自旋等待里空烧；
 //! 2. 锁语义与"谁持有端口"分散在两处，难以观测。
 //!
-//! 现在唯一能触碰 [`Slot`] 的线程就是 worker 本身：所有访问一律投递
-//! [`Job`] 到 FIFO 邮箱，worker 逐个执行并更新共享快照（[`SlotView`]）。
-//! 得到：
+//! 现在唯一能触碰 [`Slot`] 的线程就是 worker 本身：所有访问一律经
+//! [`PriQueue`](super::queue::PriQueue)（优先级调度，见 `at::queue` 模块头）
+//! 投递 [`Job`]，worker 逐个执行并更新共享快照（[`SlotView`]）。得到：
 //!
 //! - **串行语义不变**：一次一任务，一问一答；
+//! - **优先级调度**：P0 恢复 > P1 用户写 > P2 查询 > P3 巡检，同级 FIFO，
+//!   Priority Aging 防饿死，每级容量上限快速失败（`at::queue`）；
 //! - **状态集中可观测**：快照永远反映"最近一次任务完成后"的持有状态，
 //!   `stats()` 读快照，永不阻塞；
-//! - **队列天然公平**：先到先执行，没有锁饥饿。
+//! - **事务独占**：多步事务（拨号链 / 短信发送 / 锁频序列）是单个 Job，
+//!   拿到执行权后整段跑完才交还串口，中间不可能被插入。
 //!
-//! 注意：邮箱是**无超时 FIFO**。请求侧的放弃语义（超时不再等）由调用方
-//! 实现 —— 异步侧用 `tokio::time::timeout`（api::budget），同步侧（CLI /
-//! 巡检器）本就是顺序执行，等待即其语义。被放弃的任务仍会**完整执行**：
-//! 半途丢弃会破坏半双工 AT 会话的问答状态。
+//! 请求侧的放弃语义（超时不再等）由调用方实现：排队期超时 → 置取消标记
+//! （pop 时清理，任务**不会执行**）；已开始的执行不可取消 —— 半途丢弃会
+//! 破坏半双工 AT 会话的问答状态，任务照常跑完。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-use tokio::sync::oneshot;
 
 use super::{
     resolve_stable, AtPort, AtResult, OPEN_RETRY_COOLDOWN, RESELECT_COOLDOWN, RESELECT_HOLD,
@@ -282,6 +282,9 @@ pub trait Job: Send {
 }
 
 /// AT 会话任务：在 worker 内执行闭包并回传结果。
+///
+/// 回执走 **std mpsc**：调用方全部在同步上下文（阻塞池 / CLI），
+/// 需要 `recv_timeout` 做排队超时 —— tokio oneshot 没有这个 API。
 pub struct ExecJob<F, R>
 where
     F: FnOnce(&mut AtPort, &Config) -> AtResult<R> + Send + 'static,
@@ -289,7 +292,7 @@ where
 {
     pub cfg: Config,
     pub f: F,
-    pub reply: oneshot::Sender<AtResult<R>>,
+    pub reply: std::sync::mpsc::Sender<AtResult<R>>,
 }
 
 impl<F, R> Job for ExecJob<F, R>
@@ -305,7 +308,7 @@ where
 
 /// 关闭端口任务（`AtHandle::close`）。
 pub struct CloseJob {
-    pub reply: oneshot::Sender<()>,
+    pub reply: std::sync::mpsc::Sender<()>,
 }
 
 impl Job for CloseJob {
@@ -317,8 +320,8 @@ impl Job for CloseJob {
 
 /// worker 线程及其对外句柄。
 pub struct Worker {
-    /// 邮箱发送端（Clone 后即可多生产者）。
-    pub tx: std::sync::mpsc::Sender<Box<dyn Job>>,
+    /// 优先级调度队列（Clone 后即可多生产者）。
+    pub queue: Arc<super::queue::PriQueue>,
     /// 持有状态快照（worker 每任务后覆盖写）。
     pub view: Arc<Mutex<SlotView>>,
 }
@@ -330,17 +333,24 @@ pub struct Worker {
 /// [`JOB_CAP_MS`]（内核级阻塞，Rust 层无法取消）就先尝试把模组 USB 设备
 /// authorized 复位（清掉 wedge 端点），然后退出进程交 procd 重拉。
 pub fn spawn() -> Worker {
-    let (tx, rx) = std::sync::mpsc::channel::<Box<dyn Job>>();
+    let queue = super::queue::PriQueue::new();
     let view = Arc::new(Mutex::new(SlotView::default()));
     let v2 = Arc::clone(&view);
+    let q2 = Arc::clone(&queue);
     let handle = std::thread::Builder::new()
         .name("fm350-at".into())
         .spawn(move || {
             let mut st = Slot::new();
-            while let Ok(job) = rx.recv() {
+            loop {
+                let q = q2.pop();
+                // 已取消的等待者在 pop 内已被清理，取出的任务一律执行；
+                // 计时只覆盖执行段（排队耗时由队列统计回填）。
                 JOB_START_MS.store(now_ms(), Ordering::Relaxed);
-                job.run(&mut st);
+                let t0 = std::time::Instant::now();
+                q.job.run(&mut st);
+                let exec_ms = t0.elapsed().as_millis() as u64;
                 JOB_START_MS.store(0, Ordering::Relaxed);
+                q2.finish(q.enqueued_at.elapsed().as_millis() as u64, exec_ms);
                 // 快照覆盖写：Mutex 只保护并发读，worker 是唯一写者，
                 // 不可能中毒（本线程 panic 即进程 abort）。
                 *v2.lock().expect("AT 快照锁") = st.snapshot();
@@ -352,7 +362,7 @@ pub fn spawn() -> Worker {
         std::process::exit(1);
     }
     spawn_watchdog();
-    Worker { tx, view }
+    Worker { queue, view }
 }
 
 /// 看门狗线程：每 5 s 检查一次任务是否超过 [`JOB_CAP_MS`]。
@@ -396,7 +406,7 @@ mod tests {
         log: Arc<Mutex<Vec<u32>>>,
         id: u32,
         delay: Duration,
-        reply: oneshot::Sender<()>,
+        reply: std::sync::mpsc::Sender<()>,
     }
 
     impl Job for Mark {
@@ -407,33 +417,87 @@ mod tests {
         }
     }
 
-    /// 邮箱必须严格 FIFO：先投递的任务（哪怕慢）必须先完成。
-    /// 旧 Mutex 实现的"串行"语义由本测试锁死。
+    /// 经优先级队列投递的两个同级任务仍严格串行（先投递先完成）。
     #[test]
-    fn mailbox_executes_jobs_in_fifo_order() {
+    fn queue_executes_same_priority_jobs_in_order() {
+        let w = spawn();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let ticket = crate::at::queue::fresh_ticket();
+
+        let (ta, ra) = std::sync::mpsc::channel();
+        w.queue
+            .push(
+                Box::new(Mark {
+                    log: Arc::clone(&log),
+                    id: 1,
+                    delay: Duration::from_millis(150),
+                    reply: ta,
+                }),
+                crate::at::queue::AtPriority::Normal,
+                Arc::clone(&ticket),
+            )
+            .unwrap();
+        let (tb, rb) = std::sync::mpsc::channel();
+        w.queue
+            .push(
+                Box::new(Mark {
+                    log: Arc::clone(&log),
+                    id: 2,
+                    delay: Duration::ZERO,
+                    reply: tb,
+                }),
+                crate::at::queue::AtPriority::Normal,
+                ticket,
+            )
+            .unwrap();
+
+        let _ = ra.recv().ok();
+        let _ = rb.recv().ok();
+        assert_eq!(*log.lock().unwrap(), vec![1, 2], "同级慢任务不得被插队");
+    }
+
+    /// 高优先级任务必须先于先入队的低优先级任务执行（调度器核心语义）。
+    #[test]
+    fn queue_runs_high_priority_first() {
         let w = spawn();
         let log = Arc::new(Mutex::new(Vec::new()));
 
-        let (ta, ra) = oneshot::channel();
-        w.tx.send(Box::new(Mark {
-            log: Arc::clone(&log),
-            id: 1,
-            delay: Duration::from_millis(150),
-            reply: ta,
-        }))
-        .unwrap();
-        let (tb, rb) = oneshot::channel();
-        w.tx.send(Box::new(Mark {
-            log: Arc::clone(&log),
-            id: 2,
-            delay: Duration::ZERO,
-            reply: tb,
-        }))
-        .unwrap();
+        // 先入队一个慢的 Low（P3），再入队快的 High（P1）
+        let (tl, rl) = std::sync::mpsc::channel();
+        w.queue
+            .push(
+                Box::new(Mark {
+                    log: Arc::clone(&log),
+                    id: 1,
+                    delay: Duration::from_millis(120),
+                    reply: tl,
+                }),
+                crate::at::queue::AtPriority::Low,
+                crate::at::queue::fresh_ticket(),
+            )
+            .unwrap();
+        let (th, rh) = std::sync::mpsc::channel();
+        w.queue
+            .push(
+                Box::new(Mark {
+                    log: Arc::new(Mutex::new(Vec::new())),
+                    id: 2,
+                    delay: Duration::ZERO,
+                    reply: th,
+                }),
+                crate::at::queue::AtPriority::High,
+                crate::at::queue::fresh_ticket(),
+            )
+            .unwrap();
 
-        let _ = ra.blocking_recv();
-        let _ = rb.blocking_recv();
-        assert_eq!(*log.lock().unwrap(), vec![1, 2], "慢任务不得插队");
+        // High 的快任务必须先返回，且此刻 Low 还没写日志
+        rh.recv_timeout(Duration::from_secs(5)).expect("High 应先完成");
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "Low 尚在执行，High 必须已先完成"
+        );
+        let _ = rl.recv().ok();
+        assert_eq!(*log.lock().unwrap(), vec![1], "Low 随后完成");
     }
 
     /// 快照在每次任务后更新：执行过任务后 opens 至少为 1。
@@ -441,15 +505,20 @@ mod tests {
     fn view_updates_after_each_job() {
         let w = spawn();
         assert_eq!(w.view.lock().unwrap().opens, 0);
-        let (tx, rx) = oneshot::channel();
-        w.tx.send(Box::new(Mark {
-            log: Arc::new(Mutex::new(Vec::new())),
-            id: 1,
-            delay: Duration::ZERO,
-            reply: tx,
-        }))
-        .unwrap();
-        let _ = rx.blocking_recv();
+        let (tx, rx) = std::sync::mpsc::channel();
+        w.queue
+            .push(
+                Box::new(Mark {
+                    log: Arc::new(Mutex::new(Vec::new())),
+                    id: 1,
+                    delay: Duration::ZERO,
+                    reply: tx,
+                }),
+                crate::at::queue::AtPriority::Normal,
+                crate::at::queue::fresh_ticket(),
+            )
+            .unwrap();
+        let _ = rx.recv().ok();
         assert_eq!(w.view.lock().unwrap().opens, 0, "Mark 不触碰端口，opens 不变");
         // 快照通路本身必须可读且无 panic
         let _ = w.view.lock().unwrap().held_secs;

@@ -36,6 +36,7 @@
 
 pub mod addr;
 pub mod api;
+pub mod async_runtime;
 pub mod at;
 pub mod cli;
 pub mod config;

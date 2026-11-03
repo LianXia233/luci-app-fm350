@@ -16,7 +16,10 @@
 					"sshfwd",
 					"imei_read",
 					"ping",
-					"events"
+					"events",
+					"task",
+					"task_submit",
+					"task_cancel"
 				],
 				"luci.fm350.sms": [
 					"list",
@@ -53,7 +56,10 @@
 					"imei_backup",
 					"imei_write",
 					"ping",
-					"events"
+					"events",
+					"task",
+					"task_submit",
+					"task_cancel"
 				],
 				"luci.fm350.sms": [
 					"send",

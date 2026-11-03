@@ -12,7 +12,8 @@
 //! 因此**激活判据只有一个权威来源：`AT+CGACT?`**。
 //! `CGCONTRDP` / `CGPADDR` 只负责提供地址与 DNS，不再单独决定 `active`。
 
-use super::run;
+use super::run_as;
+use crate::at::queue::AtPriority;
 use crate::addr::{is_valid_ipv4, looks_v6, normalize_ipv6, parse_contrdp_addr};
 use crate::at::{at_cmd, AtHandle, AtResult};
 use crate::config::Config;
@@ -161,24 +162,32 @@ impl Readiness {
             why.push("SIM 未就绪".to_string());
         }
         if !matches!(self.cfun, Some(1)) {
-            why.push(format!("模组未在线（CFUN={:?}）", self.cfun));
+            why.push(format!("模组未在线（CFUN={}）", fmt_opt(self.cfun)));
         }
         if !matches!(self.reg_state, Some(1) | Some(5)) {
-            why.push(format!("网络未注册（CEREG={:?}）", self.reg_state));
+            why.push(format!("网络未注册（CEREG={}）", fmt_opt(self.reg_state)));
         }
         why.join("，")
     }
 }
 
+/// Option 值的人类可读形式（None → "未知"，Some(v) → v），日志不带 Some() 包装。
+fn fmt_opt<T: std::fmt::Display>(v: Option<T>) -> String {
+    match v {
+        Some(v) => v.to_string(),
+        None => "未知".into(),
+    }
+}
+
 /// 拨号前置体检：`CPIN?` / `CFUN?` / `CEREG?`。
-pub fn readiness(at: &AtHandle, cfg: &Config) -> Readiness {
+pub fn readiness(at: &AtHandle, prio: AtPriority, cfg: &Config) -> Readiness {
     let mut r = Readiness::default();
     let cmds = [
         at_cmd::CPIN_READ,
         at_cmd::CFUN_READ,
         at_cmd::CEREG_READ,
     ];
-    let out = super::run_list(at, cfg, &cmds);
+    let out = super::run_list_as(at, prio, cfg, &cmds);
 
     for (cmd, resp) in &out {
         if cmd == at_cmd::CPIN_READ {
@@ -197,11 +206,11 @@ pub fn readiness(at: &AtHandle, cfg: &Config) -> Readiness {
 }
 
 /// 写 APN（`AT+CGDCONT=<cid>,"<type>","<apn>"`）。
-pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResult<String> {
+pub fn set_apn(at: &AtHandle, prio: AtPriority, cfg: &Config, apn: &str, pdp_type: &str) -> AtResult<String> {
     if apn.is_empty() {
         return Err("APN 不能为空".to_string());
     }
-    run(at, cfg, &at_cmd::set_apn(cfg.cid, pdp_type, apn))
+    run_as(at, prio, cfg, &at_cmd::set_apn(cfg.cid, pdp_type, apn))
 }
 
 /// 下发鉴权参数（`AT+CGAUTH=<cid>,<auth>[,<username>,<password>]`）。
@@ -212,9 +221,10 @@ pub fn set_apn(at: &AtHandle, cfg: &Config, apn: &str, pdp_type: &str) -> AtResu
 /// `auth=none` 时显式清零，避免模组记住上一次会话的凭据。
 /// 由调用方 best-effort 调用：个别固件对 `CGAUTH=0` 回 ERROR，
 /// 不应因此阻断拨号主流程。
-pub fn apply_auth(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    run(
+pub fn apply_auth(at: &AtHandle, prio: AtPriority, cfg: &Config) -> AtResult<String> {
+    run_as(
         at,
+        prio,
         cfg,
         &at_cmd::set_auth(cfg.cid, &cfg.auth, &cfg.username, &cfg.password),
     )
@@ -226,7 +236,7 @@ pub fn apply_auth(at: &AtHandle, cfg: &Config) -> AtResult<String> {
 ///   * 模组回了 `+CGACT:` 行 —— 一律以该行状态为准；
 ///   * 模组只回裸 `OK`（无 `+CGACT:` 行）—— 回落到
 ///     `AT+CGCONTRDP` / `AT+CGPADDR` 的地址类启发式判据。
-pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
+pub fn pdp(at: &AtHandle, prio: AtPriority, cfg: &Config) -> PdpState {
     let mut st = PdpState {
         cid: cfg.cid,
         ..Default::default()
@@ -236,7 +246,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     // 往返；AT 是半双工串行资源，这直接翻倍了状态刷新耗时。
     let mut raw: Vec<(String, String)> = Vec::new();
 
-    let cgdcont = record(&mut raw, at_cmd::CGDCONT_READ, run(at, cfg, at_cmd::CGDCONT_READ));
+    let cgdcont = record(&mut raw, at_cmd::CGDCONT_READ, run_as(at, prio, cfg, at_cmd::CGDCONT_READ));
     if let Some(r) = &cgdcont {
         for row in crate::at::rows(r, "+CGDCONT") {
             if row.first().and_then(|x| x.parse::<u32>().ok()) == Some(cfg.cid) {
@@ -255,14 +265,14 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     let mut contr_dns: Vec<String> = Vec::new();
 
     // 判据 0（权威）：AT+CGACT?
-    let cgact_resp = record(&mut raw, at_cmd::CGACT_READ, run(at, cfg, at_cmd::CGACT_READ));
+    let cgact_resp = record(&mut raw, at_cmd::CGACT_READ, run_as(at, prio, cfg, at_cmd::CGACT_READ));
     let cgact = cgact_resp
         .as_ref()
         .and_then(|r| cgact_state(r, cfg.cid));
 
     // CGCONTRDP：只提供地址与 DNS 备用值，不再单独作为激活判据。
     let cmd_contr = at_cmd::contrdp(cfg.cid);
-    let contr = record(&mut raw, &cmd_contr, run(at, cfg, &cmd_contr));
+    let contr = record(&mut raw, &cmd_contr, run_as(at, prio, cfg, &cmd_contr));
     let mut contr_ipv4 = String::new();
     let mut contr_ipv6 = String::new();
     let mut contr_mask4 = String::new();
@@ -330,7 +340,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     // 为准 —— 是占位就判定「无 IPv6」，绝不回落到 CGCONTRDP 的残留值，
     // 否则会拿陈旧地址配出一条永远不通的 v6 默认路由。
     let cmd_addr = at_cmd::pdp_addr(cfg.cid);
-    let addr_resp = record(&mut raw, &cmd_addr, run(at, cfg, &cmd_addr));
+    let addr_resp = record(&mut raw, &cmd_addr, run_as(at, prio, cfg, &cmd_addr));
     let mut addr_ipv4 = String::new();
     let mut addr_ipv6 = String::new();
     let mut v6_slot_seen = false;
@@ -402,7 +412,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
 
     // DNS：优先 AT+GTDNS，其次 CGCONTRDP 自带
     if st.active {
-        if let Ok(r) = run(at, cfg, &at_cmd::gtdns(cfg.cid)) {
+        if let Ok(r) = run_as(at, prio, cfg, &at_cmd::gtdns(cfg.cid)) {
             // 保留 IPv6 DNS：GTDNS 同时给 v4/v6 服务器，旧版把 v6 全部丢掉，
             // v6-only / 双栈场景下 resolver 拿不到任何 v6 DNS。
             // 点分占位（0.0....1）会被 normalize_ipv6 判为占位自动滤除。
@@ -477,17 +487,19 @@ pub struct DialOutcome {
 /// 彻底失败时才做一次前置体检，把「SIM 未就绪 / 未注册」这类真实原因写进
 /// 错误信息。
 pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
+    // 拨号事务整体 P1 High（用户主动操作 / 拨号控制，见分级文档 §3）。
+    let prio = AtPriority::High;
     // 在线自恢复：模组重启（换 IMEI / usbmode / CFUN=1,1 等维修操作之后）
     // 或异常掉电后可能停留在飞行模式（CFUN=4）。此前只在拨号失败后报告、
     // 从不恢复 —— 守护每轮拨号都会死循环在「前置体检：模组未在线」。这里
     // 发现未在线时主动 CFUN=1 并限时等待注册，再继续后续拨号动作。
-    let pre = readiness(at, cfg);
+    let pre = readiness(at, prio, cfg);
     let mut reg_ok = matches!(pre.reg_state, Some(1) | Some(5));
     if pre.cfun == Some(4) {
-        let _ = run(at, cfg, &at_cmd::set_cfun(1));
+        let _ = run_as(at, prio, cfg, &at_cmd::set_cfun(1));
         for _ in 0..RECOVER_REG_POLLS {
             std::thread::sleep(RECOVER_REG_POLL_INTERVAL);
-            if let Ok(r) = run(at, cfg, at_cmd::CEREG_READ) {
+            if let Ok(r) = run_as(at, prio, cfg, at_cmd::CEREG_READ) {
                 let row = crate::at::rows(&r, "+CEREG").next().unwrap_or_default();
                 if matches!(
                     row.get(1)
@@ -506,23 +518,23 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     //
     // `attach == None`（命令失败/解析不出）不设门槛：维持旧行为，避免把
     // 「读不到附着状态」升级成拨号失败。
-    let attach = run(at, cfg, at_cmd::CGATT_READ)
+    let attach = run_as(at, prio, cfg, at_cmd::CGATT_READ)
         .ok()
         .and_then(|r| cgatt_state(&r));
     if attach == Some(false) {
         if !reg_ok {
             return Err(format!(
-                "EPS 未附着且网络未注册（CEREG={:?}，CGATT=0），等待注册后再拨",
-                pre.reg_state
+                "EPS 未附着且网络未注册（CEREG={}，CGATT=0），等待注册后再拨",
+                fmt_opt(pre.reg_state)
             ));
         }
         // 已注册但附着未完成（弱网注册抖动窗口）：显式补发一次附着请求。
         crate::infof!(format_args!("已注册但 EPS 未附着，补发 AT+CGATT=1 并等待"));
-        let _ = run(at, cfg, &at_cmd::cgatt_attach(1));
+        let _ = run_as(at, prio, cfg, &at_cmd::cgatt_attach(1));
         let mut attached = false;
         for _ in 0..ATTACH_POLLS {
             std::thread::sleep(ATTACH_POLL_INTERVAL);
-            if let Ok(r) = run(at, cfg, at_cmd::CGATT_READ) {
+            if let Ok(r) = run_as(at, prio, cfg, at_cmd::CGATT_READ) {
                 if cgatt_state(&r) == Some(true) {
                     attached = true;
                     break;
@@ -537,21 +549,21 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
         }
     }
 
-    let _ = set_apn(at, cfg, &cfg.apn, &cfg.pdp_type);
+    let _ = set_apn(at, prio, cfg, &cfg.apn, &cfg.pdp_type);
     // 鉴权必须在 CGACT 之前就位
-    let _ = apply_auth(at, cfg);
+    let _ = apply_auth(at, prio, cfg);
 
     // 已激活且已取得地址时直接返回，避免重复激活
-    let before = pdp(at, cfg);
+    let before = pdp(at, prio, cfg);
     if before.active && before.has_address() {
         return Ok(before);
     }
 
-    let r = run(at, cfg, &at_cmd::activate(cfg.cid))?;
+    let r = run_as(at, prio, cfg, &at_cmd::activate(cfg.cid))?;
     if crate::at::has_error(&r) {
         // 重复激活（+CME ERROR: 5847）等：以「是否取到地址」为准，轮询若干次
         let dup = is_duplicate_activate(&r);
-        let mut st = poll_for_address(at, cfg);
+        let mut st = poll_for_address(at, prio, cfg);
         if st.active {
             return Ok(st);
         }
@@ -559,11 +571,11 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
         // （PDN 释放滞后、承载协商竞态）通常去激活再激活一轮即恢复；
         // 只试一次，连续失败交给守护的退避，不在单次拨号里反复折腾。
         if !dup {
-            let _ = run(at, cfg, &at_cmd::deactivate(cfg.cid));
+            let _ = run_as(at, prio, cfg, &at_cmd::deactivate(cfg.cid));
             std::thread::sleep(Duration::from_secs(2));
-            let r2 = run(at, cfg, &at_cmd::activate(cfg.cid))?;
+            let r2 = run_as(at, prio, cfg, &at_cmd::activate(cfg.cid))?;
             if !crate::at::has_error(&r2) || is_duplicate_activate(&r2) {
-                st = poll_for_address(at, cfg);
+                st = poll_for_address(at, prio, cfg);
                 if st.active {
                     return Ok(st);
                 }
@@ -574,7 +586,7 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
             msg.push_str("（模组报告重复激活，但上下文中未取到任何地址）");
         }
         // 失败时才做体检：成功路径上一条额外命令都不发
-        let rd = readiness(at, cfg);
+        let rd = readiness(at, prio, cfg);
         if !rd.ok() {
             msg.push_str(&format!("；前置体检：{}", rd.reason()));
         }
@@ -582,7 +594,7 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     }
 
     // PDP 激活后地址可能晚一步就绪，轮询几次（任一地址族到位即可）
-    let st = poll_for_address(at, cfg);
+    let st = poll_for_address(at, prio, cfg);
     if !st.active && !st.has_address() {
         return Err("PDP 激活后未取得任何地址（IPv4/IPv6）".to_string());
     }
@@ -593,21 +605,21 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
 ///
 /// 是否激活以 `active` 字段为准：未激活时 CGPADDR/CGCONTRDP 给出的是
 /// 上一轮会话残留，**不能**因为「有地址」就返回成功。
-fn poll_for_address(at: &AtHandle, cfg: &Config) -> PdpState {
-    let mut st = pdp(at, cfg);
+fn poll_for_address(at: &AtHandle, prio: AtPriority, cfg: &Config) -> PdpState {
+    let mut st = pdp(at, prio, cfg);
     for _ in 0..ADDR_POLL_ROUNDS {
         if st.has_address() {
             return st;
         }
         std::thread::sleep(std::time::Duration::from_millis(ADDR_POLL_INTERVAL_MS));
-        st = pdp(at, cfg);
+        st = pdp(at, prio, cfg);
     }
     st
 }
 
-/// 断开：去激活 PDP。
+/// 断开：去激活 PDP（P1 High：用户主动挂断 / 净化动作）。
 pub fn hangup(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    run(at, cfg, &at_cmd::deactivate(cfg.cid))
+    run_as(at, AtPriority::High, cfg, &at_cmd::deactivate(cfg.cid))
 }
 
 #[cfg(test)]
