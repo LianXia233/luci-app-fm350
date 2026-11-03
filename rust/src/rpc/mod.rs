@@ -99,7 +99,7 @@ pub fn resp_err(id: &Value, c: i32, msg: &str) -> Value {
 pub async fn serve(
     listener: TcpListener,
     at: Arc<AtHandle>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     let sem = Arc::new(Semaphore::new(MAX_CONNS));
     loop {

@@ -32,7 +32,7 @@ jobs:
           bad=0
           while IFS= read -r f; do
             case "${f}" in
-              *.apk|*.ipk|*.png|*.jpg|*.ico|*.gz|*.zst) continue ;;
+              *.apk|*.ipk|*.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.gz|*.zst|*.zip|*.tar) continue ;;
             esac
             n="$(tr -cd '\r' <"${f}" | wc -c)"
             if [ "${n}" != "0" ]; then
