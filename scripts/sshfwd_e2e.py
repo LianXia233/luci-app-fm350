@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 # SSH 转发端到端测试：开启 -> 冲突检测 -> 停旧服务 -> 接管 -> 链路前段验证
+import os
 import sys
 import time
 
 import paramiko
 
-HOST, USER, PASS = "192.168.1.1", "root", "A1187900"
+# 凭据经环境变量注入（勿提交真实凭据）：FM350_HOST / FM350_USER / FM350_PASS
+HOST = os.environ.get("FM350_HOST", "192.168.1.1")
+USER = os.environ.get("FM350_USER", "root")
+PASS = os.environ.get("FM350_PASS", "")
 
 def run(ssh, cmd, timeout=120):
     _, so, se = ssh.exec_command(cmd, timeout=timeout)

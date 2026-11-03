@@ -78,7 +78,7 @@ pub fn detect_dev(cfg: &Config) -> Option<String> {
 /// 定位 wan 防火墙区的下标。
 ///
 /// 原先硬编码 `firewall.@zone[0]`，但 `@zone[N]` 是**按配置文件出现顺序**取的，
-/// 并非一定是 wan 区（实机 192.168.1.1 的 `@zone[0]` 就是 lan 区，wan 区在
+/// 并非一定是 wan 区（实验固件的 `@zone[0]` 就是 lan 区，wan 区在
 /// `@zone[1]`）。把蜂窝接口登记进 lan 区会让 fw4 把它并入 LAN 规则
 /// （input/forward 全 ACCEPT），既拿不到 masq 又与 wan 区配置自相矛盾。
 ///

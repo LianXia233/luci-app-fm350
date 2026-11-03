@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 # socat 秒死取证：手动 spawn + 生命周期观察 + stderr 捕获
+import os
 import paramiko
 
 def main():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect("192.168.1.1", username="root", password=os.environ.get("FM350_PASS", ""),
+    ssh.connect(os.environ.get("FM350_HOST", "192.168.1.1"), username=os.environ.get("FM350_USER", "root"), password=os.environ.get("FM350_PASS", ""),
                 allow_agent=False, look_for_keys=False, timeout=15)
     try:
         def run(name, cmd, timeout=60):

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 部署 luci-app-fm350 1.0.15-r1 到实机 192.168.1.1 并测试
+# 部署 luci-app-fm350 1.0.15-r1 到实机 实验路由器 并测试
 # 用法: py -3 deploy_v1.0.15.py <stage>
 #   stage: download | deploy | verify | sshfwd-test
 import hashlib
@@ -11,7 +11,10 @@ import urllib.request
 
 import paramiko
 
-HOST, USER, PASS = "192.168.1.1", "root", "A1187900"
+# 凭据经环境变量注入（勿提交真实凭据）：FM350_HOST / FM350_USER / FM350_PASS
+HOST = os.environ.get("FM350_HOST", "192.168.1.1")
+USER = os.environ.get("FM350_USER", "root")
+PASS = os.environ.get("FM350_PASS", "")
 MIRROR = "https://gh.acg2.mom/"
 URL = "https://github.com/LianXia233/luci-app-fm350/releases/download/v1.0.15/luci-app-fm350-1.0.15-r1.apk"
 SHA256 = "78bf88885e59c893a069ab56d6eb0a3e7ec89332c98e0385ea775b4e68a59cf8"

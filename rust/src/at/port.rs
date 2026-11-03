@@ -516,6 +516,36 @@ fn scan_ports() -> Vec<PortCandidate> {
     out
 }
 
+/// 从 tty 节点反查其所属 USB **设备**目录（如 `2-1`）并 authorized 复位。
+///
+/// 用途：模组 USB 端点被楔死（AT 口与数据面同时无响应、内核
+/// `tty_wait_until_sent` 永不返回）时，驱动级 unbind/bind（数据面自愈用的
+/// 那招）只重建 netdev，清不掉 AT 串口的 URB 队列；对 USB 设备整体
+/// authorized 0→1 才是一次真正的**重枚举**，所有端点归零。
+///
+/// 返回被复位的 USB 设备目录名（`2-1`）；找不到 USB 拓扑返回 `None`。
+/// 纯 sysfs 写入，无 fork；wedge 场景由看门狗（at::worker）调用。
+pub fn reset_usb_device(tty_node: &str) -> Option<String> {
+    let name = tty_name(tty_node)?;
+    // /sys/class/tty/ttyUSB3/device -> .../usb2/2-1/2-1:1.6/ttyUSB3
+    //                                    ^^^  ^^^^  ^^^^^^^
+    //                                    总线  设备   接口
+    // tty 节点的父级是接口目录（2-1:1.6），祖父级才是 USB 设备目录（2-1）。
+    let node = std::fs::canonicalize(format!("/sys/class/tty/{}", name)).ok()?;
+    let iface = node.parent()?;
+    let usb_dev_dir = iface.parent()?;
+    let dev = usb_dev_dir.file_name()?.to_string_lossy().to_string();
+    // USB 设备目录名形如 2-1（无冒号）；接口目录含冒号（2-1:1.6），别认错层级
+    if dev.contains(':') || !dev.contains('-') {
+        return None;
+    }
+    let authorized = usb_dev_dir.join("authorized");
+    std::fs::write(&authorized, "0").ok()?;
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(&authorized, "1").ok()?;
+    Some(dev)
+}
+
 /// 系统里是否存在**任一**疑似 FM350 的候选口（不触碰 AT 数据）。
 ///
 /// 供 [`crate::api`] 的模组缺席预检使用：只做 sysfs 枚举，亚毫秒。
@@ -567,7 +597,7 @@ fn probe_at_ok(path: &str, baudrate: u32) -> bool {
         Err(_) => return false,
     };
     let _ = port.write_all(b"\rAT\r");
-    let _ = port.flush();
+    // 不 flush（tcdrain）：候选口也可能是 wedge 端点，见 at::AtPort::handshake
     let deadline = Instant::now() + Duration::from_millis(800);
     let mut buf = String::new();
     let mut chunk = [0u8; 64];

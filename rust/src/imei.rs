@@ -77,7 +77,7 @@ pub fn valid_format(imei: &str) -> bool {
 /// 不能把空值当解析失败 —— 否则空 IMEI 模组永远无法写入。
 /// 响应里没有 +EGMREXT 行也找不到 15 位数字时才报错（带原始响应）。
 fn read_raw_text(at: &AtHandle, cfg: &Config) -> AtResult<String> {
-    let r = at.with(cfg, |p| p.command(at_cmd::EGMREXT_READ_IMEI))?;
+    let r = at.with(cfg, |p, _| p.command(at_cmd::EGMREXT_READ_IMEI))?;
     // 响应形如：+EGMREXT: "861234567890123"
     let mut saw_ext = false;
     for line in r.lines() {
@@ -199,7 +199,11 @@ pub fn write(at: &AtHandle, cfg: &Config, value: &str, confirm: bool) -> AtResul
     let cmd = at_cmd::egmrext_write_imei(imei);
     audit(&format!("准备写入 IMEI（原值 {}，新值 {}）", previous, imei));
 
-    let resp = at.with(cfg, |p| p.command(&cmd))?;
+    // 邮箱任务要求 'static：命令串克隆给闭包，原 cmd 仍用于结果展示
+    let resp = {
+        let cmd_for_at = cmd.clone();
+        at.with(cfg, move |p, _| p.command(&cmd_for_at))?
+    };
     if resp.contains("ERROR") {
         audit(&format!("IMEI 写入失败: {}", resp.replace('\n', " | ")));
         return Err(format!("模组返回错误: {}", resp.replace('\n', " | ")));

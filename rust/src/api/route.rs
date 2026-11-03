@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use tiny_http::Method;
+use crate::rt::server::Method;
 
 use super::http::{at_err, err, ok, Json};
 use crate::at::AtHandle;
@@ -233,7 +233,7 @@ pub fn dispatch(
             if let Some(e) = modem_absent(cfg) {
                 return err(&e);
             }
-            at_err(at.with(cfg, |p| p.command(&cmd)))
+            at_err(at.with(cfg, move |p, _| p.command(&cmd)))
         }
 
         // ---- 锁频 / 锁小区 ----
@@ -341,7 +341,7 @@ pub fn dispatch(
                 let n = arg_str(payload, q, "number").unwrap_or_default();
                 at_err(crate::modem::set_sms_center(at, cfg, &n))
             } else {
-                at_err(at.with(cfg, |p| p.command(crate::at::at_cmd::CSCA_READ)))
+                at_err(at.with(cfg, |p, _| p.command(crate::at::at_cmd::CSCA_READ)))
             }
         }
 

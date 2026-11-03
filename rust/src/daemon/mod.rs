@@ -1,15 +1,26 @@
-//! 守护主体：一轮巡检的编排。
+//! 守护主体：一轮巡检的编排（Tokio 事件驱动）。
 //!
 //! ## 分层
 //!
 //! ```text
 //! CLI (cli.rs) ──► api.rs ──┐
-//!                           ├─► daemon::run ──► 各巡检器
-//!      LuCI (rpcd) ─────────┘
+//!                           ├─► daemon::run ──► 各巡检器（阻塞池）
+//!      LuCI (rpcd) ─────────┘        │
+//!                                    └─ api::serve（异步 task，每连接独立）
 //! ```
 //!
 //! 本模块只做**编排**：持有跨轮状态、按固定顺序调用各巡检器、控制巡检周期。
 //! 所有具体判定都下沉到子模块，便于单独单测。
+//!
+//! ## 运行模型（Tokio 化后）
+//!
+//! `run()` 本身是 async fn，跑在 `rt::start` 构建的 current_thread 事件循环：
+//!
+//! - API 服务是独立 task（`tokio::spawn`），accept/报文/预算全异步；
+//! - 巡检循环由 `tokio::time::sleep` 驱动（可被取消、不占线程）；
+//! - 每个阻塞段（AT 会话 + shell 子进程）经 `rt::blocking_scope` 派发到
+//!   **阻塞池**，事件循环在等待期间照常处理 API 请求与定时器；
+//! - 巡检器自身实现保持同步（逐字未改），move-in/move-out 模式传递。
 //!
 //! ## 巡检器职责
 //!
@@ -32,11 +43,13 @@
 //! AT 访问都变成重新打开，白白多一次串口握手。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::at::AtHandle;
 use crate::config;
 use crate::infof;
-use crate::net;
+use crate::rt;
+use crate::warnf;
 
 pub mod dial;
 pub mod gt;
@@ -62,63 +75,129 @@ pub use v6::V6Watch;
 /// 会把 AT 通道压满，表现为状态刷新本身开始超时。
 pub const MIN_POLL_INTERVAL: u64 = 5;
 
-/// 守护主循环（不返回，除非 API 线程与巡检同时失败到无法继续）。
-pub fn run(cfg_initial: config::Config) -> Result<(), String> {
+/// SSH 转发巡检的节流周期（SshFwdWatch 内部另有细粒度节流）。
+const SSHFWD_TICK: Duration = Duration::from_secs(15);
+
+/// 守护主循环（async，永不返回，除非阻塞池/巡检致命失败）。
+pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
     let at = Arc::new(AtHandle::new());
 
-    // API 服务放到子线程，主线程跑巡检任务。
-    // AT 句柄是 Arc 共享的，API 侧与巡检侧串行访问同一把互斥锁。
-    let at_api = Arc::clone(&at);
-    let api_cfg = cfg_initial.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = crate::api::serve(at_api, api_cfg) {
-            crate::warnf!(format_args!("API 退出: {}", e));
+    // API 服务独立 task：事件循环同时服务巡检定时器。
+    // AT 句柄 Clone 共享，API 侧与巡检侧都进同一个 FIFO 邮箱串行执行。
+    tokio::spawn({
+        let at = Arc::clone(&at);
+        let cfg0 = cfg_initial;
+        async move {
+            if let Err(e) = crate::api::serve(at, cfg0).await {
+                warnf!(format_args!("API 退出: {}", e));
+            }
         }
     });
 
     infof!(format_args!("守护已启动"));
 
-    let mut v6 = V6Watch::new();
-    let mut dial = DialWatch::new();
-    let mut data = DataGuard::new();
-    let mut netg = NetGuard::new();
-    let mut conflict = ConflictWatch::new();
-    let mut port = PortWatch::new();
-    let mut gt = GtWatch::new();
-    let mut sshfwd = SshFwdWatch::new();
+    // 巡检器有跨轮状态，且阻塞池任务要求 'static：用元组携带，每段
+    // move-in / move-out（`w.N` 取出 → 闭包内 tick → 写回）。
+    let mut w = (
+        DialWatch::new(),    // w.0 拨号
+        V6Watch::new(),      // w.1 IPv6
+        DataGuard::new(),    // w.2 数据面
+        NetGuard::new(),     // w.3 公网连通
+        ConflictWatch::new(),// w.4 接口冲突
+        PortWatch::new(),    // w.5 AT 口
+        GtWatch::new(),      // w.6 EIF（留在事件循环，纯内存）
+        SshFwdWatch::new(),  // w.7 SSH 转发
+    );
+    let mut last_ssh = tokio::time::Instant::now();
 
     loop {
         // 每轮重新读配置：用户在 LuCI 改的参数下一轮即生效，无需重启服务。
-        let cfg = config::load();
+        // （config::load 会 fork 二十余次 uci，本身是阻塞段 —— 放进池里。）
+        let cfg = rt::blocking_scope(config::load).await?;
         let interval = cfg.poll_interval.max(MIN_POLL_INTERVAL);
 
-        // EIF 兜底加速：消费上一轮巡检期间被截流的 URC 事件。地址类事件
-        // 会置起加速标志，让本轮末尾的睡眠压到秒级，下一轮尽快复核地址。
-        gt.tick(&cfg);
+        // EIF 兜底加速：消费上一轮巡检期间被截流的 URC 事件（纯内存）。
+        // 地址类事件会置起加速标志，让本轮末尾的睡眠压到秒级。
+        w.6.tick(&cfg);
 
-        dial.tick(&at, &cfg, &mut v6);
-        sig::reapply_on_change(&cfg);
-
-        if cfg.route_guard && net::route_guard(&cfg) {
-            infof!(format_args!("已补齐默认设备路由"));
+        // —— 阻塞段 1：拨号巡检 + IPv6（AT + shell）——
+        {
+            let at1 = Arc::clone(&at);
+            let c1 = cfg.clone();
+            let (d, v) = (w.0, w.1);
+            let (d, v) = rt::blocking_scope(move || {
+                let mut d = d;
+                let mut v = v;
+                d.tick(&at1, &c1, &mut v);
+                (d, v)
+            })
+            .await?;
+            w.0 = d;
+            w.1 = v;
         }
 
-        conflict.tick(&cfg);
-        data.tick(&at, &cfg);
-        if netg.tick(&at, &cfg) {
-            dial.defer_after_external_purification();
+        // —— 阻塞段 2：参数签名 / 路由守卫 / 接口冲突 / 数据面 / 公网连通 ——
+        let net_purified = {
+            let at2 = Arc::clone(&at);
+            let c2 = cfg.clone();
+            let (data, netg, conflict) = (w.2, w.3, w.4);
+            let (conflict, data, netg, purified, route_fixed) = rt::blocking_scope(move || {
+                sig::reapply_on_change(&c2);
+                let route_fixed = c2.route_guard && crate::net::route_guard(&c2);
+                let mut conflict = conflict;
+                let mut data = data;
+                let mut netg = netg;
+                conflict.tick(&c2);
+                data.tick(&at2, &c2);
+                let purified = netg.tick(&at2, &c2);
+                (conflict, data, netg, purified, route_fixed)
+            })
+            .await?;
+            w.2 = data;
+            w.3 = netg;
+            w.4 = conflict;
+            if route_fixed {
+                infof!(format_args!("已补齐默认设备路由"));
+            }
+            purified
+        };
+        if net_purified {
+            w.0.defer_after_external_purification();
         }
 
-        port.release_on_change(&at, &cfg);
-        port.reselect_if_down(&at, &cfg);
-        port.observe_exclusivity(&at, &cfg);
+        // —— 阻塞段 3：AT 口看护（可能释放/改选句柄）——
+        {
+            let at3 = Arc::clone(&at);
+            let c3 = cfg.clone();
+            let port = w.5;
+            let (port, _at_stats) = rt::blocking_scope(move || {
+                let mut port = port;
+                port.release_on_change(&at3, &c3);
+                port.reselect_if_down(&at3, &c3);
+                let st = port.observe_exclusivity(&at3, &c3);
+                (port, st)
+            })
+            .await?;
+            w.5 = port;
+        }
 
-        // SSH 转发巡检：不依赖 AT 句柄，内部 15s 节流；关闭态零副作用。
-        sshfwd.tick(&cfg);
+        // —— SSH 转发巡检：不依赖 AT 句柄，内部再节流；关闭态零副作用 ——
+        if last_ssh.elapsed() >= SSHFWD_TICK {
+            last_ssh = tokio::time::Instant::now();
+            let c4 = cfg.clone();
+            let sshfwd = w.7;
+            w.7 = rt::blocking_scope(move || {
+                let mut sshfwd = sshfwd;
+                sshfwd.tick(&c4);
+                sshfwd
+            })
+            .await?;
+        }
 
-        // 加速标志在取走睡眠时长之后才清零，保证「事件 → 短睡眠」链路生效
-        let sleep = gt.sleep_interval(interval);
-        gt.consume_accel();
-        std::thread::sleep(sleep);
+        // 加速标志在取走睡眠时长之后才清零，保证「事件 → 短睡眠」链路生效。
+        // tokio 定时器：睡眠期间事件循环照常服务 API 请求。
+        let sleep = w.6.sleep_interval(interval);
+        w.6.consume_accel();
+        tokio::time::sleep(sleep).await;
     }
 }

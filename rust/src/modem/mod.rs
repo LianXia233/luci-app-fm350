@@ -56,7 +56,9 @@ pub use temp::{sensor_name, Temperature};
 /// 对外透传路径（`/api/at`、CLI `at`）则是无条件拦截，二者不冲突。
 pub fn run(at: &AtHandle, cfg: &Config, cmd: &str) -> AtResult<String> {
     crate::imei::guard_transparent(cmd, cfg)?;
-    at.with(cfg, |p| p.command(cmd))
+    // 邮箱任务要求 'static：命令串拷贝进闭包（字符串极短，成本可忽略）
+    let owned = cmd.to_string();
+    at.with(cfg, move |p, _| p.command(&owned))
 }
 
 /// 批量执行并把失败转成可读文本（供「原始命令回显」类接口使用）。
@@ -86,7 +88,7 @@ pub struct Status {
 }
 
 pub fn status(at: &AtHandle, cfg: &Config) -> Status {
-    let ready = at.with(cfg, |p| p.command(at::at_cmd::AT)).is_ok();
+    let ready = at.with(cfg, |p, _| p.command(at::at_cmd::AT)).is_ok();
     Status {
         info: info::info(at, cfg),
         signal: signal::signal(at, cfg),

@@ -43,16 +43,22 @@ impl PortWatch {
     ///
     /// 只释放、不立即打开：下一轮访问时按新路径自然打开。这样改端口不需要
     /// 重启服务，也不会在本轮巡检中途换口导致后续 AT 命令打到错的设备。
+    ///
+    /// 比对必须在**同一形态**下进行：配置里写的是稳定标识（`usb-…` /
+    /// by-id），而持有路径是解析后的 `/dev/ttyUSB*`。直接拿原文比对恒不
+    /// 相等 —— 实机曾因此每 30 s 释放重开一次串口，把拨号会话反复掐断
+    /// （2026-11 实验固件：写稳定标识后日志每轮「AT 端口配置变更」）。
     pub fn release_on_change(&self, at: &AtHandle, cfg: &Config) {
         let Some(cur) = at.current_path() else {
             return;
         };
-        if cur == cfg.at_port {
+        let want = crate::at::resolve_stable(cfg, &cfg.at_port);
+        if cur == want {
             return;
         }
         infof!(format_args!(
             "AT 端口配置变更 {} → {}，释放旧句柄",
-            cur, cfg.at_port
+            cur, want
         ));
         at.close();
     }
@@ -61,8 +67,12 @@ impl PortWatch {
     ///
     /// 同一张 FM350 会导出多个 `2cb7` 口（DIAG / GNSS / AT 等），盲切有选错
     /// 口的风险，而选错口的后果是彻底失联，比多等两轮严重得多。
+    ///
+    /// 存在性检查同样先解析稳定标识：`usb-…` 形态本身不是文件，
+    /// 直接 metadata 恒失败会让本函数每轮误判「端口已消失」。
     pub fn reselect_if_down(&mut self, at: &AtHandle, cfg: &Config) {
-        if std::fs::metadata(&cfg.at_port).is_ok() {
+        let want = crate::at::resolve_stable(cfg, &cfg.at_port);
+        if std::fs::metadata(&want).is_ok() {
             self.down_rounds = 0;
             return;
         }

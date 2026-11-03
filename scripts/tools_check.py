@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 # 取证：dbclient/dropbearkey 可用性 + 旧服务 31716 真身
+import os
 import paramiko
 
 def main():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect("192.168.1.1", username="root", password=os.environ.get("FM350_PASS", ""),
+    ssh.connect(os.environ.get("FM350_HOST", "192.168.1.1"), username=os.environ.get("FM350_USER", "root"), password=os.environ.get("FM350_PASS", ""),
                 allow_agent=False, look_for_keys=False, timeout=15)
     def run(name, cmd):
         _, so, se = ssh.exec_command(cmd, timeout=30)

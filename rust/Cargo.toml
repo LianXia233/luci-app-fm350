@@ -24,8 +24,24 @@ path = "src/main.rs"
 serialport = { version = "4", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tiny_http = "0.12"
 libc = "0.2"
+
+# 异步运行时：API 服务器（每连接 task + 非阻塞 accept）、巡检定时器与
+# 请求超时预算全部事件驱动。feature 按需裁剪：
+#   rt      current_thread 运行时（单线程事件循环即可，重活都在阻塞池/AT 线程）
+#   net     TcpListener / TcpStream
+#   time    tokio::time::{sleep, timeout}（请求预算、巡检周期）
+#   sync    oneshot（AT 邮箱的应答回执）
+#   io-util AsyncReadExt / AsyncWriteExt（报文读写）
+# 不引入 rt-multi-thread / macros / signal：事件循环只跑 accept + 定时器，
+# 单线程足够；运行时手动构建，不用宏；SIGTERM 交给 procd 直接杀。
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "net",
+    "time",
+    "sync",
+    "io-util",
+] }
 
 [profile.release]
 opt-level = "s"

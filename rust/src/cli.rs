@@ -174,7 +174,7 @@ fn require_u32(args: &[String], usage: &str) -> u32 {
     }
 }
 
-/// 守护模式入口：单实例守卫 + 主循环。
+/// 守护模式入口：单实例守卫 + Tokio 事件循环。
 fn run_daemon(cfg: Config) {
     let _guard = match daemon::acquire() {
         Some(g) => g,
@@ -183,7 +183,8 @@ fn run_daemon(cfg: Config) {
             return;
         }
     };
-    if let Err(e) = daemon::run(cfg) {
+    // daemon::run 是 async：经 rt::start 构建单线程事件循环并阻塞于此。
+    if let Err(e) = crate::rt::start(daemon::run(cfg)) {
         eprintln!("fm350d: {}", e);
         std::process::exit(1);
     }
@@ -312,7 +313,9 @@ pub fn run() {
                 if crate::at::is_imei_write(&c) {
                     return serde_json::json!({ "ok": false, "error": crate::at::imei_block_reason(&c) });
                 }
-                ok_or_err(a.with(cc, |p| p.command(&c)))
+                // 邮箱任务要求 'static：命令串克隆进闭包
+                let owned = c.clone();
+                ok_or_err(a.with(cc, move |p, _| p.command(&owned)))
             })
         }
 
@@ -325,7 +328,7 @@ pub fn run() {
                 })
             }
             None => run_cli(&cfg, "GET", "/api/sms/smsc", None, |a, c| {
-                ok_or_err(a.with(c, |p| p.command(crate::at::at_cmd::CSCA_READ)))
+                ok_or_err(a.with(c, |p, _| p.command(crate::at::at_cmd::CSCA_READ)))
             }),
         },
 

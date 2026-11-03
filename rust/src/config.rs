@@ -346,12 +346,23 @@ pub fn save(patch: &serde_json::Value) -> Result<(), String> {
 /// 网关/掩码必须是纯地址。
 fn validate_value(key: &str, val: &str) -> Result<(), String> {
     match key {
-        // AT 端口必须是绝对设备路径：写入 "ttyUSB1" 这类相对值后 open()
-        // 会在 cwd 下静默失败，用户却看到「保存成功」。
-        "at_port" if !val.starts_with('/') => Err(format!(
-            "AT 端口必须是绝对路径（如 /dev/ttyUSB1），当前为『{}』",
-            val
-        )),
+        // AT 端口两种合法形态：
+        //   1. 绝对设备路径 / by-id 链接（以 `/` 开头，如 /dev/ttyUSB1）；
+        //   2. 拓扑稳定标识（`usb-` 开头，如 usb-usb2-2-1:1.6）——
+        //      由 port::stable_path() 在无 udev 固件上产生，load()/resolve_stable()
+        //      均按此消费。哑口自动改选（at::reselect_on_silent）会把这种
+        //      形态写回 UCI，若在此拒绝，改选永远落不了盘：daemon 每 30s
+        //      探测一次、失败一次，实机上表现为「永远读不到模块」+ rpcd
+        //      被反复的重试探测拖死 LuCI（2026-11 实验固件复现）。
+        //      仍拒绝 "ttyUSB1" 这类裸相对名：open() 会在 cwd 下静默失败。
+        "at_port"
+            if !val.starts_with('/') && !val.starts_with("usb-") =>
+        {
+            Err(format!(
+                "AT 端口必须是绝对路径（如 /dev/ttyUSB1）或 usb- 拓扑稳定标识，当前为『{}』",
+                val
+            ))
+        }
         // SSH 转发端口：必须为 1-65535 的合法端口号。
         "sshfwd_lan_port" | "sshfwd_fwd_port"
             if val.parse::<u16>().map(|n| n == 0).unwrap_or(true) =>
@@ -506,6 +517,9 @@ mod tests {
         for (k, v) in [
             ("at_port", "/dev/ttyUSB1"),
             ("at_port", "/dev/serial/by-id/usb-Fibocom_FM350_123-if01-port0"),
+            // 拓扑稳定标识（无 udev 固件上 stable_path 的产物）必须放行：
+            // 哑口自动改选要靠它落盘（实机踩坑：被拒后改选死循环）
+            ("at_port", "usb-usb2-2-1:1.6"),
             ("sshfwd_lan_port", "2222"),
             ("sshfwd_fwd_port", "65535"),
             ("dns4_primary", "119.29.29.29"),

@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 # 复核：监听真实性 + ubus 经 rpcd 的 sshfwd 方法
+import os
 import json
 import paramiko
 
 def main():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect("192.168.1.1", username="root", password=os.environ.get("FM350_PASS", ""),
+    ssh.connect(os.environ.get("FM350_HOST", "192.168.1.1"), username=os.environ.get("FM350_USER", "root"), password=os.environ.get("FM350_PASS", ""),
                 allow_agent=False, look_for_keys=False, timeout=15)
     try:
         def run(name, cmd):
