@@ -110,6 +110,8 @@ mod tests {
             assert!(connected, "服务未监听");
 
             let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
+            // tokio ≥1.54 拒绝注册阻塞套接字：先转非阻塞再交给运行时。
+            stream.set_nonblocking(true).unwrap();
             let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let req = serde_json::json!({
@@ -157,6 +159,8 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
+            // tokio ≥1.54 拒绝注册阻塞套接字：先转非阻塞再交给运行时。
+            stream.set_nonblocking(true).unwrap();
             let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             stream.write_all(b"this is not json\n").await.unwrap();
@@ -196,6 +200,8 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             let stream = std::net::TcpStream::connect(("127.0.0.1", cfg.api_port)).unwrap();
+            // tokio ≥1.54 拒绝注册阻塞套接字：先转非阻塞再交给运行时。
+            stream.set_nonblocking(true).unwrap();
             let mut stream = tokio::net::TcpStream::from_std(stream).unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             stream
