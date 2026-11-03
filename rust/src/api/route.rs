@@ -432,6 +432,8 @@ fn dial(at: &AtHandle, cfg: &Config, payload: &Json) -> Json {
 
     match crate::modem::dial(at, &c2) {
         Ok(st) => {
+            // 模组上报 MTU 先落 UCI，随后的 ifup 一次性带上。
+            let _ = crate::net::apply_mtu(&c2, st.mtu);
             // 不再用 .ok() 吞掉错误：网络配置失败必须让调用方看见原因，
             // 否则前端只能看到 net:null 而完全无从排查（实测踩过）。
             match crate::net::apply_after_dial(

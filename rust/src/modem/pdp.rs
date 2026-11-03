@@ -22,10 +22,18 @@ use std::time::Duration;
 const ADDR_POLL_ROUNDS: u32 = 5;
 const ADDR_POLL_INTERVAL_MS: u64 = 600;
 
-/// 飞行模式自恢复后的注册等待：12 × 5 s = 60 s 上限。
+/// 飞行模式自恢复后的注册等待：10 × 5 s = 50 s 上限。
 /// 超时后仍继续走原拨号路径 —— 失败信息自带前置体检，不会静默。
-const RECOVER_REG_POLLS: u32 = 12;
+///
+/// 上限受拨号任务的总预算约束：AT 工作线程对单个任务有 95 s 看门狗，
+/// 「CFUN 恢复 + 附着等待 + 激活 + 地址轮询 + 一次激活恢复重试」的最坏
+/// 组合必须留出余量，不能各自取最大值。
+const RECOVER_REG_POLLS: u32 = 10;
 const RECOVER_REG_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 已注册但 EPS 附着未完成时，补发 `AT+CGATT=1` 后的限时等待：8 × 2.5 s。
+const ATTACH_POLLS: u32 = 8;
+const ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(2500);
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct PdpState {
@@ -48,6 +56,12 @@ pub struct PdpState {
     /// 同字段位的 IPv6 网关（点分十进制已解码；当前仅透出展示，
     /// v6 默认路由仍由 RA / 设备路由方案接管）。
     pub gw6: String,
+    /// 模组侧 `AT+CGCONTRDP` 上报的 IPv4 MTU（未上报 / 未激活为 None）。
+    ///
+    /// 运营商承载的 MTU 可能小于以太网默认 1500（如 1430/1460），直接用
+    /// 1500 会在大包上踩 PMTU 黑洞。取到后由 `net::iface::apply_mtu` 写进
+    /// 主接口；取不到就不动接口配置（不猜）。
+    pub mtu: Option<u32>,
     pub raw: Vec<(String, String)>,
 }
 
@@ -88,6 +102,32 @@ pub fn cgact_state(resp: &str, cid: u32) -> Option<bool> {
 /// 读取上下文状态，以「是否拿到地址」为准。
 pub fn is_duplicate_activate(resp: &str) -> bool {
     resp.contains("5847")
+}
+
+/// 解析 `AT+CGATT?` 的附着状态。
+///
+/// 返回 `None` 表示命令失败或没有 `+CGATT:` 行（调用方应维持旧行为，
+/// 不把「读不到附着状态」升级成门槛）。
+pub fn cgatt_state(resp: &str) -> Option<bool> {
+    crate::at::first(resp, "+CGATT")
+        .first()
+        .and_then(|x| x.parse::<u32>().ok())
+        .map(|v| v == 1)
+}
+
+/// 从一行 `+CGCONTRDP:` 字段里提取 IPv4 MTU。
+///
+/// TS 27.007 的 `<IPv4_MTU>` 排在尾部字段区，且本固件把标准字段表整体左移
+/// （地址+掩码合并在字段 3），位置不固定。这里从字段 7（本方言 DNS2 之后）
+/// 起扫描第一个落在合法 MTU 区间 [576, 65535] 的纯整数：
+///   * 中间插着的 `<p_cscf_prim/sec>` 是带点的 IP，解析不出整数，天然跳过；
+///   * `<IM_CN_Signalling_Flag>` / `<LIPA_ind>` 等标志位取值 0/1/2，被区间滤除；
+///   * 去激活后的残留行里 MTU 位为空或 0，同样不命中 —— 不会把残留值配上去。
+pub fn contrdp_mtu(row: &[String]) -> Option<u32> {
+    row.iter()
+        .skip(7)
+        .filter_map(|x| x.parse::<u32>().ok())
+        .find(|v| (576..=65535).contains(v))
 }
 
 /// 拨号前置体检结果。
@@ -228,6 +268,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
     let mut contr_mask4 = String::new();
     let mut contr_gw4 = String::new();
     let mut contr_gw6 = String::new();
+    let mut contr_mtu: Option<u32> = None;
     if let Some(r) = &contr {
         for row in crate::at::rows(&r, "+CGCONTRDP") {
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
@@ -244,6 +285,9 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
                     } else {
                         if contr_ipv4.is_empty() {
                             contr_ipv4 = p.addr;
+                            // MTU 只从**有 v4 地址的那一行**取：v6 行的尾部
+                            // 字段是另一套布局，混着扫会采错来源。
+                            contr_mtu = contrdp_mtu(&row);
                         }
                         if contr_mask4.is_empty() {
                             if let Some(m) = p.mask {
@@ -352,6 +396,7 @@ pub fn pdp(at: &AtHandle, cfg: &Config) -> PdpState {
         st.gw4 = contr_gw4;
         st.gw6 = contr_gw6;
         st.netmask4 = contr_mask4;
+        st.mtu = contr_mtu;
     }
     st.active = active;
 
@@ -412,18 +457,32 @@ pub struct DialOutcome {
 
 /// 拨号：确保 APN 正确 → 下发鉴权 → 激活 PDP → 读取地址。
 ///
+/// ## 前置门槛（按序，任一不过即失败）
+///
+/// 1. **在线**：CFUN=4（飞行模式）时自恢复，限时等待注册；
+/// 2. **EPS 附着**（`AT+CGATT?`）：未注册时附着不可能完成，直接失败——
+///    旧版会继续下发 CGDCONT/CGAUTH/CGACT 再轮询 3 s 地址，整条链路在
+///    「搜索中」弱网状态下每轮空转十几秒；已注册但附着未完成时补发一次
+///    `AT+CGATT=1` 并限时等待；
+/// 3. APN / 鉴权：每次拨号前重写（模组无持久化命令，见 `at::cmd` 模块注释）。
+///
+/// ## 激活判据与重试
+///
 /// 幂等：上下文已激活且已取得**任一地址族**的地址时直接返回，不重复下发
 /// `AT+CGACT=1`（重复激活模组会回 `+CME ERROR: 5847`）。
 ///
 /// 若模组回激活类错误，不再直接判失败，而是重新读取上下文状态：
-/// 只要拿到有效地址即视为成功；彻底失败时才做一次前置体检，把
-/// 「SIM 未就绪 / 未注册」这类真实原因写进错误信息。
+/// 只要拿到有效地址即视为成功；确属真失败（非 5847）时做**一次**有界恢复
+/// 重试（去激活 → 2 s → 再激活），连续失败交给守护的退避机制。
+/// 彻底失败时才做一次前置体检，把「SIM 未就绪 / 未注册」这类真实原因写进
+/// 错误信息。
 pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     // 在线自恢复：模组重启（换 IMEI / usbmode / CFUN=1,1 等维修操作之后）
     // 或异常掉电后可能停留在飞行模式（CFUN=4）。此前只在拨号失败后报告、
     // 从不恢复 —— 守护每轮拨号都会死循环在「前置体检：模组未在线」。这里
     // 发现未在线时主动 CFUN=1 并限时等待注册，再继续后续拨号动作。
     let pre = readiness(at, cfg);
+    let mut reg_ok = matches!(pre.reg_state, Some(1) | Some(5));
     if pre.cfun == Some(4) {
         let _ = run(at, cfg, &at_cmd::set_cfun(1));
         for _ in 0..RECOVER_REG_POLLS {
@@ -436,9 +495,45 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
                         .and_then(|x| x.parse::<u32>().ok()),
                     Some(1) | Some(5)
                 ) {
+                    reg_ok = true;
                     break;
                 }
             }
+        }
+    }
+
+    // ---- EPS 附着门
+    //
+    // `attach == None`（命令失败/解析不出）不设门槛：维持旧行为，避免把
+    // 「读不到附着状态」升级成拨号失败。
+    let attach = run(at, cfg, at_cmd::CGATT_READ)
+        .ok()
+        .and_then(|r| cgatt_state(&r));
+    if attach == Some(false) {
+        if !reg_ok {
+            return Err(format!(
+                "EPS 未附着且网络未注册（CEREG={:?}，CGATT=0），等待注册后再拨",
+                pre.reg_state
+            ));
+        }
+        // 已注册但附着未完成（弱网注册抖动窗口）：显式补发一次附着请求。
+        crate::infof!(format_args!("已注册但 EPS 未附着，补发 AT+CGATT=1 并等待"));
+        let _ = run(at, cfg, &at_cmd::cgatt_attach(1));
+        let mut attached = false;
+        for _ in 0..ATTACH_POLLS {
+            std::thread::sleep(ATTACH_POLL_INTERVAL);
+            if let Ok(r) = run(at, cfg, at_cmd::CGATT_READ) {
+                if cgatt_state(&r) == Some(true) {
+                    attached = true;
+                    break;
+                }
+            }
+        }
+        if !attached {
+            return Err(format!(
+                "EPS 附着未在 {} 秒内完成（已注册，CGATT 仍为 0）",
+                ATTACH_POLLS * ATTACH_POLL_INTERVAL.as_secs() as u32
+            ));
         }
     }
 
@@ -456,16 +551,23 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     if crate::at::has_error(&r) {
         // 重复激活（+CME ERROR: 5847）等：以「是否取到地址」为准，轮询若干次
         let dup = is_duplicate_activate(&r);
-        let mut st = pdp(at, cfg);
-        for _ in 0..ADDR_POLL_ROUNDS {
-            if st.has_address() {
-                return Ok(st);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(ADDR_POLL_INTERVAL_MS));
-            st = pdp(at, cfg);
-        }
+        let mut st = poll_for_address(at, cfg);
         if st.active {
             return Ok(st);
+        }
+        // 真失败（非重复激活）：一次有界恢复重试。模组侧偶发的激活失败
+        // （PDN 释放滞后、承载协商竞态）通常去激活再激活一轮即恢复；
+        // 只试一次，连续失败交给守护的退避，不在单次拨号里反复折腾。
+        if !dup {
+            let _ = run(at, cfg, &at_cmd::deactivate(cfg.cid));
+            std::thread::sleep(Duration::from_secs(2));
+            let r2 = run(at, cfg, &at_cmd::activate(cfg.cid))?;
+            if !crate::at::has_error(&r2) || is_duplicate_activate(&r2) {
+                st = poll_for_address(at, cfg);
+                if st.active {
+                    return Ok(st);
+                }
+            }
         }
         let mut msg = format!("激活 PDP 失败: {}", r.replace('\n', " "));
         if dup {
@@ -480,18 +582,27 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     }
 
     // PDP 激活后地址可能晚一步就绪，轮询几次（任一地址族到位即可）
-    let mut st = pdp(at, cfg);
-    for _ in 0..ADDR_POLL_ROUNDS {
-        if st.has_address() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(ADDR_POLL_INTERVAL_MS));
-        st = pdp(at, cfg);
-    }
+    let st = poll_for_address(at, cfg);
     if !st.active && !st.has_address() {
         return Err("PDP 激活后未取得任何地址（IPv4/IPv6）".to_string());
     }
     Ok(st)
+}
+
+/// 轮询上下文直到拿到任一地址族的地址或次数用尽，返回最后一轮状态。
+///
+/// 是否激活以 `active` 字段为准：未激活时 CGPADDR/CGCONTRDP 给出的是
+/// 上一轮会话残留，**不能**因为「有地址」就返回成功。
+fn poll_for_address(at: &AtHandle, cfg: &Config) -> PdpState {
+    let mut st = pdp(at, cfg);
+    for _ in 0..ADDR_POLL_ROUNDS {
+        if st.has_address() {
+            return st;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(ADDR_POLL_INTERVAL_MS));
+        st = pdp(at, cfg);
+    }
+    st
 }
 
 /// 断开：去激活 PDP。
@@ -529,6 +640,79 @@ mod cgact_tests {
         assert!(is_duplicate_activate("+CME ERROR: 5847"));
         assert!(!is_duplicate_activate("+CME ERROR: 100"));
         assert!(!is_duplicate_activate("OK"));
+    }
+}
+
+#[cfg(test)]
+mod cgatt_mtu_tests {
+    use super::{cgatt_state, contrdp_mtu};
+
+    #[test]
+    fn cgatt_state_parses_real_device_output() {
+        // 2026-11 实机（搜索中）：+CGATT: 0
+        assert_eq!(cgatt_state("+CGATT: 0\nOK"), Some(false));
+        assert_eq!(cgatt_state("+CGATT: 1\nOK"), Some(true));
+    }
+
+    #[test]
+    fn cgatt_state_absent_is_none() {
+        assert_eq!(cgatt_state("+CME ERROR: unknown"), None);
+        assert_eq!(cgatt_state("OK"), None);
+        assert_eq!(cgatt_state(""), None);
+        // 非数值字段不解析
+        assert_eq!(cgatt_state("+CGATT: \nOK"), None);
+    }
+
+    /// 2026-11 实机残留行（去激活态）：尾部只有 0 与空串，绝不能采出 MTU。
+    const STALE_ROWS: &str = concat!(
+        r#"+CGCONTRDP: 1,5,"ctnet.MNC011.MCC460.GPRS","","","202.96.128.86","202.96.134.133","","",0,,0,,,,,,,,,,,,0"#,
+        "\n",
+        r#"+CGCONTRDP: 1,5,"ctnet.MNC011.MCC460.GPRS","","","36.14.0.31.0.1.0.0.0.0.0.0.0.0.0.1","36.14.0.31.0.1.0.0.0.0.0.0.0.0.0.51","","",0,,0,,,,,,,,,,,,0"#,
+    );
+
+    fn parse_row(line: &str) -> Vec<String> {
+        // 与 crate::at::rows 的字段切分一致：逗号分隔、去引号
+        crate::at::rows(line, "+CGCONTRDP").next().unwrap()
+    }
+
+    #[test]
+    fn stale_rows_yield_no_mtu() {
+        for line in STALE_ROWS.lines() {
+            let row = parse_row(line);
+            assert_eq!(contrdp_mtu(&row), None, "{}", line);
+        }
+    }
+
+    #[test]
+    fn mtu_from_activated_row_is_found() {
+        // 合成激活行：尾部 IPv4_MTU 位给 1500
+        let row: Vec<String> = vec![
+            "1", "5", "ctnet", "10.11.12.13.255.255.255.252", "10.11.12.14",
+            "202.96.128.86", "202.96.134.133", "", "", "0", "", "1500",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(contrdp_mtu(&row), Some(1500));
+    }
+
+    #[test]
+    fn small_flag_fields_and_ips_are_ignored() {
+        let row: Vec<String> = vec![
+            "1", "5", "apn", "a", "gw", "10.168.1.3", "10.168.1.4", "", "",
+            "1", "", "2",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(contrdp_mtu(&row), None, "标志位与 IP 不得被当作 MTU");
+        // 低于 576 的整数同样不采
+        let row2: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(i, x)| if i == 11 { "575".to_string() } else { x.clone() })
+            .collect();
+        assert_eq!(contrdp_mtu(&row2), None);
     }
 }
 

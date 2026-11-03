@@ -590,6 +590,37 @@ fn uci_get(path: &str) -> Option<String> {
     None
 }
 
+/// 把模组上报的 IPv4 MTU 应用到主接口（UCI 持久化 + 运行态即时生效）。
+///
+/// 返回是否发生了实际写入。`None`（本轮模组未上报 MTU）时**不动作也不
+/// 清除**已有值 —— CGCONTRDP 偶尔取不到 MTU 不该抹掉上一轮的正确配置；
+/// 与当前值相同时同样零动作，稳态每轮调用的成本只有一次 `uci -q get`。
+///
+/// 运行态用 `ip link set` 直接改 MTU，不动 ifup：MTU 变更不应掐断会话，
+/// 而 UCI 值保证下次 ifup / 重启后仍然正确。
+pub fn apply_mtu(cfg: &Config, mtu: Option<u32>) -> Result<bool, String> {
+    let Some(m) = mtu else {
+        return Ok(false);
+    };
+    let key = format!("network.{}.mtu", cfg.iface);
+    if uci_get(&key).as_deref() == Some(m.to_string().as_str()) {
+        return Ok(false);
+    }
+    let cmds = vec![format!("set {}={}", key, m)];
+    let results = uci_batch(&cmds);
+    if !failed(&results).is_empty() {
+        let _ = real("uci revert network");
+        return Err(format!("写入接口 MTU 失败（{}）", m));
+    }
+    let _ = real("uci commit network");
+    // 运行态即时生效（尽力而为）：接口尚未拉起时失败无妨，ensure_iface
+    // 的 ifup 会把 UCI 值带上。
+    if let Some(dev) = detect_dev(cfg) {
+        let _ = real(&format!("ip link set dev {} mtu {} || true", dev, m));
+    }
+    Ok(true)
+}
+
 /// 拆除由本插件创建的接口与路由。
 pub fn teardown_iface(cfg: &Config) -> Result<Vec<String>, String> {
     let iface = &cfg.iface;

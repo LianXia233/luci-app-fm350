@@ -134,6 +134,16 @@ impl DialWatch {
                 }
                 self.dial_fail_rounds = 0;
                 self.retry_after = None;
+                // 模组上报的 MTU 先落 UCI，随后的 ifup 一次性带上（若等
+                // apply_after_dial 之后再写，本轮 ifup 就错过了）。
+                match net::apply_mtu(cfg, p.mtu) {
+                    Ok(true) => infof!(format_args!(
+                        "已把模组上报 MTU 应用到接口 {}",
+                        cfg.iface
+                    )),
+                    Ok(false) => {}
+                    Err(e) => warnf!(format_args!("应用模组 MTU 失败: {}", e)),
+                }
                 match net::apply_after_dial(
                     cfg,
                     &p.ipv4,
@@ -236,6 +246,14 @@ impl DialWatch {
             Ok(false) => {}
             Err(e) => warnf!(format_args!("恢复强制 DNS 失败: {}", e)),
         }
+
+        // 模组 MTU 维护：只在「取到且与 UCI 当前值不同」时写入（None 直接
+        // 返回，稳态成本为一次 uci -q get；偶发取不到不会抹掉已有值）。
+        match net::apply_mtu(cfg, st.mtu) {
+            Ok(true) => infof!(format_args!("已把模组上报 MTU 应用到接口 {}", cfg.iface)),
+            Ok(false) => {}
+            Err(e) => warnf!(format_args!("应用模组 MTU 失败: {}", e)),
+        }
     }
 
     /// 已激活但没有 IPv4：v6-only 会话照常配，两个族都空则累计后强制重拨。
@@ -330,6 +348,7 @@ pub fn redial(at: &AtHandle, cfg: &Config) -> bool {
     std::thread::sleep(Duration::from_secs(3));
     match modem::dial(at, cfg) {
         Ok(p) if !p.ipv4.is_empty() || !p.ipv6.is_empty() => {
+            let _ = net::apply_mtu(cfg, p.mtu);
             net::apply_after_dial(cfg, &p.ipv4, &p.ipv6, &p.dns, &p.gw4, &p.netmask4).is_ok()
         }
         Ok(_) => false,

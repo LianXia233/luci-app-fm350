@@ -46,8 +46,8 @@ pub use heal::{
     reset_usb_data_dev, route_guard,
 };
 pub use iface::{
-    clear_session_addresses, enforce_forced_dns, ensure_autostart, ensure_iface, status,
-    teardown_iface, NetStatus,
+    apply_mtu, clear_session_addresses, enforce_forced_dns, ensure_autostart, ensure_iface,
+    status, teardown_iface, NetStatus,
 };
 pub use probe::{
     check_connectivity4, check_connectivity6, data_health, data_plane_stalled, detect_dev,

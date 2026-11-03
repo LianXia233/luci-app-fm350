@@ -275,6 +275,8 @@ pub fn run() {
             Some(&serde_json::json!({ "apn": cfg.apn, "pdp_type": cfg.pdp_type })),
             |a, c| match modem::dial(a, c) {
                 Ok(p) => {
+                    // 模组上报 MTU 先落 UCI，随后的 ifup 一次性带上。
+                    let _ = net::apply_mtu(c, p.mtu);
                     // 不把网络配置失败压成 net:false：以 net_error 带出原因
                     match net::apply_after_dial(
                         c,
