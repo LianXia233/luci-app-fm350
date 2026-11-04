@@ -15,6 +15,17 @@ down/up 一次：该刷新来自 `daemon/dial.rs` → `V6Watch::maintain()`，
   且计时未推进，恢复后会立即补刷一次。
 - 单测：新增 `maintain_is_suppressed_while_downlink_unbound`。
 
+### CI 维护（Node.js 24 runtime）
+
+- `actions/checkout@v4` → `@v6`、`actions/upload-artifact@v4` → `@v6`，
+  消除 runner 把 node20 action 强制拉到 Node.js 24 的弃用告警。逐标签读取
+  `action.yml` 实测：`checkout@v5/v6`、`upload-artifact@v6/v7` 才声明
+  `runs.using: node24`，而 **`upload-artifact@v5` 仍是 node20**；
+  `actions-rust-lang/setup-rust-toolchain@v1` 是 composite，内部 pin 的
+  `Swatinem/rust-cache` 已是 node24，保持不变。
+- CI 新增「Action runtime 必须是 Node.js 24」门禁，扫描所有 workflow 的
+  `uses:` 行并拦截已知的 node20 主版本，防止后续改回旧引用。
+
 > 公网数据面仍需刷入 `firmware-29.23.24n_F31_mod` 的 atproxy 2.3.0
 > 固件包；插件侧无法代替模组内部完成 RNDIS / PDN 绑定。
 

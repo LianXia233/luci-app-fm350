@@ -25,7 +25,7 @@ jobs:
     # 双 SDK（SNAPSHOT→apk + 24.10.3→ipk）下载与编译耗时更长，超时放宽到 300 分钟
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 解析发布版本
         id: ver
@@ -79,7 +79,10 @@ jobs:
           FM350_WORK_DIR: ${{ runner.temp }}/fm350-release-sdk
         run: ./scripts/build-release.sh
 
-      - uses: actions/upload-artifact@v4
+      # upload-artifact 的 v5 仍声明 node20，必须到 v6 才是 node24。
+      # v6 起同名 artifact 不允许多次上传，本 job 每次发布只上传一次，
+      # 且 name 带 tag 唯一，行为不受影响。
+      - uses: actions/upload-artifact@v6
         with:
           name: luci-app-fm350-${{ steps.ver.outputs.tag }}
           path: dist-release/*

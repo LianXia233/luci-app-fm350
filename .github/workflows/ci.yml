@@ -13,6 +13,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Action runtime 统一声明 Node.js 24（action.yml 的 runs.using: node24）：
+# actions/checkout@v6、actions/upload-artifact@v6。注意 upload-artifact@v5
+# 仍声明 node20，只升一个主版本并不能消除告警；setup-rust-toolchain@v1 是
+# composite action，内部 pin 的 Swatinem/rust-cache 已是 node24，保持不变。
 jobs:
   # 静态门禁：不编译，只检查"提交里的事实"。每条断言都对应一类已经踩过的
   # 静默故障——它们共同的特点是"包能装、页面能开、就是不对"，靠肉眼测试
@@ -21,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: 行尾必须是 LF
         # 本仓库所有文本文件要求 LF。最典型的事故：Windows 上编辑过的
@@ -42,6 +46,26 @@ jobs:
           done < <(git ls-files)
           if [ "${bad}" != "0" ]; then exit 1; fi
           echo "已检查 $(git ls-files | wc -l) 个文件，CR 计数为 0"
+
+      - name: Action runtime 必须是 Node.js 24
+        # runner 自 2025-09 起把 node20 action 强制拉到 Node 24 并告警，
+        # node20 从 runner 移除后这些引用会直接失败。这里按各 action 的
+        # action.yml 实测结果列出已弃用主版本，防止后续改回旧引用。
+        # 只检查 uses: 行，注释里的历史版本号不参与匹配。
+        run: |
+          set -euo pipefail
+          old='((checkout|setup-node|cache|download-artifact)@v[1-4]|upload-artifact@v[1-5]|setup-python@v[1-5]|setup-go@v[1-5]|github-script@v[1-7])'
+          bad=0
+          for f in $(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml'); do
+            hits="$(grep -nE "^[[:space:]]*-[[:space:]]*uses:[[:space:]]*actions/${old}([[:space:]]|$)" "${f}" || true)"
+            if [ -n "${hits}" ]; then
+              echo "::error file=${f}::仍引用 Node.js 20 的 action"
+              echo "${hits}"
+              bad=1
+            fi
+          done
+          [ "${bad}" = "0" ] || exit 1
+          echo "Action runtime 检查通过：所有 workflow 引用均为 Node.js 24"
 
       - name: JSON 元数据可解析
         # 菜单注册与 ACL 都是 JSON，写错一个逗号 LuCI 会静默不显示菜单或拒绝
@@ -138,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
