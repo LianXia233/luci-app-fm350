@@ -9,6 +9,7 @@
   PCIE 禁用链路，以及 NCM 不可行的三重硬阻塞。
 - **更新** README「修改版固件」章节：补充 F31 29.23.24n AP + MD 自愈完整线刷包说明与核心结论摘要。
 - **更新** `docs/ARCHITECTURE_MIGRATION.md`：新增 §12 固件侧架构边界（AP/MD 双域分工、RNDIS 归属、AT 两层限速、NCM 硬阻塞）及其与 AT 调度器/事务的衔接。
+- **更新** `docs/RELEASE_NOTES_F27.md`：补充 RNDIS 域归属技术依据、与 F31 29.23.24n 分支的差异与版本判读、禁止跨分支混刷，以及 APN / AT 并发 / `dipc_config` 假砖 / NCM 四类已知限制的排查指引。
 - **固件交付**：`firmware-29.23.24n_F31_mod` Release 替换为完整线刷包（15 个分区镜像 +
   `Scatter.xml` + `download_agent/`），移除 `F31_29.23.24n_MOD_AP.zip`，`SHA256SUMS` 同步重算。
 
