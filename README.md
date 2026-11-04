@@ -117,6 +117,29 @@ rm -rf /tmp/luci-modulecache/
 
 未刷修改固件的设备上，本插件功能完全可用（EIF 增强为可选，见下文「EIF 兜底加速」）。
 
+### F31 29.23.24n 完整线刷包与 RNDIS 逆向分析
+
+除上述 F27 发布外，本项目还提供基于官方 `F31_29.23.24n` 的 **AP + MD 自愈完整线刷包**
+（Release tag `firmware-29.23.24n_F31_mod`）。该包包含 `Scatter.xml`、
+`download_agent/`（DA / auth / flash.xml）及全部 15 个分区镜像，文件名与分区表逐一对应，
+可直接由 SP Flash Tool 加载；`DEV_OTA.img` 为 8 MiB 空白 YAFFS 分区镜像。
+modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
+
+完整的逆向分析（证据链、内核配置、md1rom 容器解析、APN 数据库审计）见
+**[docs/RNDIS-Analysis-Report.md](docs/RNDIS-Analysis-Report.md)**。核心结论：
+
+| 结论 | 依据 |
+| :--- | :--- |
+| RNDIS 由 **MD 域**创建，AP 内核无 RNDIS / ECM / NCM | AP 内核 `IKCFG_ST` 中 `CONFIG_USB_CONFIGFS_RNDIS/NCM/ECM` 全部未启用；`usb.init` 只挂 `ffs.adb` / `acm.gs0..3` / `mass_storage`；`modem.img` 内含 `middleware/hif/usbclass/rndis/*` 完整实现 |
+| 主机侧 `AT+EMBIND` 无效 | 外部 AT 经 USB ACM → atcid → MIPC 到达 MD，缺少「模组内部、PDN 已激活」的上下文；须由 `atproxy` 在模组内部下发 |
+| 原厂国内 APN 库有缺陷 | 14 个中国号段中 0 个带正确 `ia` APN，46015（广电）文件缺失；本版补齐 `cmnet` / `cmiot` / `cmiot5g` / `3gnet` / `ctnet` / `cbnet`，IMS cid 收窄为 20 |
+| AT 并发会拖垮数据面 | 多路并发灌入 `/dev/atci-service` 会卡死 MD 的 atcid 解析任务；`atproxy` 独占通道、单 worker 串行、硬性 ≥25 ms 间隔、优先级队列上限 64 |
+| `dipc_config` 缺失会导致「假砖」 | 缺 `dual_ipc_mode` 时 `usb.init` 走 NO USB 分支直接退出；`mdcfg` 在 S005 补最小配置，`pcieoff` 强制 `dual_ipc_mode:4`（USB only） |
+| NCM 暂不可行 | 三重硬阻塞：AP 内核无 NCM / TUN / NAT、MD 侧 `usbclass/` 无 NCM 类、md1rom 为签名容器无法安全注入；维持 M-RNDIS 是正路 |
+
+> 刷入前请先核对 Release 附件的 `SHA256SUMS` 并备份 IMEI / SN；固件含 USB 通道调试用的
+> 免认证 ADB 与空密码 SSH，模组 USB 口请勿接入不受信任的主机。
+
 ## 界面预览
 
 截图取自真实设备（ImmortalWrt SNAPSHOT + FM350-GL，Aurora 主题），每页自上而下整页分段截取。涉及身份、链路与基站位置的字段在截图**之前**替换为 `[已脱敏]`：IMEI、序列号、IMSI、ICCID、短信中心、蜂窝 IPv4/IPv6 与 DNS、小区 ID（ECI/NCI）、LAC/TAC、PCI、频点 ARFCN。保留公开的频谱与信号质量指标（接入制式、频段、带宽、RSRP/RSRQ/SINR、模组温度）与设备节点，它们不含位置信息。

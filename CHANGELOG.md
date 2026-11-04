@@ -2,6 +2,15 @@
 
 本项目遵循语义化版本号。
 
+## 文档与固件交付 (2026-11-04)
+
+- **新增** `docs/RNDIS-Analysis-Report.md`：FM350 / F31 29.23.24n 逆向分析全文，覆盖 RNDIS 域归属证据链、
+  AP 内核 gadget 能力、md1rom 签名容器结构、国内四大运营商 APN 审计、`atproxy` AT 网关与
+  PCIE 禁用链路，以及 NCM 不可行的三重硬阻塞。
+- **更新** README「修改版固件」章节：补充 F31 29.23.24n AP + MD 自愈完整线刷包说明与核心结论摘要。
+- **固件交付**：`firmware-29.23.24n_F31_mod` Release 替换为完整线刷包（15 个分区镜像 +
+  `Scatter.xml` + `download_agent/`），移除 `F31_29.23.24n_MOD_AP.zip`，`SHA256SUMS` 同步重算。
+
 ## 1.2.0-r1 (2026-11-04)
 
 本版以 **AT 优先级调度器**、**异步任务管理**、**优雅关闭** 与 **RPC/前端
