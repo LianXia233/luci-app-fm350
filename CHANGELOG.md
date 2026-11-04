@@ -2,6 +2,22 @@
 
 本项目遵循语义化版本号。
 
+## 1.2.0-r4 (2026-11-04)
+
+补齐 r3 未覆盖的 IPv6 维护工位。实机复核（PID 633）确认 r3 的
+`net_guard` / `data_guard` 抑制已生效，但 `fm350v6` 仍每约 40 秒
+down/up 一次：该刷新来自 `daemon/dial.rs` → `V6Watch::maintain()`，
+不在两个 Guard 的抑制范围内。
+
+- **新增 `V6Watch::set_downlink_unbound()` 与纯函数 `maintain_allowed()`**：
+  守护主循环把上一轮 `DataGuard` 的未绑定结论注入拨号巡检，未绑定时
+  `maintain()` 提前返回，不再刷新 `fm350v6`；任意下行帧出现即解除抑制，
+  且计时未推进，恢复后会立即补刷一次。
+- 单测：新增 `maintain_is_suppressed_while_downlink_unbound`。
+
+> 公网数据面仍需刷入 `firmware-29.23.24n_F31_mod` 的 atproxy 2.3.0
+> 固件包；插件侧无法代替模组内部完成 RNDIS / PDN 绑定。
+
 ## 1.2.0-r3 (2026-11-04)
 
 配套 F31 固件 atproxy 2.3.0，修复「PDP 与地址都正常、网口却没有下行帧」

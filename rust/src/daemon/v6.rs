@@ -50,6 +50,16 @@ pub const V6_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 /// 每分钟弹一次。从未见过 v6 时判定为环境如此，拉长到 30 分钟只做兜底。
 pub const V6_SILENT_RECOVERY_INTERVAL: Duration = Duration::from_secs(1800);
 
+/// 模组侧 RNDIS 未绑定到 PDN 时是否允许 IPv6 维护。
+///
+/// 网口只有上行帧、`rx_packets` 恒 0，RA / DHCPv6 不可能拿到应答；此时
+/// `ifup fm350v6` 只是无效自愈，还会让 netifd 每约 40 s down/up 一次并
+/// 连带 hotplug 重收敛。纯函数形式便于单测；数据面恢复后置回 false，
+/// `maintain()` 的计时未推进，会立即补刷一次。
+pub fn maintain_allowed(downlink_unbound: bool) -> bool {
+    !downlink_unbound
+}
+
 /// IPv6 维护的跨轮状态。
 pub struct V6Watch {
     /// 上次执行恢复刷新的时刻（`None` = 从未执行过，首轮视为到期）。
@@ -64,6 +74,8 @@ pub struct V6Watch {
     modem_seen: bool,
     /// 是否在接口侧观察到过 v6。
     net_seen: bool,
+    /// 数据面已确认「模组侧 RNDIS 未绑定」：此时 IPv6 维护是无效自愈。
+    downlink_unbound: bool,
 }
 
 impl Default for V6Watch {
@@ -75,6 +87,7 @@ impl Default for V6Watch {
             last_modem_ipv6: String::new(),
             modem_seen: false,
             net_seen: false,
+            downlink_unbound: false,
         }
     }
 }
@@ -82,6 +95,16 @@ impl Default for V6Watch {
 impl V6Watch {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 由守护主循环按上一轮 `DataGuard` 的判据逐轮注入。
+    pub fn set_downlink_unbound(&mut self, v: bool) {
+        self.downlink_unbound = v;
+    }
+
+    /// 当前是否处于「未绑定」抑制态（测试与诊断用）。
+    pub fn downlink_unbound(&self) -> bool {
+        self.downlink_unbound
     }
 
     /// 记录模组侧上报的 IPv6（用于「是否见过 v6」的分级）。
@@ -139,6 +162,11 @@ impl V6Watch {
     ///
     /// 仅在「模组侧管理 v6」且 PDN 不是纯 IPv4 时调用（调用方负责前置判断）。
     pub fn maintain(&mut self, cfg: &Config, st: &PdpState, ns: &NetStatus) {
+        // 模组侧未绑定时下行帧为零，RA / DHCPv6 不可能成功；此时刷新
+        // fm350v6 只是无效自愈，还会让 netifd 每约 40 s down/up 一次。
+        if !maintain_allowed(self.downlink_unbound) {
+            return;
+        }
         if !net::v6_managed(cfg) {
             return;
         }
@@ -290,5 +318,18 @@ mod tests {
         assert_eq!(w.recovery_interval(), V6_SILENT_RECOVERY_INTERVAL);
         w.note_modem("2408::1");
         assert_eq!(w.recovery_interval(), V6_REFRESH_MIN_INTERVAL);
+    }
+
+    /// 模组侧未绑定时 IPv6 维护必须停手，出现下行后立即解除。
+    #[test]
+    fn maintain_is_suppressed_while_downlink_unbound() {
+        assert!(maintain_allowed(false));
+        assert!(!maintain_allowed(true));
+        let mut w = V6Watch::new();
+        assert!(maintain_allowed(w.downlink_unbound()));
+        w.set_downlink_unbound(true);
+        assert!(!maintain_allowed(w.downlink_unbound()));
+        w.set_downlink_unbound(false);
+        assert!(maintain_allowed(w.downlink_unbound()));
     }
 }

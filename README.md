@@ -170,7 +170,9 @@ modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
 
 插件侧 1.2.0-r3 增加 `net::downlink_unbound()`：连续 3 轮「主动发包、TX 增长、
 `rx_packets` 恒为 0」判定模组侧未绑定，此时停止 `net_guard` 的接口重建/重拨与
-`data_guard` 的 USB 复位分级，避免每 40 秒的 `fm350v6` 抖动；出现下行即解除。
+`data_guard` 的 USB 复位分级；出现下行即解除。实机复核发现该抑制未覆盖
+`V6Watch::maintain()`，`fm350v6` 仍每约 40 秒 down/up 一次，故 1.2.0-r4 把
+未绑定结论同时注入拨号巡检，未绑定时跳过 IPv6 维护，消除该抖动。
 
 固件改动**必须用 SP Flash Tool 重新线刷**才能生效。刷后建议依次核对：
 `atproxy -V`（应为 2.3.0）、`atproxy status`（`bound=1`、`cid=1`）、

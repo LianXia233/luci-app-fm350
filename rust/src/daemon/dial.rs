@@ -74,7 +74,16 @@ impl DialWatch {
     }
 
     /// 一轮拨号巡检。`v6` 由调用方跨轮持有，IPv6 的时机判定不在这里。
-    pub fn tick(&mut self, at: &AtHandle, cfg: &Config, v6: &mut V6Watch) {
+    /// `downlink_unbound` 是上一轮数据面结论（主循环先于本段读取）。
+    pub fn tick(
+        &mut self,
+        at: &AtHandle,
+        cfg: &Config,
+        v6: &mut V6Watch,
+        downlink_unbound: bool,
+    ) {
+        // 模组侧未绑定时跳过 IPv6 维护，避免 netifd 周期性抖动。
+        v6.set_downlink_unbound(downlink_unbound);
         if !cfg.enabled {
             return;
         }

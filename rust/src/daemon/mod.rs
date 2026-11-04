@@ -148,6 +148,10 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
         // 地址类事件会置起加速标志，让本轮末尾的睡眠压到秒级。
         w.6.tick(&cfg);
 
+        // 数据面判据由上一轮 DataGuard 产出；本段先消费它，未绑定时
+        // 拨号巡检会跳过 IPv6 维护，避免 netifd 每约 40 s 抖动一次。
+        let unbound_prev = w.2.downlink_unbound();
+
         // —— 阻塞段 1：拨号巡检 + IPv6（AT + shell）——
         {
             let at1 = Arc::clone(&at);
@@ -156,7 +160,7 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
             let (d, v) = rt::blocking_scope(move || {
                 let mut d = d;
                 let mut v = v;
-                d.tick(&at1, &c1, &mut v);
+                d.tick(&at1, &c1, &mut v, unbound_prev);
                 (d, v)
             })
             .await?;
