@@ -206,6 +206,28 @@ pub fn data_plane_stalled(prev: &DataHealth, cur: &DataHealth) -> bool {
     struggling || frozen
 }
 
+/// 判定「模组侧 RNDIS 未绑定」形态：**主机确实在发包，却从未收到任何下行帧**。
+///
+/// 与 [`data_plane_stalled`] 的区别：stall 是主机 USB 端点卡死（TX 发不出去，
+/// `tx_errors` 涨或 TX 冻结）；本判据是 TX 稳定增长、`tx_errors` 不动，但
+/// `rx_packets` 恒为 0 —— 帧已经送到模组，MD 侧没有把 PDN 绑定到 RNDIS
+/// 实例上。逆向 `modem.img` 可见 D2RM 绑定状态机（`state = bind, ignore`、
+/// `action_going`、`can not bind, drop`），绑定结果由 `+EMBIND: %d` URC 上报。
+///
+/// 这类故障在主机侧无解：重建接口、去激活重拨、复位 USB 端点都不触碰 MD
+/// 内部绑定，实机表现为 `net_guard` 反复升级、`fm350v6` 每 40 秒刷新却始终
+/// 无下行。必须由固件侧 `atproxy` 在模组内部下发 `AT+EMBIND`。
+///
+/// 判据要求 `cur.probe_sent`（本轮确实主动发过一个探测包）且连续两轮
+/// `rx_packets == 0`，避免把空闲链路误判为未绑定；一旦出现任何下行帧即解除。
+pub fn downlink_unbound(prev: &DataHealth, cur: &DataHealth) -> bool {
+    cur.probe_sent
+        && cur.rx_packets == 0
+        && prev.rx_packets == 0
+        && cur.tx_packets > prev.tx_packets
+        && cur.tx_errors <= prev.tx_errors
+}
+
 // ---------------------------------------------------------------- 公网连通性
 
 /// IPv4 连通性探测目标（任一可达即判定该栈连通）。
@@ -326,5 +348,46 @@ mod tests {
         assert!(!DATA_DRIVERS.iter().any(|d| d.contains("ccmni")));
         assert!(DATA_DRIVERS.contains(&"rndis_host"));
         assert!(DATA_DRIVERS.contains(&"cdc_ether"));
+    }
+}
+
+#[cfg(test)]
+mod downlink_tests {
+    use super::{downlink_unbound, DataHealth};
+
+    fn h(rx: u64, tx: u64, err: u64, sent: bool) -> DataHealth {
+        DataHealth {
+            rx_packets: rx,
+            tx_packets: tx,
+            tx_errors: err,
+            probe_sent: sent,
+        }
+    }
+
+    #[test]
+    fn unbound_when_tx_grows_without_any_rx() {
+        let prev = h(0, 100, 0, true);
+        let cur = h(0, 108, 0, true);
+        assert!(downlink_unbound(&prev, &cur));
+    }
+
+    #[test]
+    fn any_rx_clears_unbound() {
+        let prev = h(0, 100, 0, true);
+        let cur = h(3, 108, 0, true);
+        assert!(!downlink_unbound(&prev, &cur));
+        let prev2 = h(7, 100, 0, true);
+        let cur2 = h(7, 108, 0, true);
+        assert!(!downlink_unbound(&prev2, &cur2));
+    }
+
+    #[test]
+    fn idle_and_stall_are_not_unbound() {
+        // 空闲：本轮没主动发包
+        assert!(!downlink_unbound(&h(0, 100, 0, true), &h(0, 108, 0, false)));
+        // TX 冻结（端点 stall 形态 B），交给 data_plane_stalled
+        assert!(!downlink_unbound(&h(0, 100, 0, true), &h(0, 100, 0, true)));
+        // tx_errors 增长（端点 stall 形态 A）
+        assert!(!downlink_unbound(&h(0, 100, 3, true), &h(0, 108, 9, true)));
     }
 }

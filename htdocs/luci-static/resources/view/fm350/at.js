@@ -72,7 +72,11 @@ var PRESET_GROUPS = [
 			   （IM_CN_Signalling_Flag=1）。
 			   注意：实机 `AT+CGPADDR?` 读形式不支持（+CME ERROR: 5378），
 			   查询地址一律用手册定义的执行形式 `AT+CGPADDR=<cid>`。 */
-			{ label: _('查询 IP 地址与承载参数'), cmd: 'AT+CGCONTRDP=1' }
+			{ label: _('查询 IP 地址与承载参数'), cmd: 'AT+CGCONTRDP=1' },
+			/* 厂商私有命令，AT 手册未收录。实机证实主机侧查询只读到标志位：
+			   外部 AT 下发 AT+EMBIND=1,"M-RNDIS",1 虽回 OK，MD 内部 RNDIS
+			   实例并未绑定（RX 恒 0）。此处仅供观测，不能当作绑定成功判据。 */
+			{ label: _('RNDIS 绑定标志位（仅观测）'), cmd: 'AT+EMBIND?' }
 		]
 	},
 	{

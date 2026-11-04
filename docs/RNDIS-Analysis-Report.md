@@ -617,3 +617,113 @@ done
 ```
 
 正常只应看到 atproxy 自己（以及 atci_service 自身）。多出来的进程就是绕过限速的那一路。
+
+---
+
+## 附录：全镜像逆向与 MD 域 D2RM 绑定状态机（2026-11-04 补充）
+
+### A.1 取证范围与方法
+
+对 Release `firmware-29.23.24n_F31_mod` 的线刷包内全部 20 个文件做魔数识别与
+字符串取证；`root.squashfs` 用 `unsquashfs` 解出 1887 个文件后单独扫描关键组件；
+`modem.img` 用 `tools/md1rom.py` 解析 md1rom / MMM 容器（头部 `0x88168858`，
+2 个块：`FILE_INFO` + `MT6880_DTC_FM350` 主体 33,554,736 B）。
+
+| 镜像 | 大小 | 魔数 | `EMBIND` 等关键字 |
+| :--- | ---: | :--- | :--- |
+| `modem.img` | 49,892,512 | `md1rom` / `0x88168858` | `EMBIND` 4、`M-RNDIS` 2、`D2RM` 210、`bind cnf` 3、`dipc_config` 7、`AT+EIF` 12 |
+| `root.squashfs` | 20,127,744 | `hsqs` | 容器内 `atproxy` / `atci_service` / `mtk_netagent` 含绑定相关字符串 |
+| `boot.img` | 6,104,704 | `ANDROID!` | 零命中（压缩） |
+| `lk.img` / `dsp.bin` / `dpm.img` / `tee.img` / `sspm.img` / `mcupm.img` / `spmfw.img` / `loader_ext.img` / `preloader_*.bin` | — | MTK 签名头 | 零命中（压缩或纯引导代码） |
+| `DEV_OTA.img` | 8,388,608 | 全 `0xFF` | 空白 YAFFS 分区 |
+
+结论：**RNDIS 绑定逻辑完全在 MD 域 `modem.img`**；AP 域没有可注入的绑定实现，
+主机侧也不存在可绕过模组的替代路径。
+
+### A.2 `+EMBIND` 命令与 URC 语义
+
+```
+0x1691C1C   +EMBIND                 # URC / 命令名表
+0x16801C0   embind                  # 小写命令名表（AT 表存小写再拼 AT+）
+0x16A70B0   +EMBIND: %d             # 绑定结果 URC：%d 为 rc，0=成功
+0x16A70BC   ,"M-CCMNI",%d
+0x16A70CC   ,"M-RNDIS",%d
+0x16A70DC   ,"M-MBIM",%d
+0x16A70EC   ,"M-LHIF",%d
+0x16A7124   +EMBIND: (0,1),(list of supported <L2P>s),(1-16)   # 测试命令响应
+```
+
+- `AT+EMBIND=<state>,"<L2P>",<cid>` 的 `<state>` 只有 0（解绑）/ 1（绑定），
+  `<cid>` 合法范围 1-16，所以固定数据 cid=1 是合法的。
+- MD 域内 **`GTEMBIND` 零命中**。旧 `atproxy` 同时解析 `+GTEMBIND:` 与
+  `+EMBIND:` 只是兼容其它分支，不影响本固件。
+- 绑定结果是**异步 URC**，不是同步 `OK`。`atproxy` 2.2.0 的
+  `rx_has_final()` 只认 `OK` / `ERROR` / `+CME ERROR` / `+ATPROXY:`，
+  因此「只回 URC」的形态必然 4 s 超时（`rc=-2`），`do_bind()` 直接判失败。
+
+### A.3 D2RM 状态机（`protocol/ddm/d2/src/d2rm/d2rm_db.c`，0x1624000 区）
+
+```
+[D2RM_DB_ERROR] bind cnf fail, rat = %d, err = %d
+bind, invalid rat / unbind, receive bind cnf / invalid action
+M-RNDIS | M-VNIF | M-MBIM | M-CCMNI
+[D2RM_DB_ERROR] unbind cnf fail, rat = %d, err = %d
+can not bind / action_going / action_todo
+[D2RM_DB_DEBUG] something is on-going
+state = bind, ignore          <- 已绑定时重复 bind 被静默忽略
+invalid interface, drop / invalid rat, drop
+state = binding, wait         <- 异步确认未回时后续 bind 只排队
+state = unbinding, wait / state = unbind, do bind
+can not bind, drop / invalid state, drop
+can't find cid_info
+[D2RM_DB_DEBUG] test req - bind / unbind / rebind / notify / dump
+```
+
+状态机解释实机的两种现象：
+
+1. `bound=0, attempts=0`：`atproxy` 2.2.0 因配置未加载 + `AT+CGACT?` 裸 `OK`，
+   `resolve_cid()` 永远返回 0，从不下发绑定命令。
+2. 写入 `cid=1` 后每次「绑定命令无响应（rc=-2）」：命令已下发，但 MD 侧
+   要么处于 `binding` 等待中、要么只回 URC 不回 OK，被 `at_xfer` 判超时。
+
+`state = bind, ignore` 与 `action_going` 说明盲目重复下发 `bind` 会被丢弃，
+必须先 `unbind` 把状态机清出来 —— 这是 2.3.0 双阶段绑定的依据。
+
+### A.4 AP 侧 AT 通道拓扑（补充 §2）
+
+```
+主机 USB ACM (ttyGS0) ─┐
+                       ├─> atcid ──MIPC──> MD AT 引擎 / D2RM
+atproxy ─> /dev/atci-service (atci_service 普通连接) ─┘
+atci_service framework connection (Android framework 通道，本分支可能空缺)
+adbd_usb ─> /dev/adb_atci_socket ─> atcid
+mtk_netagent ─> /dev/radio/pttynwcmd (AT+EIF=... 配置 ccmni0..5)
+```
+
+`atci_service` 的字符串明确区分 `atci: new atci-service connection` 与
+`atci: new atci-service framework connection`，并各有独立的 server socket 线程；
+`atcid` 另有 `sendDataToRild` / `sendDataToGenericService` / `sendDataToAudio` /
+`sendDataToMeta` 多路路由，**普通通道与 framework 通道的 AT 上下文并不等价**。
+这解释了「主机侧下发 `AT+EMBIND=1,"M-RNDIS",1` 返回 OK、`AT+EMBIND?` 变 1，
+但 `eth2` 的 `rx_packets` 恒为 0」：只改了标志位，MD 内部 RNDIS 实例未绑定。
+
+### A.5 对固件与插件改动的指导
+
+| 层 | 改动 | 依据 |
+| :--- | :--- | :--- |
+| 固件 `init.d/atproxy` | 传 `-c /etc/config/atproxy` | 2.2.0 默认只读 `/etc/atproxy.conf` |
+| 固件 `config/atproxy` | `cid=1`、`dial_enabled=0`、`bind_reset=1` | `CGACT?` 裸 OK；拨号交给插件；避开状态机 ignore |
+| 固件 `atproxy.c` | `+EMBIND:` URC 视为终态、超时原始字节日志、CGPADDR 兜底、unbind→bind | A.2 / A.3 |
+| 插件 `net/probe.rs` | `downlink_unbound()`：TX 增长且 RX 恒 0 | 实机 `eth2` 计数器 + A.1 结论 |
+| 插件 `daemon/guard.rs` | 未绑定时抑制 `net_guard` / `data_guard` 自愈 | 主机侧动作不触及 MD 绑定 |
+
+### A.6 遗留项
+
+- 模组软重启后 ADB 停在 `offline`：`usb.init` 的 `enable_adb()`（挂载
+  functionfs、链接 `ffs.adb`、拉起 `adbd_usb`）只在开机 boot 分支调用，
+  USB 重新枚举后未重跑。后续可在 `start_usb.sh` 加 adbd 存活看护。
+- 主机侧 `AT+CGACT=0/1` 被拒（`+CME ERROR: 54015 / 5702`），这两个错误码
+  在 `modem.img` 字符串里未出现，属 MD 内部数值错误码，需抓取 MD trace 才能
+  进一步定位。
+- 2.3.0 修复的是**确定性的配置加载、cid 解析与 URC 判据**；若线刷后内部
+  atci 通道仍完全无响应，A.4 的 framework 通道是下一个排查方向。

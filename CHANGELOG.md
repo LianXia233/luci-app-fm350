@@ -2,6 +2,33 @@
 
 本项目遵循语义化版本号。
 
+## 1.2.0-r3 (2026-11-04)
+
+配套 F31 固件 atproxy 2.3.0，修复「PDP 与地址都正常、网口却没有下行帧」
+时插件侧仍在无效自愈的问题。依据对 `modem.img`（MD 域）的逆向：绑定结果
+由 `+EMBIND: %d` URC 上报，D2RM 状态机存在 `state = bind, ignore` /
+`action_going` / `can not bind, drop`，属于模组内部状态，主机侧无法修复。
+
+### 数据面判据
+
+- **新增 `net::downlink_unbound()`**：连续 3 轮「本轮主动发过探测包、TX 增长、
+  `tx_errors` 不动、`rx_packets` 恒为 0」判定模组侧 RNDIS 未绑定。与原有
+  `data_plane_stalled()`（USB 端点 TX 发不出去）互斥，覆盖第三种故障形态。
+- **抑制无效自愈**：处于未绑定状态时 `DataGuard` 跳过 USB 复位/重拨分级，
+  `NetGuard` 跳过整轮接口重建与双栈重拨，避免实机 `fm350v6` 每约 40 秒
+  被刷新一次；任意下行帧出现即自动解除抑制。告警按 300 s 冷却，不刷屏。
+
+### AT 终端
+
+- 「PDP 与路由」新增 `AT+EMBIND?`，标注「仅观测」。实机验证：主机侧下发
+  `AT+EMBIND=1,"M-RNDIS",1` 返回 OK、查询变 1，但 `eth2` 的 RX 仍恒为 0，
+  故该值不能作为绑定成功判据；真正的绑定必须由固件 atproxy 在模组内部完成。
+
+### 测试
+
+- 新增 3 项 `downlink_unbound` 单测：未绑定形态、出现下行即解除、空闲与
+  TX stall 形态不误判。
+
 ## 1.2.0-r2 (2026-11-04)
 
 依据 Fibocom《FM350 AT Commands User Manual V2.10》§12.2.1 / §12.2.5 /
@@ -51,6 +78,14 @@
 - **更新** `docs/RELEASE_NOTES_F27.md`：补充 RNDIS 域归属技术依据、与 F31 29.23.24n 分支的差异与版本判读、禁止跨分支混刷，以及 APN / AT 并发 / `dipc_config` 假砖 / NCM 四类已知限制的排查指引。
 - **固件交付**：`firmware-29.23.24n_F31_mod` Release 替换为完整线刷包（15 个分区镜像 +
   `Scatter.xml` + `download_agent/`），移除 `F31_29.23.24n_MOD_AP.zip`，`SHA256SUMS` 同步重算。
+- **MD 域全镜像逆向**：对线刷包 20 个镜像 + AP rootfs 1887 个文件做字符串取证，
+  确认绑定逻辑只在 `modem.img`；`docs/RNDIS-Analysis-Report.md` 新增附录
+  （`+EMBIND` URC 语义、D2RM 异步状态机、AP 侧普通/framework 双 AT 通道、
+  `usb.init` 的 ADB 遗留项），README「修改版固件」章节同步。
+- **固件 atproxy 2.3.0**：修复 init 未传 `-c` 导致 UCI 配置全部落空、固定数据
+  cid=1、`CGACT?` 裸 OK 用 `CGPADDR` 兜底、`+EMBIND:` URC 视为终态、超时打印
+  原始字节、绑定失败先解绑再重绑；重打包 `F31_29.23.24n_MOD_AP_MD.zip` 与
+  `fm350-mod-src.tar.gz`，`SHA256SUMS` 同步重算。固件需重新线刷生效。
 
 ## 1.2.0-r1 (2026-11-04)
 

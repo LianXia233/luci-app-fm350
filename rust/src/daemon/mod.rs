@@ -177,7 +177,9 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
                 let mut netg = netg;
                 conflict.tick(&c2);
                 data.tick(&at2, &c2);
-                let purified = netg.tick(&at2, &c2);
+                // 先取数据面结论再跑连通性巡检：模组侧未绑定时抑制无效自愈。
+                let unbound = data.downlink_unbound();
+                let purified = netg.tick(&at2, &c2, unbound);
                 (conflict, data, netg, purified, route_fixed)
             })
             .await?;

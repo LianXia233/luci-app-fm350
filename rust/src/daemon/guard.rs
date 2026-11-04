@@ -43,6 +43,10 @@ pub const NET_GUARD_COOLDOWN: Duration = Duration::from_secs(300);
 /// 配置，最小 1。
 pub const DATA_GUARD_MIN_ROUNDS: u32 = 1;
 
+/// 连续多少轮「TX 在涨、RX 恒 0」才判定模组侧 RNDIS 未绑定。
+/// 单轮可能是网卡刚枚举或探测包未发出，必须累计。
+pub const DOWNLINK_UNBOUND_ROUNDS: u32 = 3;
+
 // ---------------------------------------------------------------- 数据面
 
 /// 数据面健康巡检状态。
@@ -55,6 +59,12 @@ pub struct DataGuard {
     recover_level: u32,
     /// 上次执行恢复动作的时刻。
     last_recover: Option<Instant>,
+    /// 连续判定「模组侧未绑定」的轮数。
+    unbound_rounds: u32,
+    /// 当前是否处于「模组侧未绑定」状态（供 net_guard 抑制无效自愈）。
+    unbound: bool,
+    /// 上次打印未绑定告警的时刻，避免每轮刷日志。
+    last_unbound_warn: Option<Instant>,
 }
 
 impl Default for DataGuard {
@@ -64,6 +74,9 @@ impl Default for DataGuard {
             last_health: None,
             recover_level: 0,
             last_recover: None,
+            unbound_rounds: 0,
+            unbound: false,
+            last_unbound_warn: None,
         }
     }
 }
@@ -79,6 +92,11 @@ impl DataGuard {
             return;
         }
         let healthy = self.observe(cfg);
+        // 模组侧 RNDIS 未绑定属于 MD 内部状态机问题，主机侧复位端点 /
+        // 重拨 / 重建接口都不对症，跳过自愈分级，只保留观测。
+        if self.unbound {
+            return;
+        }
         if healthy {
             return;
         }
@@ -109,6 +127,26 @@ impl DataGuard {
             return true;
         };
         self.last_health = Some(cur);
+
+        let was_unbound = self.unbound;
+        if net::downlink_unbound(&prev, &cur) {
+            self.unbound_rounds += 1;
+        } else {
+            self.unbound_rounds = 0;
+        }
+        self.unbound = self.unbound_rounds >= DOWNLINK_UNBOUND_ROUNDS;
+        if self.unbound {
+            if !was_unbound || cooled(self.last_unbound_warn, RECOVER_COOLDOWN) {
+                warnf!(format_args!(
+                    "数据面连续 {} 轮只有上行没有下行（TX 增长、RX 恒 0）：模组侧 RNDIS 未绑定到 PDN，主机侧自愈无效；需固件 atproxy 在模组内部下发 AT+EMBIND",
+                    self.unbound_rounds
+                ));
+                self.last_unbound_warn = Some(Instant::now());
+            }
+        } else if was_unbound {
+            infof!(format_args!("模组侧下行已恢复，解除未绑定抑制"));
+        }
+
         let stalled = net::data_plane_stalled(&prev, &cur);
         if stalled {
             self.stall_rounds += 1;
@@ -119,6 +157,11 @@ impl DataGuard {
             self.recover_level = 0;
         }
         !stalled
+    }
+
+    /// 模组侧 RNDIS 是否未绑定（`net_guard` 据此跳过无效重建与重拨）。
+    pub fn downlink_unbound(&self) -> bool {
+        self.unbound
     }
 
     /// 执行下一级自愈动作。
@@ -201,8 +244,14 @@ impl NetGuard {
     }
 
     /// 一轮双栈连通性巡检；返回本轮是否进入净化态，供拨号巡检同步启动退避。
-    pub fn tick(&mut self, at: &AtHandle, cfg: &Config) -> bool {
+    pub fn tick(&mut self, at: &AtHandle, cfg: &Config, unbound: bool) -> bool {
         if !cfg.net_guard || !cfg.enabled {
+            return false;
+        }
+        // 模组侧 RNDIS 未绑定时，ping 必然失败但根因不在主机侧：跳过本轮
+        // 连通性巡检，避免 net_guard 反复 ifup / 重拨（实机 fm350v6 每
+        // 约 40 秒被重建一次）。RX 一旦出现即自动恢复巡检。
+        if unbound {
             return false;
         }
         let Some(dev) = net::detect_dev(cfg) else {

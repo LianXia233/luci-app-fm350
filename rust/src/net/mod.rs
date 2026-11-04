@@ -51,7 +51,7 @@ pub use iface::{
 };
 pub use probe::{
     check_connectivity4, check_connectivity6, data_health, data_plane_stalled, detect_dev,
-    foreign_ifaces_on_dev, DataHealth,
+    downlink_unbound, foreign_ifaces_on_dev, DataHealth,
 };
 pub use shell::{failed, real, sh, uci, uci_batch, RunMode};
 pub use v6::{

@@ -137,6 +137,46 @@ modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
 | `dipc_config` 缺失会导致「假砖」 | 缺 `dual_ipc_mode` 时 `usb.init` 走 NO USB 分支直接退出；`mdcfg` 在 S005 补最小配置，`pcieoff` 强制 `dual_ipc_mode:4`（USB only） |
 | NCM 暂不可行 | 三重硬阻塞：AP 内核无 NCM / TUN / NAT、MD 侧 `usbclass/` 无 NCM 类、md1rom 为签名容器无法安全注入；维持 M-RNDIS 是正路 |
 
+### atproxy 2.3.0 与 MD 域绑定状态机（2026-11-04 逆向补充）
+
+把线刷包内 20 个镜像全部解包做字符串取证后可以确定：`AT+EMBIND` 相关逻辑
+**只存在于 `modem.img`（MD 域）**；`boot.img`、`lk.img`、`dsp.bin`、`dpm.img`、
+`tee.img`、`sspm.img`、`preloader` 等均零命中。AP 侧 `root.squashfs` 里只有转发
+与接口管理组件（`atci_service` / `atcid` / `mtk_netagent` / `adbd_usb`）。
+
+| 逆向证据（`modem.img` 偏移） | 结论 |
+| :--- | :--- |
+| `0x16A70B0` `+EMBIND: %d`；`0x16A7124` `+EMBIND: (0,1),(list of supported <L2P>s),(1-16)` | 绑定结果由 URC 上报，第 1 参数是 0/1（解绑/绑定），cid 合法范围 1-16；`+GTEMBIND` 在该分支**零命中** |
+| `0x16A70BC..EC` `,"M-CCMNI",%d` / `,"M-RNDIS",%d` / `,"M-MBIM",%d` / `,"M-LHIF",%d` | 支持四种 L2P；`M-VNIF` 另见于 D2RM 状态机 |
+| `0x1624000` 区 `protocol/ddm/d2/src/d2rm/d2rm_db.c` | 绑定是**异步确认制**状态机：`state = bind, ignore`、`state = binding, wait`、`action_going` / `something is on-going`、`can not bind, drop`、`can't find cid_info`、`bind cnf fail, rat=%d, err=%d` |
+| `0x1691C1C` `+EMBIND`（URC 名表）、`0x16801C0` `embind`（小写命令名表） | 命令确实注册在 MD 域；`AT+EMBIND` 全串零命中是因为 AT 表存小写名再拼 `AT+` 前缀 |
+| AP `atci_service`：普通 `/dev/atci-service` + `atci: new atci-service framework connection` | 存在两条 AT 通道；framework 通道在本分支的 OpenWrt-like AP 域可能空缺，外部 AT 与内部绑定上下文不同 |
+| AP `usb.init` 的 `enable_adb()` 只在开机 boot 分支调用 | 模组软重启 / USB 重新枚举后 ffs.adb 端点未重建，可解释实机 ADB 停在 `offline` |
+
+据此发布的 **atproxy 2.3.0**（与插件 1.2.0-r3 配套）：
+
+1. `init.d/atproxy` 显式传 `-c /etc/config/atproxy`——2.2.0 只读默认的
+   `/etc/atproxy.conf`，导致 UCI 配置里的 `cid` / `boot_delay` / `dial_enabled`
+   全部落空。
+2. 固定数据 `cid=1`（该固件 `AT+CGACT?` 只回裸 `OK`，自动挑选永远返回 0）；
+   `resolve_cid()` 另加 `AT+CGPADDR=<cid>` 兜底。
+3. `rx_has_final()` 把 `+EMBIND: %d` URC 当作终态——只回 URC 不补 OK 时
+   旧逻辑会一直等到 4 s 超时（实机 `rc=-2`）；超时前还会把已收到的原始
+   字节打进 `/var/log/atproxy.log`，线刷后可直接判断内部通道是否有响应。
+4. 绑定未确认时先下发 `AT+EMBIND=0,"M-RNDIS",1` 解绑、等待 500 ms 再重绑，
+   清理 D2RM 的 `bind` / `binding` / `action_going` 陈旧状态（60 s 冷却）。
+5. `dial_enabled=0`：拨号由主机侧插件负责，固件只做 RNDIS 绑定保活，避免
+   两侧同时下发 `CGDCONT` / `CGACT` 互相打断。
+
+插件侧 1.2.0-r3 增加 `net::downlink_unbound()`：连续 3 轮「主动发包、TX 增长、
+`rx_packets` 恒为 0」判定模组侧未绑定，此时停止 `net_guard` 的接口重建/重拨与
+`data_guard` 的 USB 复位分级，避免每 40 秒的 `fm350v6` 抖动；出现下行即解除。
+
+固件改动**必须用 SP Flash Tool 重新线刷**才能生效。刷后建议依次核对：
+`atproxy -V`（应为 2.3.0）、`atproxy status`（`bound=1`、`cid=1`）、
+`cat /var/log/atproxy.log | grep EMBIND`、`cat /sys/class/net/eth2/statistics/rx_packets`
+（应有增长）。主机侧 `AT+EMBIND?` 只反映标志位，不能当作绑定成功判据。
+
 > 刷入前请先核对 Release 附件的 `SHA256SUMS` 并备份 IMEI / SN；固件含 USB 通道调试用的
 > 免认证 ADB 与空密码 SSH，模组 USB 口请勿接入不受信任的主机。
 
@@ -176,7 +216,15 @@ PDP 无线链路状态、上下文配置（APN、运营商快捷填选、双栈�
 `AT+CGCONTRDP=1` 回报 `ims.MNC011.MCC460.GPRS` 且 `<IM_CN_Signalling_Flag>=1`），
 后端会重新下发配置里的数据 APN 并重建 PDN，不会把 IMS 的 IPv6 地址配到网口。
 AT 终端「PDP 与路由」组可用 `AT+CGCONTRDP=1` 一次查询 IP 地址、网关、DNS
-与实际承载 APN（依据 Fibocom AT Commands V2.10 §12.2.10）。
+与实际承载 APN（依据 Fibocom AT Commands V2.10 §12.2.10）；`AT+EMBIND?` 可观测
+RNDIS 绑定标志位，但**仅作观测**——实机证实主机侧下发 `AT+EMBIND` 只改标志位，
+不会把 MD 内部 RNDIS 实例绑到 PDN。
+
+若 `eth2` 出现「TX 持续增长、`rx_packets` 恒为 0」且 `ping -I eth2` 全丢，
+说明模组侧 RNDIS 未绑定：这是 MD 域 D2RM 状态机问题，主机侧重建接口、重拨、
+复位 USB 端点都不对症。插件会识别该形态并停止无效自愈，需刷入配套固件
+（atproxy 2.3.0：init 正确加载 `/etc/config/atproxy`、固定数据 cid=1、识别
+`+EMBIND:` URC、绑定失败时先解绑再重绑）由模组内部完成绑定。
 
 ### 网络与锁频
 
