@@ -270,8 +270,8 @@ function injectFrostedGlassTheme() {
 			--fm-glass-bg: rgba(255, 255, 255, 0.78);
 			--fm-glass-bg-hover: rgba(255, 255, 255, 0.94);
 			--fm-glass-border: rgba(255, 255, 255, 0.88);
-			--fm-glass-shadow: 0 12px 32px 0 rgba(31, 38, 135, 0.05), 0 2px 6px 0 rgba(0, 0, 0, 0.02);
-			--fm-glass-blur: blur(16px) saturate(180%);
+			--fm-glass-shadow: 0 6px 18px 0 rgba(31, 38, 135, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.02);
+			--fm-glass-blur: blur(12px) saturate(170%);
 			--fm-primary: #2563eb;
 			--fm-primary-gradient: linear-gradient(135deg, #2563eb 0%, #06b6d4 100%);
 			--fm-text-main: #1e293b;
@@ -282,485 +282,298 @@ function injectFrostedGlassTheme() {
 			--fm-temp-hot: #ef4444;
 		}
 
+		/* 紧凑基线：所有间距、字号、栅格阈值统一收紧；颜色与动画保持不变。 */
 		.fm350-dashboard {
 			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 			color: var(--fm-text-main);
-			padding: 4px 0 32px 0;
+			padding: 2px 0 16px 0;
 		}
 
-		/* 顶部 Hero 卡片 */
 		.fm350-hero {
 			background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(240, 246, 255, 0.78));
 			backdrop-filter: var(--fm-glass-blur);
 			-webkit-backdrop-filter: var(--fm-glass-blur);
 			border: 1px solid var(--fm-glass-border);
-			border-radius: 20px;
-			padding: 24px 28px;
+			border-radius: 14px;
+			padding: 12px 16px;
 			box-shadow: var(--fm-glass-shadow);
 			display: flex;
 			align-items: center;
 			justify-content: space-between;
 			flex-wrap: wrap;
-			gap: 16px;
-			margin-bottom: 24px;
+			gap: 10px;
+			margin-bottom: 12px;
 		}
 		.fm350-hero-info h2 {
-			margin: 0 0 6px 0;
-			font-size: 1.55rem;
+			margin: 0 0 3px 0;
+			font-size: 1.18rem;
 			font-weight: 700;
 			letter-spacing: -0.02em;
 			display: flex;
 			align-items: center;
-			gap: 12px;
+			flex-wrap: wrap;
+			gap: 8px;
 		}
-		.fm350-hero-desc {
-			color: var(--fm-text-muted);
-			font-size: 0.88rem;
-		}
+		.fm350-hero-desc { color: var(--fm-text-muted); font-size: 0.76rem; line-height: 1.35; }
 
-		/* 基础毛玻璃卡片 */
 		.fm350-glass-card {
 			background: var(--fm-glass-bg);
 			backdrop-filter: var(--fm-glass-blur);
 			-webkit-backdrop-filter: var(--fm-glass-blur);
 			border: 1px solid var(--fm-glass-border);
-			border-radius: 16px;
-			padding: 18px 20px;
+			border-radius: 12px;
+			padding: 10px 12px;
 			box-shadow: var(--fm-glass-shadow);
-			transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+			transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 			display: flex;
 			flex-direction: column;
 			justify-content: space-between;
 		}
 		.fm350-glass-card:hover {
 			background: var(--fm-glass-bg-hover);
-			transform: translateY(-2px);
-			box-shadow: 0 16px 36px 0 rgba(31, 38, 135, 0.08);
+			transform: translateY(-1px);
+			box-shadow: 0 8px 20px 0 rgba(31, 38, 135, 0.08);
 			border-color: #fff;
 		}
-		.fm350-card-header {
-			display: flex;
-			align-items: center;
-			gap: 10px;
-			margin-bottom: 12px;
-		}
+		.fm350-card-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 		.fm350-card-icon-box {
-			width: 32px;
-			height: 32px;
-			border-radius: 9px;
-			background: rgba(37, 99, 235, 0.08);
-			color: var(--fm-primary);
-			display: flex;
-			align-items: center;
-			justify-content: center;
+			width: 24px; height: 24px; border-radius: 7px;
+			background: rgba(37, 99, 235, 0.08); color: var(--fm-primary);
+			display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
 		}
 		.fm350-card-title {
-			font-size: 0.82rem;
-			font-weight: 600;
-			text-transform: uppercase;
-			letter-spacing: 0.04em;
-			color: #64748b;
+			font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+			letter-spacing: 0.03em; color: #64748b;
 		}
-		.fm350-card-body {
-			display: flex;
-			flex-direction: column;
-			gap: 6px;
-		}
+		.fm350-card-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 		.fm350-card-value {
-			font-size: 1.32rem;
-			font-weight: 700;
-			color: #0f172a;
-			display: flex;
-			align-items: baseline;
-			flex-wrap: wrap;
-			gap: 8px;
+			font-size: 1.06rem; font-weight: 700; color: #0f172a;
+			display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px;
+			overflow-wrap: anywhere; word-break: break-word;
 		}
 		.fm350-card-sub {
-			font-size: 0.78rem;
-			color: #64748b;
-			line-height: 1.45;
+			font-size: 0.7rem; color: #64748b; line-height: 1.3;
+			overflow-wrap: anywhere; word-break: break-word;
 		}
 
-		/* 布局栅格 */
 		.fm350-section-title {
-			font-size: 1.05rem;
-			font-weight: 700;
-			color: #1e293b;
-			margin: 28px 0 14px 4px;
-			display: flex;
-			align-items: center;
-			gap: 10px;
+			font-size: 0.92rem; font-weight: 700; color: #1e293b;
+			margin: 14px 0 8px 2px;
+			display: flex; align-items: center; gap: 6px;
 		}
-		.fm350-grid {
-			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-			gap: 16px;
-		}
-		.fm350-grid-wide {
-			grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-		}
+		/* 阈值 260/280 -> 200/210：桌面同样能多排 1~2 列，不必滚动找信息。 */
+		.fm350-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+		.fm350-grid-wide { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 
-		/* ---------------- 温度传感器专属毛玻璃看板 ---------------- */
 		.fm350-thermal-dashboard {
 			background: linear-gradient(135deg, rgba(255, 255, 255, 0.85), rgba(248, 250, 252, 0.75));
 			backdrop-filter: var(--fm-glass-blur);
 			-webkit-backdrop-filter: var(--fm-glass-blur);
 			border: 1px solid var(--fm-glass-border);
-			border-radius: 20px;
-			padding: 22px 26px;
+			border-radius: 14px;
+			padding: 12px 16px;
 			box-shadow: var(--fm-glass-shadow);
-			margin-bottom: 18px;
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			flex-wrap: wrap;
-			gap: 20px;
+			margin-bottom: 10px;
+			display: flex; align-items: center; justify-content: space-between;
+			flex-wrap: wrap; gap: 12px;
 		}
-		.fm350-thermal-left {
-			display: flex;
-			align-items: center;
-			gap: 18px;
-		}
+		.fm350-thermal-left { display: flex; align-items: center; gap: 10px; }
 		.fm350-thermo-badge {
-			width: 60px;
-			height: 60px;
-			border-radius: 16px;
+			width: 44px; height: 44px; border-radius: 12px; flex: 0 0 auto;
 			background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(245, 158, 11, 0.12));
-			color: #ef4444;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			box-shadow: 0 4px 12px rgba(239, 68, 68, 0.1);
+			color: #ef4444; display: flex; align-items: center; justify-content: center;
+			box-shadow: 0 3px 9px rgba(239, 68, 68, 0.1);
 		}
 		.fm350-thermo-badge.level-cool   { background: rgba(16, 185, 129, 0.12); color: #10b981; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.1); }
 		.fm350-thermo-badge.level-normal { background: rgba(14, 165, 233, 0.12); color: #0ea5e9; box-shadow: 0 4px 12px rgba(14, 165, 233, 0.1); }
 		.fm350-thermo-badge.level-warm   { background: rgba(245, 158, 11, 0.12); color: #f59e0b; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.1); }
 		.fm350-thermo-badge.level-hot    { background: rgba(239, 68, 68, 0.14); color: #ef4444; box-shadow: 0 4px 14px rgba(239, 68, 68, 0.16); }
-
-		.fm350-thermal-main-stat {
-			display: flex;
-			flex-direction: column;
-		}
+		.fm350-thermal-main-stat { display: flex; flex-direction: column; }
 		.fm350-thermal-main-label {
-			font-size: 0.8rem;
-			font-weight: 600;
-			color: #64748b;
-			text-transform: uppercase;
-			letter-spacing: 0.05em;
+			font-size: 0.72rem; font-weight: 600; color: #64748b;
+			text-transform: uppercase; letter-spacing: 0.05em;
 		}
 		.fm350-thermal-main-val {
-			font-size: 2rem;
-			font-weight: 800;
-			color: #0f172a;
-			line-height: 1.15;
-			display: flex;
-			align-items: baseline;
-			gap: 8px;
+			font-size: 1.5rem; font-weight: 800; color: #0f172a; line-height: 1.15;
+			display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
 		}
-		.fm350-thermal-main-val small {
-			font-size: 1rem;
-			font-weight: 600;
-			color: #64748b;
-		}
+		.fm350-thermal-main-val small { font-size: 0.85rem; font-weight: 600; color: #64748b; }
+		.fm350-thermal-right-metrics { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+		.fm350-thermal-metric-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+		.fm350-thermal-metric-k { font-size: 0.68rem; color: #64748b; font-weight: 500; }
+		.fm350-thermal-metric-v { font-size: 0.95rem; font-weight: 700; color: #1e293b; overflow-wrap: anywhere; }
 
-		.fm350-thermal-right-metrics {
-			display: flex;
-			align-items: center;
-			gap: 24px;
-			flex-wrap: wrap;
-		}
-		.fm350-thermal-metric-item {
-			display: flex;
-			flex-direction: column;
-			gap: 2px;
-		}
-		.fm350-thermal-metric-k {
-			font-size: 0.74rem;
-			color: #64748b;
-			font-weight: 500;
-		}
-		.fm350-thermal-metric-v {
-			font-size: 1.15rem;
-			font-weight: 700;
-			color: #1e293b;
-		}
-
-		/* 传感器逐路卡片网格 */
-		.fm350-sensors-grid {
-			display: grid;
-			grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-			gap: 14px;
-		}
+		/* 240 -> 165：23 路传感器从单页长列表收成 5~6 列的紧凑矩阵。 */
+		.fm350-sensors-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px; }
 		.fm350-sensor-card {
 			background: var(--fm-glass-bg);
 			backdrop-filter: var(--fm-glass-blur);
 			-webkit-backdrop-filter: var(--fm-glass-blur);
 			border: 1px solid var(--fm-glass-border);
-			border-radius: 14px;
-			padding: 14px 16px;
-			box-shadow: 0 4px 16px rgba(0, 0, 0, 0.02);
+			border-radius: 10px;
+			padding: 8px 10px;
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.02);
 			transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-			display: flex;
-			flex-direction: column;
-			justify-content: space-between;
-			position: relative;
-			overflow: hidden;
+			display: flex; flex-direction: column; justify-content: space-between;
+			position: relative; overflow: hidden; min-width: 0;
 		}
 		.fm350-sensor-card:hover {
-			background: var(--fm-glass-bg-hover);
-			transform: translateY(-2px);
-			box-shadow: 0 10px 24px rgba(31, 38, 135, 0.08);
-			border-color: #fff;
+			background: var(--fm-glass-bg-hover); transform: translateY(-1px);
+			box-shadow: 0 6px 16px rgba(31, 38, 135, 0.08); border-color: #fff;
 		}
-		/* 最高峰值卡片特色加亮 */
 		.fm350-sensor-card.fm350-is-peak {
 			background: linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(254, 242, 242, 0.85));
 			border-color: rgba(239, 68, 68, 0.35);
-			box-shadow: 0 8px 24px rgba(239, 68, 68, 0.08);
+			box-shadow: 0 5px 16px rgba(239, 68, 68, 0.08);
 		}
 		.fm350-sensor-card.fm350-is-peak::before {
-			content: "";
-			position: absolute;
-			top: 0; left: 0; right: 0;
-			height: 3px;
+			content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
 			background: linear-gradient(90deg, #f59e0b, #ef4444);
 		}
-
-		.fm350-sensor-head {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			margin-bottom: 8px;
-		}
-		.fm350-sensor-info {
-			display: flex;
-			align-items: center;
-			gap: 8px;
-		}
+		.fm350-sensor-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 4px; }
+		.fm350-sensor-info { display: flex; align-items: center; gap: 5px; min-width: 0; }
 		.fm350-sensor-id {
-			font-size: 0.74rem;
-			font-weight: 700;
-			color: #64748b;
-			background: rgba(100, 116, 139, 0.1);
-			padding: 1px 6px;
-			border-radius: 6px;
+			font-size: 0.68rem; font-weight: 700; color: #64748b;
+			background: rgba(100, 116, 139, 0.1); padding: 1px 5px; border-radius: 5px; flex: 0 0 auto;
 		}
-		.fm350-sensor-name {
-			font-size: 0.82rem;
-			font-weight: 600;
-			color: #334155;
-		}
+		.fm350-sensor-name { font-size: 0.74rem; font-weight: 600; color: #334155; overflow-wrap: anywhere; }
 		.fm350-sensor-temp-box {
-			display: flex;
-			align-items: baseline;
-			justify-content: space-between;
-			margin-top: 4px;
-			margin-bottom: 10px;
+			display: flex; align-items: baseline; justify-content: space-between;
+			gap: 4px; margin-top: 2px; margin-bottom: 6px;
 		}
-		.fm350-sensor-val {
-			font-size: 1.35rem;
-			font-weight: 800;
-			color: #0f172a;
-			letter-spacing: -0.02em;
-		}
+		.fm350-sensor-val { font-size: 1.08rem; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
 		.fm350-sensor-code {
-			font-size: 0.72rem;
-			color: #94a3b8;
+			font-size: 0.66rem; color: #94a3b8; overflow-wrap: anywhere;
 			font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 		}
-
-		/* 刻度进度条 */
-		.fm350-temp-bar-bg {
-			height: 5px;
-			background: rgba(226, 232, 240, 0.7);
-			border-radius: 999px;
-			overflow: hidden;
-			position: relative;
-		}
-		.fm350-temp-bar-fill {
-			height: 100%;
-			border-radius: 999px;
-			transition: width 0.4s ease;
-		}
+		.fm350-temp-bar-bg { height: 4px; background: rgba(226, 232, 240, 0.7); border-radius: 999px; overflow: hidden; position: relative; }
+		.fm350-temp-bar-fill { height: 100%; border-radius: 999px; transition: width 0.4s ease; }
 		.fill-cool   { background: linear-gradient(90deg, #34d399, #10b981); }
 		.fill-normal { background: linear-gradient(90deg, #38bdf8, #0ea5e9); }
 		.fill-warm   { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
 		.fill-hot    { background: linear-gradient(90deg, #f87171, #ef4444); }
 
-		/* 徽章与标签 */
 		.fm350-pill-tag {
-			font-size: 0.72rem;
-			font-weight: 600;
-			padding: 2px 8px;
-			border-radius: 9999px;
-			background: rgba(148, 163, 184, 0.15);
-			color: #475569;
-			display: inline-flex;
-			align-items: center;
+			font-size: 0.68rem; font-weight: 600; padding: 1px 7px; border-radius: 9999px;
+			background: rgba(148, 163, 184, 0.15); color: #475569;
+			display: inline-flex; align-items: center; flex: 0 0 auto;
 		}
 		.fm350-tag-good { background: rgba(16, 185, 129, 0.15); color: #047857; }
 		.fm350-tag-ok   { background: rgba(6, 182, 212, 0.15); color: #0e7490; }
 		.fm350-tag-mid  { background: rgba(245, 158, 11, 0.15); color: #b45309; }
 		.fm350-tag-bad  { background: rgba(239, 68, 68, 0.15); color: #b91c1c; }
 		.fm350-peak-badge {
-			font-size: 0.68rem;
-			font-weight: 700;
-			padding: 2px 6px;
-			border-radius: 6px;
-			background: linear-gradient(135deg, #ef4444, #f59e0b);
-			color: #ffffff;
-			box-shadow: 0 2px 6px rgba(239, 68, 68, 0.35);
+			font-size: 0.64rem; font-weight: 700; padding: 1px 5px; border-radius: 5px;
+			background: linear-gradient(135deg, #ef4444, #f59e0b); color: #ffffff;
+			box-shadow: 0 2px 6px rgba(239, 68, 68, 0.35); flex: 0 0 auto;
 			animation: fm350-pulse-subtle 2s infinite ease-in-out;
 		}
 
-		/* 现代表格容器 */
 		.fm350-table-card {
 			background: var(--fm-glass-bg);
 			backdrop-filter: var(--fm-glass-blur);
 			-webkit-backdrop-filter: var(--fm-glass-blur);
 			border: 1px solid var(--fm-glass-border);
-			border-radius: 16px;
+			border-radius: 12px;
 			box-shadow: var(--fm-glass-shadow);
 			overflow: hidden;
 		}
-		.fm350-table-card table {
-			width: 100%;
-			border-collapse: collapse;
-			margin: 0;
-		}
-		.fm350-table-card tr {
-			border-bottom: 1px solid rgba(226, 232, 240, 0.5);
-			transition: background 0.2s ease;
-		}
+		.fm350-table-card table { width: 100%; border-collapse: collapse; margin: 0; }
+		.fm350-table-card tr { border-bottom: 1px solid rgba(226, 232, 240, 0.5); transition: background 0.2s ease; }
 		.fm350-table-card tr:last-child { border-bottom: none; }
 		.fm350-table-card tr:hover { background: rgba(255, 255, 255, 0.65); }
-		.fm350-table-key {
-			padding: 12px 20px;
-			font-size: 0.86rem;
-			font-weight: 500;
-			color: #64748b;
-			width: 38%;
-		}
+		.fm350-table-key { padding: 7px 12px; font-size: 0.78rem; font-weight: 500; color: #64748b; width: 34%; }
 		.fm350-table-val {
-			padding: 12px 20px;
-			font-size: 0.88rem;
-			font-weight: 600;
-			color: #1e293b;
+			padding: 7px 12px; font-size: 0.8rem; font-weight: 600; color: #1e293b;
+			overflow-wrap: anywhere; word-break: break-word;
 		}
 
-		/* 按钮与信号指示 */
 		.fm350-refresh-btn {
 			background: var(--fm-primary-gradient) !important;
-			border: none !important;
-			color: #ffffff !important;
-			padding: 8px 18px !important;
-			border-radius: 12px !important;
-			font-weight: 600 !important;
-			display: inline-flex !important;
-			align-items: center !important;
-			gap: 8px !important;
-			cursor: pointer;
-			box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
+			border: none !important; color: #ffffff !important;
+			padding: 6px 12px !important; border-radius: 9px !important;
+			font-size: 0.8rem !important; font-weight: 600 !important;
+			display: inline-flex !important; align-items: center !important; gap: 6px !important;
+			cursor: pointer; box-shadow: 0 3px 10px rgba(37, 99, 235, 0.28);
 			transition: all 0.25s ease !important;
 		}
 		.fm350-refresh-btn:hover { filter: brightness(1.05); transform: translateY(-1px); }
-		.fm350-status-indicator { position: relative; display: inline-flex; width: 10px; height: 10px; margin-right: 6px; }
-		.fm350-indicator-core { width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; }
-		.fm350-indicator-ping { position: absolute; top: 0; left: 0; width: 10px; height: 10px; border-radius: 50%; opacity: 0.75; }
+		.fm350-status-indicator { position: relative; display: inline-flex; width: 9px; height: 9px; margin-right: 5px; flex: 0 0 auto; }
+		.fm350-indicator-core { width: 9px; height: 9px; border-radius: 50%; background: #94a3b8; }
+		.fm350-indicator-ping { position: absolute; top: 0; left: 0; width: 9px; height: 9px; border-radius: 50%; opacity: 0.75; }
 		.fm350-is-up .fm350-indicator-core { background: #10b981; }
 		.fm350-is-up .fm350-indicator-ping { background: #34d399; animation: fm350-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite; }
 		.fm350-is-down .fm350-indicator-core { background: #ef4444; }
-
-		.fm350-bars-wrap { display: inline-flex; align-items: flex-end; gap: 3px; height: 20px; vertical-align: middle; }
-		.fm350-bar { width: 4px; background: #cbd5e1; border-radius: 2px; }
+		.fm350-bars-wrap { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; vertical-align: middle; flex: 0 0 auto; }
+		.fm350-bar { width: 3px; background: #cbd5e1; border-radius: 2px; }
 		.fm350-bar-on.fm350-bar-lvl-1 { background: #ef4444; }
 		.fm350-bar-on.fm350-bar-lvl-2 { background: #f97316; }
 		.fm350-bar-on.fm350-bar-lvl-3 { background: #f59e0b; }
 		.fm350-bar-on.fm350-bar-lvl-4 { background: #06b6d4; }
 		.fm350-bar-on.fm350-bar-lvl-5 { background: #10b981; }
 
-		/* 骨架阶段加载提示（前端不再阻塞等待后端 AT 采集） */
 		.fm350-loading-hint {
-			display: flex;
-			align-items: center;
-			gap: 10px;
-			padding: 14px 18px;
-			margin: 0 0 18px 0;
-			border-radius: 14px;
-			background: rgba(37, 99, 235, 0.06);
-			border: 1px solid rgba(37, 99, 235, 0.18);
-			color: #1d4ed8;
-			font-size: 0.86rem;
-			font-weight: 600;
+			display: flex; align-items: center; gap: 8px;
+			padding: 8px 12px; margin: 0 0 10px 0; border-radius: 10px;
+			background: rgba(37, 99, 235, 0.06); border: 1px solid rgba(37, 99, 235, 0.18);
+			color: #1d4ed8; font-size: 0.76rem; font-weight: 600;
 			backdrop-filter: blur(8px) saturate(160%);
 		}
 		.fm350-loading-spin {
-			width: 14px;
-			height: 14px;
-			flex: 0 0 auto;
-			border-radius: 50%;
-			border: 2px solid rgba(37, 99, 235, 0.25);
-			border-top-color: #2563eb;
+			width: 12px; height: 12px; flex: 0 0 auto; border-radius: 50%;
+			border: 2px solid rgba(37, 99, 235, 0.25); border-top-color: #2563eb;
 			animation: fm350-loading-rotate 0.9s linear infinite;
 		}
-		@keyframes fm350-loading-rotate {
-			to { transform: rotate(360deg); }
-		}
-		.fm350-dashboard-host {
-			display: block;
-		}
+		@keyframes fm350-loading-rotate { to { transform: rotate(360deg); } }
+		.fm350-dashboard-host { display: block; }
 
+		/* 底部长说明：改为可折叠，默认只占一行，内容一条不删。 */
 		.fm350-footer-note {
-			margin-top: 32px;
-			background: rgba(255, 255, 255, 0.55);
+			margin-top: 14px; background: rgba(255, 255, 255, 0.55);
 			backdrop-filter: var(--fm-glass-blur);
-			border: 1px dashed rgba(203, 213, 225, 0.8);
-			border-radius: 14px;
-			padding: 18px 22px;
-			font-size: 0.8rem;
-			line-height: 1.6;
-			color: #64748b;
+			border: 1px dashed rgba(203, 213, 225, 0.8); border-radius: 10px;
+			font-size: 0.72rem; line-height: 1.45; color: #64748b; padding: 0;
 		}
+		.fm350-footer-summary {
+			padding: 7px 12px; cursor: pointer; font-weight: 600; color: #475569;
+			list-style: none; user-select: none;
+		}
+		.fm350-footer-summary::-webkit-details-marker { display: none; }
+		.fm350-footer-summary::before {
+			content: ""; display: inline-block; width: 0; height: 0;
+			margin-right: 7px; vertical-align: middle;
+			border-left: 5px solid #64748b;
+			border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+			transition: transform 0.2s ease;
+		}
+		.fm350-footer-note[open] .fm350-footer-summary::before { transform: rotate(90deg); }
+		.fm350-footer-body { padding: 0 12px 9px 12px; }
+		.fm350-footer-note[open] .fm350-footer-body { padding-top: 7px; border-top: 1px dashed rgba(203, 213, 225, 0.8); }
 
-		/* ---------------- 矢量 SVG 动画 ---------------- */
-		.fm350-svg-icon { width: 18px; height: 18px; display: block; }
-		.fm350-svg-thermo { width: 28px; height: 28px; display: block; }
-		.fm350-svg-sensor-mini { width: 16px; height: 16px; display: block; }
-		.fm350-icon-btn { width: 16px; height: 16px; }
+		.fm350-svg-icon { width: 15px; height: 15px; display: block; flex: 0 0 auto; }
+		.fm350-svg-thermo { width: 22px; height: 22px; display: block; }
+		.fm350-svg-sensor-mini { width: 13px; height: 13px; display: block; flex: 0 0 auto; }
+		.fm350-icon-btn { width: 13px; height: 13px; }
 
-		/* 热浪升腾渐隐动画 */
 		@keyframes fm350-steam-rise {
 			0% { transform: translateY(0); opacity: 0.1; }
 			50% { opacity: 0.9; }
 			100% { transform: translateY(-4px); opacity: 0; }
 		}
-		.fm350-anim-heat-wave {
-			animation: fm350-steam-rise 1.8s ease-in-out infinite;
-		}
+		.fm350-anim-heat-wave { animation: fm350-steam-rise 1.8s ease-in-out infinite; }
 		.fm350-hw-1 { animation-delay: 0.2s; }
 		.fm350-hw-2 { animation-delay: 0.6s; }
 		.fm350-hw-3 { animation-delay: 1.0s; }
-
-		/* 温度计底球呼吸 */
 		@keyframes fm350-thermo-pulse {
 			0%, 100% { transform: scale(1); opacity: 0.9; }
 			50% { transform: scale(1.2); opacity: 1; filter: drop-shadow(0 0 3px currentColor); }
 		}
-		.fm350-anim-thermo-core {
-			transform-origin: 12px 18px;
-			animation: fm350-thermo-pulse 2.2s ease-in-out infinite;
-		}
-
-		/* 高温芯片震颤呼吸微动效 */
+		.fm350-anim-thermo-core { transform-origin: 12px 18px; animation: fm350-thermo-pulse 2.2s ease-in-out infinite; }
 		@keyframes fm350-heat-shake {
 			0%, 100% { transform: scale(1); }
 			50% { transform: scale(1.08); filter: drop-shadow(0 0 2px #ef4444); }
 		}
-		.fm350-anim-hot-shake {
-			transform-origin: 10px 10px;
-			animation: fm350-heat-shake 1.6s ease-in-out infinite;
-		}
-
+		.fm350-anim-hot-shake { transform-origin: 10px 10px; animation: fm350-heat-shake 1.6s ease-in-out infinite; }
 		@keyframes fm350-ping { 75%, 100% { transform: scale(2.2); opacity: 0; } }
 		@keyframes fm350-wave { 0% { transform: scale(0.85); opacity: 1; } 100% { transform: scale(1.6); opacity: 0; } }
 		.fm350-anim-wave { transform-origin: 12px 7px; animation: fm350-wave 2.2s cubic-bezier(0.2, 0.8, 0.2, 1) infinite; }
@@ -769,25 +582,82 @@ function injectFrostedGlassTheme() {
 		@keyframes fm350-spin-radar { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 		.fm350-anim-spin { transform-origin: 12px 12px; animation: fm350-spin-radar 3.5s linear infinite; }
 		@keyframes fm350-pulse-subtle { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.05); opacity: 0.85; } }
-		/* chip() 内那个类此前只写在 SVG 标记里、没有规则，脉冲微动效从未生效 */
 		.fm350-anim-pulse-subtle { transform-box: fill-box; transform-origin: center; animation: fm350-pulse-subtle 2s infinite ease-in-out; }
 
-		/* ---------------- 响应式布局适配 ----------------
-		   仅在小屏（<=767px / <=480px）调整排列、间距与滚动，不改变任何颜色、
-		   字体、边框、圆角、阴影等视觉元素；桌面端（>=768px）样式保持不变。 */
+		/* ---------------- 手机 / 窄屏专项 ----------------
+		   桌面 auto-fit 在窄容器里会退化成单列，长页要滚很久；这里显式固定
+		   双列并让长值换行，温控区纵向重排，表格取消横向滚动。 */
 		@media (max-width: 767px) {
-			.fm350-hero { padding: 16px 18px; gap: 12px; }
-			.fm350-glass-card { padding: 14px 16px; }
-			.fm350-thermal-dashboard { padding: 16px 16px; gap: 14px; }
-			.fm350-table-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-			.fm350-hero-info h2 { flex-wrap: wrap; }
-			.fm350-section-title { margin-left: 2px; }
-			.fm350-footer-note { padding: 14px 16px; }
+			.fm350-dashboard { padding: 2px 0 12px 0; }
+			.fm350-hero {
+				flex-direction: column; align-items: stretch; gap: 8px;
+				padding: 10px 12px; margin-bottom: 10px; border-radius: 12px;
+			}
+			.fm350-hero-info h2 { font-size: 1.02rem; gap: 6px; }
+			.fm350-hero-desc { font-size: 0.72rem; }
+			.fm350-hero-action { display: flex; justify-content: flex-end; }
+			.fm350-refresh-btn { padding: 5px 10px !important; font-size: 0.75rem !important; }
+			.fm350-section-title { margin: 12px 0 6px 0; font-size: 0.85rem; gap: 6px; }
+			/* 历史样式表 fm350/css/fm350.css 里的 .fm350-grid.fm350-grid-wide（280px 阈值）
+			 * 权重为 0,2,0，会压过本块 0,1,0 的媒体查询，导致「网络概览」在手机上仍是单列。
+			 * 这里带上外层容器补足权重，且不依赖样式表加载顺序。 */
+			.fm350-grid, .fm350-grid-wide,
+			.fm350-dashboard .fm350-grid.fm350-grid-wide {
+				grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+			}
+			.fm350-glass-card { padding: 8px 10px; border-radius: 10px; }
+			.fm350-card-header { gap: 5px; margin-bottom: 5px; }
+			.fm350-card-icon-box { width: 22px; height: 22px; border-radius: 6px; }
+			.fm350-card-title { font-size: 0.66rem; letter-spacing: 0.02em; }
+			.fm350-card-value { font-size: 0.95rem; gap: 4px; }
+			.fm350-card-sub { font-size: 0.66rem; }
+			/* 两列后副标题变窄，平衡换行避免出现单字孤行；
+			 * 不支持 text-wrap: balance 的内核自动回退为普通换行。 */
+			.fm350-card-sub, .fm350-hero-desc { text-wrap: balance; }
+			.fm350-bars-wrap { height: 14px; }
+			.fm350-thermal-dashboard {
+				flex-direction: column; align-items: stretch; gap: 8px;
+				padding: 10px 12px; border-radius: 12px;
+			}
+			.fm350-thermal-left { gap: 9px; }
+			.fm350-thermo-badge { width: 40px; height: 40px; border-radius: 10px; }
+			.fm350-thermal-main-val { font-size: 1.32rem; }
+			.fm350-thermal-right-metrics {
+				display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+				gap: 8px; width: 100%;
+			}
+			.fm350-thermal-metric-v { font-size: 0.88rem; }
+			.fm350-sensors-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+			.fm350-sensor-card { padding: 7px 9px; border-radius: 9px; }
+			.fm350-sensor-name { font-size: 0.68rem; }
+			.fm350-sensor-val { font-size: 0.98rem; }
+			.fm350-sensor-code { display: none; }
+			.fm350-table-card { overflow-x: visible; }
+			.fm350-table-card table { table-layout: fixed; }
+			.fm350-table-key { width: 38%; padding: 6px 8px; font-size: 0.72rem; }
+			.fm350-table-val { padding: 6px 8px; font-size: 0.74rem; }
+			.fm350-footer-note { margin-top: 12px; }
+			.fm350-footer-summary { padding: 6px 10px; }
+			.fm350-footer-body { padding: 0 10px 8px 10px; }
+			.fm350-loading-hint { padding: 8px 10px; margin-bottom: 8px; font-size: 0.72rem; }
 		}
 		@media (max-width: 480px) {
-			.fm350-hero { padding: 14px 14px; }
-			.fm350-glass-card { padding: 12px 12px; }
-			.fm350-thermal-dashboard { padding: 14px 14px; }
+			.fm350-grid, .fm350-grid-wide, .fm350-sensors-grid { gap: 6px; }
+			.fm350-card-title { font-size: 0.63rem; }
+			.fm350-card-value { font-size: 0.88rem; }
+			.fm350-sensor-info { gap: 4px; }
+			.fm350-sensor-id { padding: 1px 4px; }
+			.fm350-pill-tag { font-size: 0.64rem; padding: 1px 5px; }
+		}
+		@media (max-width: 340px) {
+			.fm350-sensors-grid { grid-template-columns: 1fr; }
+		}
+		@media (prefers-reduced-motion: reduce) {
+			.fm350-glass-card, .fm350-sensor-card, .fm350-temp-bar-fill,
+			.fm350-refresh-btn, .fm350-footer-summary::before { transition: none; }
+			.fm350-anim-heat-wave, .fm350-anim-thermo-core, .fm350-anim-hot-shake,
+			.fm350-anim-wave, .fm350-anim-spin, .fm350-anim-pulse-subtle,
+			.fm350-indicator-ping, .fm350-loading-spin, .fm350-peak-badge { animation: none; }
 		}
 	`;
 
@@ -1146,7 +1016,9 @@ return view.extend({
 		}
 
 		/* 底部半透明提示卡 */
-		nodes.push(E('div', { 'class': 'fm350-footer-note' }, [
+		nodes.push(E('details', { 'class': 'fm350-footer-note' }, [
+			E('summary', { 'class': 'fm350-footer-summary' }, _('数据说明与口径（点击展开）')),
+			E('div', { 'class': 'fm350-footer-body' }, [
 			_('本页所有数值均为模组实时上报，未取到的项显示 “-”。'),
 			_('「频段」与「带宽档位」会把模组上报的原始编码解码为频段名与带宽值；'),
 			_('频段未上报时按 ARFCN 推算，两种情况均由「频段来源」标注；'),
@@ -1159,7 +1031,8 @@ return view.extend({
 			E('br'),
 			_('IMEI 与序列号在此页为只读展示。写入需在「服务设置」页显式开启开关并二次确认，'),
 			_('后端会在写入前自动备份原值到 /etc/fm350/imei.backup。')
-		]));
+		])
+	]));
 
 		return E('div', { 'class': 'fm350-dashboard' }, nodes);
 		}
