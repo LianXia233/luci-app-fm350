@@ -2,6 +2,45 @@
 
 本项目遵循语义化版本号。
 
+## 1.2.0-r2 (2026-11-04)
+
+依据 Fibocom《FM350 AT Commands User Manual V2.10》§12.2.1 / §12.2.5 /
+§12.2.10，结合实机（FM350-GL，`81600.0000.00.29.23.24`，46011）调试结果，
+修复「数据 cid 被 IMS 承载抢占」导致的无 IPv4、网口反复上下线。
+
+### PDP 与拨号
+
+- **新增 IMS 承载识别**：`PdpState` 增加 `bearer_apn` / `bearer_is_ims`。
+  判据取 `AT+CGCONTRDP=<cid>` 的第 3 字段 `<apn>`（按点分段识别独立 `ims`）
+  与第 10 字段 `<IM_CN_Signalling_Flag>=1`，并兼顾 `AT+CGDCONT?` 本身就写成
+  IMS APN 的情况；`AT+CGPADDR` / `AT+CGCONTRDP` 仍是地址与 DNS 的唯一来源。
+- **跳过 IMS APN 并重新下发数据 APN**：`modem::dial()` 检测到 IMS 承载后，
+  重写 `AT+CGDCONT=<cid>,"<PDP_type>","<数据 APN>"`、去激活、等待 3 s、
+  重新激活，让模组按数据 APN 重建 PDN；重建后仍是 IMS 则明确报错，不再
+  把 IMS 的 IPv6 当作数据地址。IMS 承载的地址、网关、DNS、MTU 一律不采信。
+- **巡检层守卫**：`daemon::dial` 在状态分派最前面拦截 IMS 承载，清理接口
+  残留地址后重建数据链路并重新下发网口配置；失败进入 90 s 冷却，避免
+  30 s 巡检周期反复重建 PDN。
+
+### 网口与地址
+
+- **抑制 netifd 抖动**：v6-only 会话在 dhcpv6 / ra 模式下，`needs_refresh`
+  会持续判 `Absent`，旧逻辑每轮 `apply_after_dial` 都触发一次 ifup。现在
+  同一条 v6 地址只下发一次，地址变化或配置失败才重试；回到 v4 会话或未
+  激活时清空记忆。
+
+### AT 终端
+
+- 「PDP 与路由」快捷库新增 `AT+CGCONTRDP=1`（查询 IP 地址与承载参数），
+  一次可读到 APN、地址/掩码、网关、DNS、IM CN 信令标志与 MTU。
+- 已核实 `AT+CGPADDR?` 读形式在本模组回 `+CME ERROR: 5378`，手册仅定义
+  执行形式 `AT+CGPADDR[=<cid>]` 与测试形式 `AT+CGPADDR=?`，故不加入快捷库。
+
+### 测试
+
+- 新增单测：IMS APN 分段判据（含 `ctimsnet` 反例）、实机 IMS 承载样本解析、
+  数据 APN 承载不误判；`bearer_apn_info()` 抽成纯函数便于回归。
+
 ## 文档与固件交付 (2026-11-04)
 
 - **新增** `docs/RNDIS-Analysis-Report.md`：FM350 / F31 29.23.24n 逆向分析全文，覆盖 RNDIS 域归属证据链、

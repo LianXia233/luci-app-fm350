@@ -64,7 +64,15 @@ var PRESET_GROUPS = [
 		items: [
 			{ label: _('PDP 上下文'), cmd: 'AT+CGDCONT?' },
 			{ label: _('PDP 激活状态'), cmd: 'AT+CGACT?' },
-			{ label: _('分配 IP 地址'), cmd: 'AT+CGPADDR=1' }
+			{ label: _('分配 IP 地址'), cmd: 'AT+CGPADDR=1' },
+			/* 手册 §12.2.10：`+CGCONTRDP` 执行形式回 <cid>,<bearer_id>,<apn>,
+			   <local_addr and subnet_mask>,<gw_addr>,<DNS>,
+			   <IM_CN_Signalling_Flag>,<IPv4_MTU>。查询 IP 地址时比 CGPADDR
+			   信息更全，还能看出数据 cid 是否被 ims.xxx 承载抢占
+			   （IM_CN_Signalling_Flag=1）。
+			   注意：实机 `AT+CGPADDR?` 读形式不支持（+CME ERROR: 5378），
+			   查询地址一律用手册定义的执行形式 `AT+CGPADDR=<cid>`。 */
+			{ label: _('查询 IP 地址与承载参数'), cmd: 'AT+CGCONTRDP=1' }
 		]
 	},
 	{

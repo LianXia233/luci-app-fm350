@@ -172,6 +172,12 @@ PDP 无线链路状态、上下文配置（APN、运营商快捷填选、双栈�
 
 链路操作区：立即拨号、保存并拨号、断开连接。
 
+数据链路 APN 会跳过 IMS 类型：若检测到当前激活承载是 IMS（例如
+`AT+CGCONTRDP=1` 回报 `ims.MNC011.MCC460.GPRS` 且 `<IM_CN_Signalling_Flag>=1`），
+后端会重新下发配置里的数据 APN 并重建 PDN，不会把 IMS 的 IPv6 地址配到网口。
+AT 终端「PDP 与路由」组可用 `AT+CGCONTRDP=1` 一次查询 IP 地址、网关、DNS
+与实际承载 APN（依据 Fibocom AT Commands V2.10 §12.2.10）。
+
 ### 网络与锁频
 
 ![网络与锁频 · 1/2](docs/preview/network-1.png)

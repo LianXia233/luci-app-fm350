@@ -39,6 +39,9 @@ pub const NO_ADDR_REDIAL_ROUNDS: u32 = 3;
 /// 无服务净化后自动重拨的最短间隔，避免无 SIM / 未注册时高频激活 PDP。
 pub const NO_SERVICE_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
+/// IMS 承载重建失败后的冷却：巡检周期是 30 s，不能每轮都重建一次 PDN。
+pub const IMS_REPAIR_BACKOFF: Duration = Duration::from_secs(90);
+
 /// 拨号巡检的跨轮状态。
 pub struct DialWatch {
     /// 激活却一个地址都没有的连续轮数。
@@ -47,6 +50,10 @@ pub struct DialWatch {
     dial_fail_rounds: u32,
     /// 无服务净化后的重拨截止时刻。
     retry_after: Option<Instant>,
+    /// IMS 承载重建失败后的下一次可重试时刻。
+    ims_repair_after: Option<Instant>,
+    /// 上一次已下发给接口的 v6-only 会话地址，用于抑制 netifd 抖动。
+    last_v6_applied: Option<String>,
 }
 
 impl Default for DialWatch {
@@ -55,6 +62,8 @@ impl Default for DialWatch {
             no_addr_rounds: 0,
             dial_fail_rounds: 0,
             retry_after: None,
+            ims_repair_after: None,
+            last_v6_applied: None,
         }
     }
 }
@@ -91,6 +100,12 @@ impl DialWatch {
 
     /// 按 PDP 状态分派。
     fn drive(&mut self, at: &AtHandle, cfg: &Config, v6: &mut V6Watch, st: &PdpState) {
+        // IMS 承载抢占数据 cid 时，读到的 IPv6 不是数据链路地址：必须先
+        // 把承载换回数据 APN，否则下面任何分支都会把 IMS 地址写进网口。
+        if st.bearer_is_ims {
+            self.on_ims_bearer(at, cfg, st);
+            return;
+        }
         // PDN 显式为纯 IPv4 时跳过一切 IPv6 维护（避免无谓的 ifup 与日志）。
         let pdp_v4_only = st.pdp_type.eq_ignore_ascii_case("IP");
 
@@ -105,9 +120,53 @@ impl DialWatch {
         self.on_active_without_v4(at, cfg, v6, st);
     }
 
+    /// 数据 cid 落在 IMS 承载上：跳过该 APN，重建数据承载并重新拉起网口。
+    ///
+    /// 校正动作在 `modem::dial()` 内完成（重写 CGDCONT → 去激活 → 重新激活），
+    /// 这里负责清掉接口上可能残留的 IMS 会话地址、把新地址写回去，并在失败时
+    /// 进入冷却，避免 30 s 巡检把 PDN 反复重建。
+    fn on_ims_bearer(&mut self, at: &AtHandle, cfg: &Config, st: &PdpState) {
+        if retry_waiting(self.ims_repair_after.as_ref(), Instant::now()) {
+            return;
+        }
+        warnf!(format_args!(
+            "数据 cid {} 当前为 IMS 承载（APN={}），跳过并重建数据链路",
+            st.cid, st.bearer_apn
+        ));
+        if let Err(e) = net::clear_session_addresses(cfg) {
+            warnf!(format_args!("清理 IMS 会话残留地址失败: {}", e));
+        }
+        match modem::dial(at, cfg) {
+            Ok(p) if p.usable_for_data() => {
+                let _ = net::apply_mtu(cfg, p.mtu);
+                match net::apply_after_dial(
+                    cfg,
+                    &p.ipv4,
+                    &p.ipv6,
+                    &p.dns,
+                    &p.gw4,
+                    &p.netmask4,
+                ) {
+                    Ok(_) => {
+                        infof!(format_args!("数据承载已重建并配置到 {}", cfg.iface));
+                        self.ims_repair_after = None;
+                        self.dial_fail_rounds = 0;
+                        self.last_v6_applied = None;
+                        return;
+                    }
+                    Err(e) => warnf!(format_args!("重建后配置网络失败: {}", e)),
+                }
+            }
+            Ok(_) => warnf!(format_args!("重建后仍未取得数据地址，稍后重试")),
+            Err(e) => warnf!(format_args!("重建数据承载失败: {}", e)),
+        }
+        self.ims_repair_after = Some(Instant::now() + IMS_REPAIR_BACKOFF);
+    }
+
     /// 未激活：拨号；连续失败达到门槛后清理上次会话残值并进入长退避。
     fn on_inactive(&mut self, at: &AtHandle, cfg: &Config) {
         self.no_addr_rounds = 0;
+        self.last_v6_applied = None;
 
         if retry_waiting(self.retry_after.as_ref(), Instant::now()) {
             return;
@@ -203,6 +262,7 @@ impl DialWatch {
         self.no_addr_rounds = 0;
         self.dial_fail_rounds = 0;
         self.retry_after = None;
+        self.last_v6_applied = None;
 
         let mut ns = net::status(cfg);
         v6.note_iface(&ns.ipv6);
@@ -273,7 +333,12 @@ impl DialWatch {
             v6.note_iface(&ns.ipv6);
             // 判据与 `needs_refresh` 保持一致：dhcpv6 / ra 模式下接口地址本来
             // 就不等于模组上报值，按相等判定会每轮命中、把 v6 子接口反复弹起。
-            if net::needs_refresh(cfg, &st.ipv6, &ns.ipv6).is_some() {
+            // 同一条 v6 会话只下发一次：dhcpv6 / ra 模式下内核地址本来
+            // 就不等于模组上报值，needs_refresh 会持续命中 Absent，每轮
+            // ifup 会让 netifd 反复 up/down（实机日志：fm350v6 每秒重建）。
+            // 地址变化或重建失败时才会再次配置。
+            let already_applied = self.last_v6_applied.as_deref() == Some(st.ipv6.as_str());
+            if !already_applied && net::needs_refresh(cfg, &st.ipv6, &ns.ipv6).is_some() {
                 match net::apply_after_dial(
                     cfg,
                     "",
@@ -282,7 +347,10 @@ impl DialWatch {
                     &st.gw4,
                     &st.netmask4,
                 ) {
-                    Ok(_) => infof!(format_args!("IPv6-only 会话已配置到 {}", cfg.iface)),
+                    Ok(_) => {
+                        self.last_v6_applied = Some(st.ipv6.clone());
+                        infof!(format_args!("IPv6-only 会话已配置到 {}", cfg.iface));
+                    }
                     Err(e) => warnf!(format_args!("IPv6-only 会话配置失败: {}", e)),
                 }
             }

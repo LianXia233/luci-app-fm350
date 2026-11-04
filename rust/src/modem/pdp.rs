@@ -36,6 +36,12 @@ const RECOVER_REG_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const ATTACH_POLLS: u32 = 8;
 const ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(2500);
 
+/// 重建 IMS 占用的 PDN 前等待承载释放的时间（秒）。
+///
+/// 去激活后立即激活，模组侧 PDN 尚未释放，激活会回 `+CME ERROR` 或
+/// 激活成功却不发数据地址（与 daemon::dial::redial 的 3 s 同源）。
+const IMS_REBUILD_SETTLE_SECS: u64 = 3;
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct PdpState {
     pub cid: u32,
@@ -63,6 +69,18 @@ pub struct PdpState {
     /// 1500 会在大包上踩 PMTU 黑洞。取到后由 `net::iface::apply_mtu` 写进
     /// 主接口；取不到就不动接口配置（不猜）。
     pub mtu: Option<u32>,
+    /// `AT+CGCONTRDP` 字段 3 上报的**实际承载 APN**。
+    ///
+    /// 它可能和 `AT+CGDCONT?` 的配置值不同：IMS 承载抢占数据 cid 时，
+    /// CGDCONT 仍显示数据 APN（如 `ctnet`），CGCONTRDP 却回
+    /// `ims.MNC011.MCC460.GPRS`。判断数据链路是否被 IMS 占用必须看这个值。
+    pub bearer_apn: String,
+    /// 当前数据 cid 的激活承载是否为 IMS 类型。
+    ///
+    /// 判据：承载 APN 含独立 `ims` 段，或 `<IM_CN_Signalling_Flag>=1`
+    /// （手册 §12.2.10）；CGDCONT 本身写成 IMS APN 也算。
+    /// IMS 承载的地址不是数据链路地址，绝不配到主机网口。
+    pub bearer_is_ims: bool,
     pub raw: Vec<(String, String)>,
 }
 
@@ -73,6 +91,55 @@ impl PdpState {
     pub fn has_address(&self) -> bool {
         !self.ipv4.is_empty() || !self.ipv6.is_empty()
     }
+
+    /// 是否是可以拿来配置主机网口的数据会话。
+    ///
+    /// IMS 承载即便有 IPv6 地址也不能算：它是 IM CN 子系统信令专用承载，
+    /// 采信它会让守护反复把「IPv6-only 会话」写进静态接口。
+    pub fn usable_for_data(&self) -> bool {
+        self.active && self.has_address() && !self.bearer_is_ims
+    }
+}
+
+/// IMS 类型 APN 判据。
+///
+/// `ims` 必须作为独立的点分段出现（手册 §12.2.10 的 `<apn>`、§12.2.16
+/// 的 `<apn_type>` 取值之一），避免把 `ctimsnet` 这类数据 APN 误判成 IMS。
+pub fn is_ims_apn(apn: &str) -> bool {
+    let s = apn.trim().trim_matches('"').to_ascii_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    s.split(|c: char| c == '.' || c == '-' || c == '_')
+        .any(|part| part == "ims")
+}
+
+/// 从 `AT+CGCONTRDP` 响应里提取指定 cid 的承载 APN 与 IMS 判定。
+///
+/// 手册 §12.2.10 字段序：`<cid>,<bearer_id>,<apn>,<local_addr and
+/// subnet_mask>,<gw_addr>,<DNS_prim>,<DNS_sec>,<P-CSCF_prim>,
+/// <P-CSCF_sec>,<IM_CN_Signalling_Flag>,...`。索引 9 的标志为 1 表示
+/// 「仅用于 IM CN 子系统信令」，是 IMS 承载的权威依据，与 APN 名互为兜底。
+pub fn bearer_apn_info(resp: &str, cid: u32) -> (String, bool) {
+    let mut apn = String::new();
+    let mut ims = false;
+    for row in crate::at::rows(resp, "+CGCONTRDP") {
+        if row.first().and_then(|x| x.parse::<u32>().ok()) != Some(cid) {
+            continue;
+        }
+        if let Some(a) = row.get(2) {
+            if apn.is_empty() {
+                apn = a.clone();
+            }
+            if is_ims_apn(a) {
+                ims = true;
+            }
+        }
+        if row.get(9).map(|x| x.trim() == "1").unwrap_or(false) {
+            ims = true;
+        }
+    }
+    (apn, ims)
 }
 
 /// 解析 `AT+CGACT?` 响应中指定 cid 的激活状态。
@@ -279,6 +346,11 @@ pub fn pdp(at: &AtHandle, prio: AtPriority, cfg: &Config) -> PdpState {
     let mut contr_gw4 = String::new();
     let mut contr_gw6 = String::new();
     let mut contr_mtu: Option<u32> = None;
+    // 承载 APN / IMS 判定：先于地址解析算好，IMS 承载的地址随后一律不采信。
+    let (bearer_apn, contr_ims) = contr
+        .as_deref()
+        .map(|r| bearer_apn_info(r, cfg.cid))
+        .unwrap_or_default();
     if let Some(r) = &contr {
         for row in crate::at::rows(&r, "+CGCONTRDP") {
             // <cid>,<bearer>,"<apn>","<PDP_addr>","<gw>","<dns1>","<dns2>",...
@@ -433,6 +505,21 @@ pub fn pdp(at: &AtHandle, prio: AtPriority, cfg: &Config) -> PdpState {
         }
     }
 
+    // 数据链路 APN 守卫：IMS 类型承载不算数据链路。
+    st.bearer_apn = bearer_apn;
+    st.bearer_is_ims = contr_ims || is_ims_apn(&st.bearer_apn) || is_ims_apn(&st.apn);
+    if st.bearer_is_ims {
+        // IMS 承载通常只给 IPv6。采信它会让上层把它当成「IPv6-only 数据会话」
+        // 反复写进静态接口，netifd 不停 up/down，而实际三层零回包。
+        st.ipv4.clear();
+        st.ipv6.clear();
+        st.gw4.clear();
+        st.gw6.clear();
+        st.netmask4.clear();
+        st.dns.clear();
+        st.mtu = None;
+    }
+
     st.raw = raw;
     st
 }
@@ -554,8 +641,40 @@ pub fn dial(at: &AtHandle, cfg: &Config) -> AtResult<PdpState> {
     let _ = apply_auth(at, prio, cfg);
 
     // 已激活且已取得地址时直接返回，避免重复激活
-    let before = pdp(at, prio, cfg);
-    if before.active && before.has_address() {
+    let mut before = pdp(at, prio, cfg);
+
+    // 数据链路 APN 守卫：检测到当前为 IMS APN 时跳过它，重新下发正确的
+    // 数据链路 APN 并重建 PDN。
+    //
+    // 实机（FM350-GL / 81600.0000.00.29.23.24 / 46011）现象：`AT+CGDCONT?`
+    // 的 cid 1 是 `ctnet`，但 `AT+CGCONTRDP=1` 回报承载 APN 为
+    // `ims.MNC011.MCC460.GPRS`，IPv4 位为空、只有一条 IPv6 —— IMS 承载
+    // 抢占了数据 cid。CGDCONT 是持久化定义（手册 §12.2.1 Persistent=Yes），
+    // 只重写定义不会改变已建承载，必须「去激活 → 等待释放 → 重新激活」，
+    // 模组才会按数据 APN 重新建立 PDN。
+    if before.bearer_is_ims {
+        crate::infof!(format_args!(
+            "数据 cid {} 被 IMS 承载占用（承载 APN={}），跳过并重新下发数据 APN {}",
+            cfg.cid, before.bearer_apn, cfg.apn
+        ));
+        let _ = set_apn(at, prio, cfg, &cfg.apn, &cfg.pdp_type);
+        let _ = apply_auth(at, prio, cfg);
+        let _ = run_as(at, prio, cfg, &at_cmd::deactivate(cfg.cid));
+        std::thread::sleep(Duration::from_secs(IMS_REBUILD_SETTLE_SECS));
+        let _ = run_as(at, prio, cfg, &at_cmd::activate(cfg.cid));
+        before = poll_for_address(at, prio, cfg);
+        if before.bearer_is_ims {
+            return Err(format!(
+                "重新下发数据 APN {} 后激活承载仍为 IMS（{}），跳过该承载",
+                cfg.apn, before.bearer_apn
+            ));
+        }
+        if before.usable_for_data() {
+            return Ok(before);
+        }
+    }
+
+    if before.usable_for_data() {
         return Ok(before);
     }
 
@@ -620,6 +739,54 @@ fn poll_for_address(at: &AtHandle, prio: AtPriority, cfg: &Config) -> PdpState {
 /// 断开：去激活 PDP（P1 High：用户主动挂断 / 净化动作）。
 pub fn hangup(at: &AtHandle, cfg: &Config) -> AtResult<String> {
     run_as(at, AtPriority::High, cfg, &at_cmd::deactivate(cfg.cid))
+}
+
+#[cfg(test)]
+mod ims_tests {
+    use super::*;
+
+    #[test]
+    fn ims_apn_is_recognized_by_segment() {
+        assert!(is_ims_apn("ims"));
+        assert!(is_ims_apn("IMS"));
+        assert!(is_ims_apn("ims.MNC011.MCC460.GPRS"));
+        assert!(is_ims_apn("\"ims.mnc011.mcc460.gprs\""));
+        assert!(!is_ims_apn("ctnet"));
+        assert!(!is_ims_apn("3gnet"));
+        assert!(!is_ims_apn("cmnet"));
+        assert!(!is_ims_apn("ctimsnet"), "含 ims 子串的数据 APN 不得误判");
+        assert!(!is_ims_apn(""));
+    }
+
+    /// 2026-11-04 实机样本：cgdcont=ctnet，实际承载却是 ims，且
+    /// <IM_CN_Signalling_Flag>=1（索引 9）。
+    #[test]
+    fn contrdp_real_ims_bearer_is_detected() {
+        let resp = concat!(
+            "+CGCONTRDP: 1,6,\"ims.MNC011.MCC460.GPRS\",\"\",\"\",",
+            "\"36.14.0.31.0.1.0.0.0.0.0.0.0.0.0.1\",",
+            "\"36.14.0.31.0.1.0.0.0.0.0.0.0.0.0.51\",",
+            "\"36.14.0.248.240.5.16.0.0.0.0.0.0.0.0.37\",",
+            "\"36.14.1.135.194.128.4.0.0.0.0.0.0.0.0.116\",1,,0,,,,,,,,,,,,0\nOK"
+        );
+        let (apn, ims) = bearer_apn_info(resp, 1);
+        assert!(apn.contains("ims"), "实际承载 APN = {}", apn);
+        assert!(ims, "APN 名 / IM CN 信令标志应判为 IMS");
+        let (_, other) = bearer_apn_info(resp, 2);
+        assert!(!other, "其它 cid 不应被误判");
+    }
+
+    #[test]
+    fn data_apn_bearer_is_not_ims() {
+        let resp = concat!(
+            "+CGCONTRDP: 1,5,\"ctnet\",\"10.1.2.3.255.255.255.0\",",
+            "\"10.1.2.1\",\"202.96.128.86\",\"202.96.134.133\",",
+            "\"\",\"\",0,,0\nOK"
+        );
+        let (apn, ims) = bearer_apn_info(resp, 1);
+        assert_eq!(apn, "ctnet");
+        assert!(!ims);
+    }
 }
 
 #[cfg(test)]
