@@ -954,6 +954,31 @@ return view.extend({
 		o.default = '3';
 		o.depends('data_guard', '1');
 
+		o = s.option(form.ListValue, 'unbound_policy', _('RNDIS 未绑定时的自愈策略'),
+			_('模组侧「TX 持续增长、rx_packets 恒为 0」说明 RNDIS 未绑定到 PDN。'
+				+ '已刷配套固件（atproxy 2.3.0）时模组内部会自动完成绑定；'
+				+ '没有配套固件的设备不能永久停止主机侧自愈，否则真实故障也不再尝试恢复。'
+				+ '三种策略下 IPv6 子接口维护都会被抑制，不产生周期性抖动'));
+		o.value('auto', _('auto（等待配套固件绑定，超时自动恢复自愈，推荐）'));
+		o.value('assisted', _('assisted（已刷配套固件，持续抑制主机侧自愈）'));
+		o.value('legacy', _('legacy（未刷配套固件，保留主机侧分级自愈）'));
+		o.default = 'auto';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'unbound_fallback_secs', _('配套固件等待时长（秒）'),
+			_('仅 auto 生效：抑制主机侧自愈、等待模组内部完成绑定的时长。'
+				+ '超时后自动恢复主机侧分级自愈并打印告警，确保未刷配套固件的设备不会永久躺平'));
+		o.datatype = 'uinteger';
+		o.validate = function(section_id, value) {
+			var n = parseInt(value, 10);
+			if (/^\d+$/.test(value) && n >= 30 && n <= 3600)
+				return true;
+			return _('请输入 30-3600 的整数秒数');
+		};
+		o.default = '600';
+		o.rmempty = false;
+		o.depends('unbound_policy', 'auto');
+
 		/* ---------------- 一之三、强制 DNS ---------------- */
 		s = m.section(form.NamedSection, 'main', 'fm350', _('强制 DNS'));
 		s.description = _('拨号成功后，插件会把下面四组公共 DNS 直接写入自己创建的 '

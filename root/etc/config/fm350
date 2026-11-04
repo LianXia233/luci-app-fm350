@@ -36,6 +36,15 @@ config main 'main'
 	option net_guard '1'
 	# 连续失败门槛：net_guard 恢复与拨号失败后的 UCI 地址净化共用；净化后自动重拨退避 300 秒
 	option net_guard_rounds '3'
+	# 模组侧 RNDIS 未绑定（TX 增长、RX 恒 0）时的自愈策略：
+	# auto（默认）先抑制主机侧无效自愈 unbound_fallback_secs 秒，等配套固件
+	#   atproxy 2.3.0 在模组内部完成绑定；超时仍无下行帧则自动恢复主机侧自愈
+	# assisted 已刷配套固件，持续抑制，完全交给模组内部绑定
+	# legacy 明确没有配套固件，从不抑制主机侧分级自愈（每级冷却 300 秒）
+	# 三种策略下 fm350v6 的 IPv6 维护都按未绑定形态抑制，不产生 40 秒抖动
+	option unbound_policy 'auto'
+	# auto 策略等待配套固件自动绑定的秒数（30-3600）；超时自动回落
+	option unbound_fallback_secs '600'
 	option poll_interval '30'
 	# 从模组 AT/PDP 信息轮询最新 IPv6 的周期（秒）；设为 0 可关闭独立轮询
 	option v6_poll_interval '300'

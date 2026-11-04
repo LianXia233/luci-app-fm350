@@ -218,6 +218,11 @@ pub fn data_plane_stalled(prev: &DataHealth, cur: &DataHealth) -> bool {
 /// 内部绑定，实机表现为 `net_guard` 反复升级、`fm350v6` 每 40 秒刷新却始终
 /// 无下行。必须由固件侧 `atproxy` 在模组内部下发 `AT+EMBIND`。
 ///
+/// 但「主机侧自愈无解」只成立于**已刷配套固件**的设备：本判据只说明当前
+/// 没有下行帧，无法证明设备刷了会自动绑定的 rootfs。插件侧因此保留
+/// [`crate::daemon::guard::UnboundPolicy`] 兜底（`auto` 超时回落 /
+/// `legacy` 不抑制），让未刷配套固件的设备继续按冷却分级自愈。
+///
 /// 判据要求 `cur.probe_sent`（本轮确实主动发过一个探测包）且连续两轮
 /// `rx_packets == 0`，避免把空闲链路误判为未绑定；一旦出现任何下行帧即解除。
 pub fn downlink_unbound(prev: &DataHealth, cur: &DataHealth) -> bool {

@@ -47,6 +47,73 @@ pub const DATA_GUARD_MIN_ROUNDS: u32 = 1;
 /// 单轮可能是网卡刚枚举或探测包未发出，必须累计。
 pub const DOWNLINK_UNBOUND_ROUNDS: u32 = 3;
 
+/// `unbound_fallback_secs` 的合法范围（秒）：低于 30 s 还没等连续 3 轮判据
+/// 成立就回落，等于没有抑制；高于 1 h 会让没有配套固件的设备躺平太久。
+pub const UNBOUND_FALLBACK_MIN_SECS: u64 = 30;
+pub const UNBOUND_FALLBACK_MAX_SECS: u64 = 3600;
+
+// ---------------------------------------------------------------- 未绑定兜底策略
+
+/// 「模组侧 RNDIS 未绑定」时主机侧自愈的处置方式。
+///
+/// r3/r4 无条件抑制自愈，隐含前提是设备刷了配套固件（atproxy 2.3.0）由模组
+/// 内部完成绑定。**没有配套固件时这个前提不成立**：旧 rootfs、其它固件分支，
+/// 甚至网卡刚枚举导致的判据误判，都会让插件永久停止自愈。三态策略把前提显式化：
+/// - [`UnboundPolicy::Auto`]：先抑制一段时间等自动绑定，超时自动回落（默认，零配置可用）；
+/// - [`UnboundPolicy::Assisted`]：确认刷了配套固件，持续抑制；
+/// - [`UnboundPolicy::Legacy`]：确认没刷配套固件，保留主机侧分级自愈。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnboundPolicy {
+    Auto,
+    Assisted,
+    Legacy,
+}
+
+impl UnboundPolicy {
+    /// 未识别取值一律按 `Auto` 处理（UCI 是纯文本，拼错不能让自愈停摆）。
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "assisted" => Self::Assisted,
+            "legacy" => Self::Legacy,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn from_config(cfg: &Config) -> Self {
+        Self::parse(&cfg.unbound_policy)
+    }
+}
+
+/// `auto` 策略的回落后限（非法 UCI 值也夹到合法区间）。
+pub fn fallback_from(cfg: &Config) -> Duration {
+    Duration::from_secs(
+        cfg.unbound_fallback_secs
+            .clamp(UNBOUND_FALLBACK_MIN_SECS, UNBOUND_FALLBACK_MAX_SECS),
+    )
+}
+
+/// 本轮是否应当抑制主机侧自愈（纯函数，便于单测）。
+///
+/// `elapsed` 是进入未绑定态至今的时长；`None` 表示刚进入或从未进入，此时
+/// `auto` 仍先抑制一轮，避免第一帧抖动就触发恢复动作。
+/// 注意：这里只决定 `DataGuard` / `NetGuard`，**不决定 IPv6 维护** —— 后者
+/// 只看原始判据，任何策略下都不刷新 `fm350v6`。
+pub fn suppression_active(
+    policy: UnboundPolicy,
+    unbound: bool,
+    elapsed: Option<Duration>,
+    fallback: Duration,
+) -> bool {
+    if !unbound {
+        return false;
+    }
+    match policy {
+        UnboundPolicy::Assisted => true,
+        UnboundPolicy::Legacy => false,
+        UnboundPolicy::Auto => elapsed.map(|t| t < fallback).unwrap_or(true),
+    }
+}
+
 // ---------------------------------------------------------------- 数据面
 
 /// 数据面健康巡检状态。
@@ -65,6 +132,10 @@ pub struct DataGuard {
     unbound: bool,
     /// 上次打印未绑定告警的时刻，避免每轮刷日志。
     last_unbound_warn: Option<Instant>,
+    /// 进入未绑定态的时刻（`auto` 策略据此判断是否该回落）。
+    unbound_since: Option<Instant>,
+    /// 是否已打印过「自动回落」告警，避免每轮刷日志。
+    fallback_notified: bool,
 }
 
 impl Default for DataGuard {
@@ -77,6 +148,8 @@ impl Default for DataGuard {
             unbound_rounds: 0,
             unbound: false,
             last_unbound_warn: None,
+            unbound_since: None,
+            fallback_notified: false,
         }
     }
 }
@@ -88,13 +161,23 @@ impl DataGuard {
 
     /// 一轮数据面巡检。
     pub fn tick(&mut self, at: &AtHandle, cfg: &Config) {
-        if !cfg.data_guard || !cfg.enabled {
+        if !cfg.enabled {
             return;
         }
+        // 判据采样与自愈开关解耦：关掉 data_guard 只代表「不执行本层恢复
+        // 动作」，未绑定结论仍要交给 NetGuard / V6Watch，否则关闭数据面
+        // 自愈的设备会重新出现每约 40 s 的接口抖动。
         let healthy = self.observe(cfg);
+        let suppressed = self.suppression_active(cfg);
+        self.note_fallback(cfg, suppressed);
         // 模组侧 RNDIS 未绑定属于 MD 内部状态机问题，主机侧复位端点 /
-        // 重拨 / 重建接口都不对症，跳过自愈分级，只保留观测。
-        if self.unbound {
+        // 重拨 / 重建接口都不对症。**仅在配套固件确实会在模组内部完成
+        // 绑定时**才持续跳过自愈分级；auto 超时 / legacy 策略要回落，
+        // 让没有配套固件的设备继续按冷却分级自愈，不永久躺平。
+        if suppressed {
+            return;
+        }
+        if !cfg.data_guard {
             return;
         }
         if healthy {
@@ -136,15 +219,29 @@ impl DataGuard {
         }
         self.unbound = self.unbound_rounds >= DOWNLINK_UNBOUND_ROUNDS;
         if self.unbound {
+            if self.unbound_since.is_none() {
+                self.unbound_since = Some(Instant::now());
+            }
             if !was_unbound || cooled(self.last_unbound_warn, RECOVER_COOLDOWN) {
+                let hint = match UnboundPolicy::from_config(cfg) {
+                    UnboundPolicy::Assisted =>
+                        "已配置 assisted（配套固件）：持续抑制主机侧自愈，等待模组内部完成绑定",
+                    UnboundPolicy::Legacy =>
+                        "已配置 legacy（非配套固件）：保留主机侧分级自愈（每级冷却 300 s）",
+                    UnboundPolicy::Auto =>
+                        "auto：先抑制无效自愈等待配套固件自动绑定，超时将自动回落主机侧自愈",
+                };
                 warnf!(format_args!(
-                    "数据面连续 {} 轮只有上行没有下行（TX 增长、RX 恒 0）：模组侧 RNDIS 未绑定到 PDN，主机侧自愈无效；需固件 atproxy 在模组内部下发 AT+EMBIND",
-                    self.unbound_rounds
+                    "数据面连续 {} 轮只有上行没有下行（TX 增长、RX 恒 0）：模组侧 RNDIS 未绑定到 PDN；{}",
+                    self.unbound_rounds, hint
                 ));
                 self.last_unbound_warn = Some(Instant::now());
             }
-        } else if was_unbound {
-            infof!(format_args!("模组侧下行已恢复，解除未绑定抑制"));
+        } else {
+            self.unbound_since = None;
+            if was_unbound {
+                infof!(format_args!("模组侧下行已恢复，解除未绑定抑制"));
+            }
         }
 
         let stalled = net::data_plane_stalled(&prev, &cur);
@@ -159,9 +256,50 @@ impl DataGuard {
         !stalled
     }
 
-    /// 模组侧 RNDIS 是否未绑定（`net_guard` 据此跳过无效重建与重拨）。
+    /// 模组侧 RNDIS 是否未绑定（**原始判据**：供 V6Watch 抑制 IPv6 维护，
+    /// 与兜底策略无关；任意下行帧出现即解除）。
     pub fn downlink_unbound(&self) -> bool {
         self.unbound
+    }
+
+    /// 本轮对主机侧自愈的「有效抑制」结论（供 `NetGuard` 使用）。
+    ///
+    /// 与 [`Self::downlink_unbound`] 的区别：前者是物理判据，这里叠加了
+    /// `unbound_policy` 与 `auto` 的等待窗口。未刷配套固件的设备不能只因为
+    /// 「没有下行帧」就永远放弃主机侧恢复动作。
+    pub fn suppression_active(&self, cfg: &Config) -> bool {
+        suppression_active(
+            UnboundPolicy::from_config(cfg),
+            self.unbound,
+            self.unbound_since.map(|t| t.elapsed()),
+            fallback_from(cfg),
+        )
+    }
+
+    /// 策略生效 / 自动回落时打印一次明确告警，避免被误认为插件"躺平"。
+    fn note_fallback(&mut self, cfg: &Config, suppressed: bool) {
+        if !self.unbound {
+            self.fallback_notified = false;
+            return;
+        }
+        if suppressed || self.fallback_notified {
+            return;
+        }
+        self.fallback_notified = true;
+        let waited = self
+            .unbound_since
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        match UnboundPolicy::from_config(cfg) {
+            UnboundPolicy::Auto => warnf!(format_args!(
+                "未绑定已持续 {} 秒，仍未检测到配套固件在模组内部完成绑定：自动恢复主机侧分级自愈（每级冷却 300 s）；建议刷入 atproxy 2.3.0 固件，或把 unbound_policy 设为 assisted",
+                waited
+            )),
+            UnboundPolicy::Legacy => infof!(format_args!(
+                "未绑定策略为 legacy（非配套固件）：保留主机侧分级自愈，IPv6 维护仍按未绑定形态抑制"
+            )),
+            UnboundPolicy::Assisted => {}
+        }
     }
 
     /// 执行下一级自愈动作。
@@ -244,14 +382,15 @@ impl NetGuard {
     }
 
     /// 一轮双栈连通性巡检；返回本轮是否进入净化态，供拨号巡检同步启动退避。
-    pub fn tick(&mut self, at: &AtHandle, cfg: &Config, unbound: bool) -> bool {
+    pub fn tick(&mut self, at: &AtHandle, cfg: &Config, suppressed: bool) -> bool {
         if !cfg.net_guard || !cfg.enabled {
             return false;
         }
-        // 模组侧 RNDIS 未绑定时，ping 必然失败但根因不在主机侧：跳过本轮
-        // 连通性巡检，避免 net_guard 反复 ifup / 重拨（实机 fm350v6 每
-        // 约 40 秒被重建一次）。RX 一旦出现即自动恢复巡检。
-        if unbound {
+        // 传入的是 DataGuard 的「有效抑制」结论，不是原始判据：已刷配套
+        // 固件时 ping 必然失败且根因不在主机侧，跳过本轮巡检避免反复
+        // ifup / 重拨；auto 等待超时或 legacy 策略则为 false，主机侧分级
+        // 自愈照常运行（自带 300 s 冷却，不会形成恢复风暴）。
+        if suppressed {
             return false;
         }
         let Some(dev) = net::detect_dev(cfg) else {
@@ -597,5 +736,66 @@ mod tests {
     fn failed_redial_purge_threshold_has_a_one_round_floor() {
         let mut stack = StackGuard::default();
         assert!(stack.note_redial_result(false, 0));
+    }
+
+    // ------------------------------------------------------------ 未绑定兜底
+
+    #[test]
+    fn unbound_policy_parsing_is_forgiving() {
+        assert_eq!(UnboundPolicy::parse("auto"), UnboundPolicy::Auto);
+        assert_eq!(UnboundPolicy::parse("assisted"), UnboundPolicy::Assisted);
+        assert_eq!(UnboundPolicy::parse("LEGACY"), UnboundPolicy::Legacy);
+        assert_eq!(UnboundPolicy::parse(" assisted "), UnboundPolicy::Assisted);
+        // 拼错、空值、注入串都回落到最安全的 auto（不会永久停摆）
+        for s in ["", "bogus", "auto;reboot", "assistedX"] {
+            assert_eq!(UnboundPolicy::parse(s), UnboundPolicy::Auto);
+        }
+    }
+
+    #[test]
+    fn suppression_never_applies_without_the_unbound_verdict() {
+        let f = Duration::from_secs(600);
+        assert!(!suppression_active(
+            UnboundPolicy::Auto, false, Some(Duration::from_secs(9999)), f
+        ));
+        assert!(!suppression_active(UnboundPolicy::Assisted, false, None, f));
+        assert!(!suppression_active(UnboundPolicy::Legacy, false, None, f));
+    }
+
+    #[test]
+    fn assisted_suppresses_forever_while_legacy_never_does() {
+        let f = Duration::from_secs(600);
+        assert!(suppression_active(
+            UnboundPolicy::Assisted, true, Some(Duration::from_secs(99999)), f
+        ));
+        assert!(!suppression_active(
+            UnboundPolicy::Legacy, true, Some(Duration::from_secs(0)), f
+        ));
+    }
+
+    #[test]
+    fn auto_falls_back_after_waiting_for_matched_firmware() {
+        let f = Duration::from_secs(600);
+        assert!(suppression_active(UnboundPolicy::Auto, true, None, f));
+        assert!(suppression_active(
+            UnboundPolicy::Auto, true, Some(Duration::from_secs(599)), f
+        ));
+        assert!(!suppression_active(
+            UnboundPolicy::Auto, true, Some(Duration::from_secs(600)), f
+        ));
+        assert!(!suppression_active(
+            UnboundPolicy::Auto, true, Some(Duration::from_secs(3600)), f
+        ));
+    }
+
+    #[test]
+    fn fallback_is_clamped_for_bogus_uci_values() {
+        let mut c = Config::default();
+        c.unbound_fallback_secs = 0;
+        assert_eq!(fallback_from(&c), Duration::from_secs(UNBOUND_FALLBACK_MIN_SECS));
+        c.unbound_fallback_secs = 999999;
+        assert_eq!(fallback_from(&c), Duration::from_secs(UNBOUND_FALLBACK_MAX_SECS));
+        c.unbound_fallback_secs = 600;
+        assert_eq!(fallback_from(&c), Duration::from_secs(600));
     }
 }

@@ -84,6 +84,21 @@ pub struct Config {
     /// 连续多少轮连通性探测失败才触发该栈的恢复动作；拨号失败与第 2 级重拨
     /// 失败也复用此门槛，达到后清除 UCI 会话地址残值。
     pub net_guard_rounds: u32,
+    /// 「模组侧 RNDIS 未绑定」时主机侧自愈的处置策略。
+    ///
+    /// r3/r4 无条件抑制自愈，隐含前提是设备刷了配套固件（atproxy 2.3.0）由模组
+    /// 内部完成绑定。没有配套固件时这个前提不成立，插件会永久停止自愈：
+    /// - `auto`（默认）：先抑制 `unbound_fallback_secs` 秒等自动绑定，超时仍
+    ///   无下行帧就自动回落，恢复主机侧分级自愈；
+    /// - `assisted`：已刷配套固件，持续抑制，完全交给模组内部绑定；
+    /// - `legacy`：明确没有配套固件，从不抑制主机侧自愈。
+    ///
+    /// IPv6 维护（`V6Watch::maintain`）只看原始未绑定判据，与本策略无关：
+    /// 没有下行帧时 RA / DHCPv6 必然收不到应答，刷 `fm350v6` 永远是无效动作。
+    pub unbound_policy: String,
+    /// `auto` 策略等待配套固件自动绑定的秒数（30-3600，默认 600）。
+    /// 超时后自动回落主机侧自愈，并打印一条明确告警提示刷入配套固件。
+    pub unbound_fallback_secs: u64,
     /// IPv6 获取方式：`ra` / `dhcpv6` / `static` / `off`。
     ///
     /// `dhcpv6` 交给 netifd 的 odhcp6c：它在**用户态**用 raw socket 收 RA，
@@ -148,6 +163,8 @@ impl Default for Config {
             data_guard_rounds: 3,
             net_guard: true,
             net_guard_rounds: 3,
+            unbound_policy: "auto".into(),
+            unbound_fallback_secs: 600,
             v6_mode: "dhcpv6".into(),
             eif_guard: true,
             poll_interval: 30,
@@ -249,6 +266,8 @@ pub fn load() -> Config {
         data_guard_rounds: opt_num("data_guard_rounds", d.data_guard_rounds),
         net_guard: opt_bool("net_guard", d.net_guard),
         net_guard_rounds: opt_num("net_guard_rounds", d.net_guard_rounds),
+        unbound_policy: opt_str("unbound_policy", &d.unbound_policy),
+        unbound_fallback_secs: opt_num("unbound_fallback_secs", d.unbound_fallback_secs),
         v6_mode: opt_str("v6_mode", &d.v6_mode),
         eif_guard: opt_bool("eif_guard", d.eif_guard),
         poll_interval: opt_num("poll_interval", d.poll_interval),
@@ -440,6 +459,20 @@ fn validate_value(key: &str, val: &str) -> Result<(), String> {
             "IPv6 模式『{}』非法：可选 dhcpv6 / ra / static / off",
             val
         )),
+        "unbound_policy" if !matches!(val, "auto" | "assisted" | "legacy") => Err(format!(
+            "未绑定自愈策略『{}』非法：可选 auto / assisted / legacy",
+            val
+        )),
+        "unbound_fallback_secs"
+            if val.parse::<u64>()
+                .map(|n| !(30..=3600).contains(&n))
+                .unwrap_or(true) =>
+        {
+            Err(format!(
+                "回落等待秒数『{}』非法：必须是 30-3600 的整数",
+                val
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -608,6 +641,35 @@ mod tests {
                 k,
                 v
             );
+        }
+    }
+
+    #[test]
+    fn unbound_policy_defaults_to_auto_with_a_bounded_fallback() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.unbound_policy, "auto");
+        assert_eq!(c.unbound_fallback_secs, 600);
+        assert!((30..=3600).contains(&c.unbound_fallback_secs));
+
+        // 局部 JSON 反序列化同样从 Default 补齐新字段
+        let c2: Config = serde_json::from_str(r#"{"apn":"ctnet"}"#).unwrap();
+        assert_eq!(c2.unbound_policy, "auto");
+        assert_eq!(c2.unbound_fallback_secs, 600);
+    }
+
+    #[test]
+    fn unbound_policy_and_fallback_are_validated() {
+        for v in ["auto", "assisted", "legacy"] {
+            assert!(validate_value("unbound_policy", v).is_ok(), "{} 应通过", v);
+        }
+        for v in ["AUTO", "bogus", "auto;reboot", ""] {
+            assert!(validate_value("unbound_policy", v).is_err(), "{} 必须被拒", v);
+        }
+        for v in ["30", "600", "3600"] {
+            assert!(validate_value("unbound_fallback_secs", v).is_ok(), "{} 应通过", v);
+        }
+        for v in ["0", "29", "3601", "-1", "abc", "600;reboot"] {
+            assert!(validate_value("unbound_fallback_secs", v).is_err(), "{} 必须被拒", v);
         }
     }
 }

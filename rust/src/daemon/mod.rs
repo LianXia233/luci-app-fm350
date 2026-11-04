@@ -150,6 +150,8 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
 
         // 数据面判据由上一轮 DataGuard 产出；本段先消费它，未绑定时
         // 拨号巡检会跳过 IPv6 维护，避免 netifd 每约 40 s 抖动一次。
+        // 这里用「原始判据」而非策略结论：没有下行帧时 RA / DHCPv6 必然
+        // 收不到应答，刷新 fm350v6 在任何策略下都是无效动作。
         let unbound_prev = w.2.downlink_unbound();
 
         // —— 阻塞段 1：拨号巡检 + IPv6（AT + shell）——
@@ -181,9 +183,11 @@ pub async fn run(cfg_initial: config::Config) -> Result<(), String> {
                 let mut netg = netg;
                 conflict.tick(&c2);
                 data.tick(&at2, &c2);
-                // 先取数据面结论再跑连通性巡检：模组侧未绑定时抑制无效自愈。
-                let unbound = data.downlink_unbound();
-                let purified = netg.tick(&at2, &c2, unbound);
+                // 先取数据面结论再跑连通性巡检。这里传的是「有效抑制」：
+                // 已刷配套固件时抑制无效自愈；未刷（或 auto 等待超时）自动
+                // 回落，主机侧分级自愈照常运行，不会永久躺平。
+                let suppressed = data.suppression_active(&c2);
+                let purified = netg.tick(&at2, &c2, suppressed);
                 (conflict, data, netg, purified, route_fixed)
             })
             .await?;

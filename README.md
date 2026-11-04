@@ -174,6 +174,11 @@ modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
 `V6Watch::maintain()`，`fm350v6` 仍每约 40 秒 down/up 一次，故 1.2.0-r4 把
 未绑定结论同时注入拨号巡检，未绑定时跳过 IPv6 维护，消除该抖动。
 
+1.2.0-r5 补上这条抑制的隐含前提：只有已刷配套固件的设备才应当一直等下去。
+新增 `unbound_policy`（`auto` / `assisted` / `legacy`）与
+`unbound_fallback_secs`（默认 600 s），`auto` 超时未等到下行帧即自动恢复
+主机侧分级自愈，避免旧 rootfs、其它固件分支或判据误判时插件永久停止自愈。
+
 固件改动**必须用 SP Flash Tool 重新线刷**才能生效。刷后建议依次核对：
 `atproxy -V`（应为 2.3.0）、`atproxy status`（`bound=1`、`cid=1`）、
 `cat /var/log/atproxy.log | grep EMBIND`、`cat /sys/class/net/eth2/statistics/rx_packets`
@@ -224,9 +229,17 @@ RNDIS 绑定标志位，但**仅作观测**——实机证实主机侧下发 `AT
 
 若 `eth2` 出现「TX 持续增长、`rx_packets` 恒为 0」且 `ping -I eth2` 全丢，
 说明模组侧 RNDIS 未绑定：这是 MD 域 D2RM 状态机问题，主机侧重建接口、重拨、
-复位 USB 端点都不对症。插件会识别该形态并停止无效自愈，需刷入配套固件
-（atproxy 2.3.0：init 正确加载 `/etc/config/atproxy`、固定数据 cid=1、识别
-`+EMBIND:` URC、绑定失败时先解绑再重绑）由模组内部完成绑定。
+复位 USB 端点都不对症，最终仍要刷入配套固件（atproxy 2.3.0：init 正确加载
+`/etc/config/atproxy`、固定数据 cid=1、识别 `+EMBIND:` URC、绑定失败时先解绑
+再重绑）由模组内部完成绑定。
+
+**但「停止主机侧自愈」只在已刷配套固件时才成立**（1.2.0-r5 起）：插件用
+`unbound_policy` 显式表达这个前提，`auto`（默认）先抑制 `unbound_fallback_secs`
+秒（默认 600）等模组内部自动绑定，超时仍无下行帧就自动恢复主机侧分级自愈并
+打印告警；`assisted` 用于已刷配套固件的设备，持续抑制；`legacy` 用于明确没有
+配套固件的设备，从不抑制。三种策略下 `fm350v6` 的 IPv6 维护都按未绑定形态
+抑制，回落主机侧自愈也不会带回每约 40 秒的接口抖动。主机侧 `AT+EMBIND` 只改
+标志位，任何策略下都不会被当作修复手段。
 
 ### 网络与锁频
 
@@ -589,6 +602,8 @@ session、uci 等全部 ubus 调用就堵多久（表现为整个 Web 界面瘫�
 | `data_guard_rounds` | `3` | 连续多少轮判定数据面无进展才触发自愈（最小 1） |
 | `net_guard` | `1` | 公网连通性保活：IPv4/IPv6 各自独立向公共 DNS 发 ICMP（绑定数据网卡），「模组侧有地址」不等于「真正可用」；连续多轮失败才按栈恢复，v6 单独故障绝不重拨 |
 | `net_guard_rounds` | `3` | 连续多少轮连通性探测失败才触发该栈恢复动作（每栈冷却 300 s）；同一门槛也用于连续拨号失败/第 2 级重拨失败后的会话地址净化，净化后自动拨号退避 300 s |
+| `unbound_policy` | `auto` | 模组侧 RNDIS 未绑定时的自愈策略（1.2.0-r5）：`auto` 先抑制 `unbound_fallback_secs` 秒等配套固件内部绑定、超时自动回落主机侧自愈（**未刷配套固件不会永久躺平**）；`assisted` 已刷配套固件、持续抑制；`legacy` 明确未刷配套固件、从不抑制。三种策略下 IPv6 维护都按未绑定形态抑制 |
+| `unbound_fallback_secs` | `600` | `auto` 策略等待配套固件自动绑定的秒数（30-3600）；超时自动恢复主机侧分级自愈并告警 |
 | `v6_mode` | `dhcpv6` | IPv6 获取方式：`dhcpv6` 交给 netifd 的 odhcp6c（**默认**）——用户态收 RA，不受内核 `accept_ra` 影响，并把 `/64` 委派给 LAN；`ra` 由内核按运营商 RA 自动配置；`static` 把模组侧地址以 `/128` 静态写入；`off` 不托管 IPv6。注：未识别取值在运行时按 `dhcpv6` 处理（1.0.11 起；旧行为为 `ra`） |
 | `eif_guard` | `1` | EIF 兜底加速（1.0.12 起）：消费 f22-atproxy 的 `+GT*` URC（需刷入带 atproxy 的 F22 rootfs），地址类事件触发下一轮巡检提前（冷却 60 s）。**纯增强非依赖**——未刷修改 rootfs 的设备主线轮询行为完全一致；`0` 关闭 |
 | `poll_interval` | `30` | 状态轮询与路由守护周期（秒，最低 5） |
