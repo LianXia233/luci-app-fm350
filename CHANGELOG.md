@@ -8,6 +8,7 @@
   AP 内核 gadget 能力、md1rom 签名容器结构、国内四大运营商 APN 审计、`atproxy` AT 网关与
   PCIE 禁用链路，以及 NCM 不可行的三重硬阻塞。
 - **更新** README「修改版固件」章节：补充 F31 29.23.24n AP + MD 自愈完整线刷包说明与核心结论摘要。
+- **更新** `docs/ARCHITECTURE_MIGRATION.md`：新增 §12 固件侧架构边界（AP/MD 双域分工、RNDIS 归属、AT 两层限速、NCM 硬阻塞）及其与 AT 调度器/事务的衔接。
 - **固件交付**：`firmware-29.23.24n_F31_mod` Release 替换为完整线刷包（15 个分区镜像 +
   `Scatter.xml` + `download_agent/`），移除 `F31_29.23.24n_MOD_AP.zip`，`SHA256SUMS` 同步重算。
 

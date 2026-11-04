@@ -8,6 +8,7 @@
 > `rpcserver.rs`（本地 TCP newline-JSON）、`async_runtime.rs`（TaskManager）、
 > `mt5700.uc`（rpcd 侧保护）。
 > 原则：**借鉴机制，不照搬实现；不破坏 FM350 已实机验证的串口独占与业务语义。**
+> 固件侧边界（AP/MD 双域、RNDIS 归属、AT 两层限速）见 §12，依据 `docs/RNDIS-Analysis-Report.md`（2026-11-04 补充）。
 
 ## 1. 两侧架构差异审查
 
@@ -154,3 +155,49 @@ ucode 侧轮询任务直到完成（沿用 TMO_WRITE 预算），对前端保持
 | fs.popen 硬超时 / 熔断 / 预检 / rid 校验 | §8 |
 | 优雅关闭 / 事件循环无阻塞 / 有界 | §7 |
 | 保留 ACL / 回环 / 参数校验 / 无注入 / 无敏感日志 | §5、§8 |
+
+
+## 12. 固件侧架构边界（F31 29.23.24n 逆向分析）
+
+本节约束来自 [docs/RNDIS-Analysis-Report.md](RNDIS-Analysis-Report.md)
+（AP 内核 4.19.205 / MD `81600.0000.00.29.23.24`），用于界定「插件能做什么、
+不能做什么」。插件运行在 OpenWrt 主机侧，模组是 AP + MD 双域，责任边界不能混。
+
+### 12.1 双域分工
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| 主机 | OpenWrt + luci-app-fm350 / `fm350d` | AT 请求编排、状态聚合、LuCI 展示 |
+| AP 域 | 模组内 Linux 4.19.205 | USB 控制器（mtu3）、configfs gadget（仅 ACM / ADB / MSC）、`atcid`、`atproxy` |
+| MD 域 | 模组内 RTOS | `usbclass/rndis` 全实现、DHCP、PDN / EMBIND、AT 引擎 |
+
+AP 内核 `IKCFG_ST` 中 `CONFIG_USB_CONFIGFS_RNDIS` / `NCM` / `ECM` 全部未启用，
+`usb.init` 只挂 `ffs.adb`、`acm.gs0..3`、`mass_storage`。**RNDIS 网络设备由 MD 域
+创建**，主机侧看到的 RNDIS 接口不是 AP 域 netdev。
+
+### 12.2 对插件设计的四条硬约束
+
+1. **不能靠主机侧 `AT+EMBIND` 恢复数据面**。外部 AT 经 USB ACM → `atcid` →
+   MIPC 进入 MD AT 引擎，缺少「模组内部 + PDN 已激活」上下文，绑定不落地。
+   RNDIS 绑定必须由固件侧 `atproxy` 在模组内部完成；插件只能查询与观测。
+2. **AT 限速是两层，不是一层**。插件侧 AT 优先级调度器（§3）保证主机侧串行下发；
+   固件侧 `atproxy` 独占 `/dev/atci-service`、单 worker、硬性 ≥25 ms 间隔、
+   队列上限 64。任一插件绕过网关直连 `atci_service`，仍可能与 `atproxy` 并发打到
+   MD 的 `atcid` 解析任务，导致 AT 无响应并连带 RNDIS 数据面掉线。
+3. **USB 枚举失败不在插件可恢复范围**。nvdata 的 `dipc_config` 缺
+   `dual_ipc_mode` 时 `usb.init` 直接走 NO USB 分支退出，主机看不到任何设备；
+   这是固件层前置条件（由 `mdcfg` / `pcieoff` 修复），端口重选与看门狗无法自愈。
+4. **NCM 不是可选后端**。AP 内核无 NCM / TUN / NAT，MD 的 `usbclass/` 无 NCM 类，
+   md1rom 为签名容器不可安全注入；插件不应假设能切换到 NCM 或 ECM 数据面。
+
+### 12.3 与 §3 调度器、§4 事务的衔接
+
+| 固件侧现象 | 插件侧对应机制 |
+|---|---|
+| MD `atcid` 单任务组同时处理 AT 与 RNDIS 绑定 | §3 有界优先级队列 + 事务独占，避免突发灌入 |
+| `atproxy` 网关 25 ms 硬间隔 | 插件 AT worker 的串行一问一答；两者叠加而非互相替代 |
+| 拨号期间外部 AT 不应被阻塞 | §3 P2 查询优先级 + Aging，配合固件网关的高优先级外部队列 |
+| 预置 APN 缺陷 / IMS 抢占 cid 1 | §4 dial 事务显式 `CGDCONT`，不依赖固件 `ia` 条目 |
+
+> 边界：本节结论来自静态逆向与离线联调，最终以实机 `AT+CGMR`、
+> `atproxy status` 与数据面计数为准；验证命令见分析文档第七节。
