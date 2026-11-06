@@ -360,7 +360,7 @@ mod tests {
         let dummy = "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1";
         assert!(!is_valid_ipv6(dummy));
         assert_eq!(normalize_ipv6(dummy), None);
-        assert!(!is_valid_ipv6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1"));
+        assert!(!is_valid_ipv6("0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0"));
         assert!(!is_valid_ipv6("1.2.3.4"));
         assert!(!is_valid_ipv6("32.1.13.184.32.0.0.0.0.0.0.0.0.0.0.256"));
     }
