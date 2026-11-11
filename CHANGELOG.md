@@ -2,6 +2,18 @@
 
 本项目遵循语义化版本号。
 
+## CI：GitHub Actions 升级至 Node 24 运行时 (2026-11-12)
+
+### 变更
+
+- `.github/workflows/ci.yml`、`release.yml`：`actions/checkout@v6` → `v7`、
+  `actions/upload-artifact@v6` → `v7`、
+  `actions-rust-lang/setup-rust-toolchain@v1` → `v2`（composite action，输入项无移除）。
+- GitHub 已于 2026-09-23 从托管 runner 移除 Node 20 运行时，仍声明 `node20` 的 action 会被强制跑在 Node 24 上并打印 `Node.js 20 is deprecated` 告警，属于未验证状态；本次按各 action 的 `action.yml` 逐一核对 `runs.using` 后统一升级。
+- **仅改 CI 配置**：项目源码、`node-version` / `python-version` / `go-version` 等工具链版本、产物命名与 Release 流程均未改动。告警指的是 action 自身声明的运行时，不是项目构建所用的 Node 版本。
+  `toolchain: stable` / `targets` / `cache-workspaces` 等输入保持不变。
+- 升级后全仓复扫 59 个工作流/Action 文件：`node20` / `node16` / `node12` 引用残留为 0，所有 YAML 均可解析。
+
 ## 安全：全历史脱敏 (2026-11-06)
 
 对工作树与全部 Git 历史执行一次脱敏：文档与测试样例中的实机设备标识（IMEI、
