@@ -60,6 +60,8 @@ pub const ICCID: &str = "AT+ICCID";
 pub const GTUSBMODE_READ: &str = "AT+GTUSBMODE?";
 pub const GTDUALSIM_READ: &str = "AT+GTDUALSIM?";
 pub const CSCA_READ: &str = "AT+CSCA?";
+const GTUSBMODE_SET_PREFIX: &str = "AT+GTUSBMODE=";
+const GTDUALSIM_SET_PREFIX: &str = "AT+GTDUALSIM=";
 
 /// USB 模式写入。手册 §13.1.1 对本机型只定义了两档：
 ///
@@ -72,12 +74,12 @@ pub const CSCA_READ: &str = "AT+CSCA?";
 /// **副作用**：切换会触发 USB 重新枚举，AT 口与数据网卡都会短暂消失。
 /// 调用方必须在下发后等待重枚举完成，不能立即追问。
 pub fn set_usb_mode(mode: u32) -> String {
-    format!("AT+GTUSBMODE={}", mode)
+    format!("{GTUSBMODE_SET_PREFIX}{mode}")
 }
 
 /// 切换 SIM 卡槽。
 pub fn set_sim_slot(slot: u32) -> String {
-    format!("AT+GTDUALSIM={}", slot)
+    format!("{GTDUALSIM_SET_PREFIX}{slot}")
 }
 
 /// 写短信中心号码。
@@ -373,6 +375,13 @@ pub fn set_cfun(mode: u32) -> String {
 
 /// 重启模组。
 pub const REBOOT: &str = "AT+CFUN=1,1";
+
+pub(crate) fn invalidates_firmware_revision(command: &str) -> bool {
+    let command = command.trim();
+    command == REBOOT
+        || command.starts_with(GTUSBMODE_SET_PREFIX)
+        || command.starts_with(GTDUALSIM_SET_PREFIX)
+}
 
 /// 温度读取（`=0` 一次返回全部 23 路传感器，单位 0.001 ℃）。
 ///
