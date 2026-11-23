@@ -196,6 +196,7 @@ pub struct AtPort {
     /// 连续零应答计数：`command()` 全程未收到任何字节则 +1，收到数据清零。
     /// 供哑口判定（[`SILENT_RESELECT_THRESHOLD`]）使用。
     silent_streak: u32,
+    pub(crate) firmware_revision: Option<String>,
 }
 
 impl AtPort {
@@ -216,6 +217,7 @@ impl AtPort {
             last_cmd_at: None,
             gate: urc::LineGate::default(),
             silent_streak: 0,
+            firmware_revision: None,
         };
         p.handshake();
         Ok(p)
@@ -265,6 +267,9 @@ impl AtPort {
 
     /// 发送一条 AT 命令并返回规范化响应（自动补 `\r`，剥离回显）。
     pub fn command(&mut self, cmd: &str) -> AtResult<String> {
+        if at_cmd::invalidates_firmware_revision(cmd) {
+            self.firmware_revision = None;
+        }
         self.pace();
 
         let line = if cmd.ends_with('\r') {

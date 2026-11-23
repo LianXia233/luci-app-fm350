@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use super::run;
-use crate::at::{at_cmd, AtHandle};
+use crate::at::queue::AtPriority;
+use crate::at::{at_cmd, is_ok, AtHandle};
 use crate::config::Config;
 
 #[derive(Debug, serde::Serialize)]
@@ -40,8 +41,13 @@ const FIELDS: &[(&str, &str)] = &[
 pub fn info(at: &AtHandle, cfg: &Config) -> ModemInfo {
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     for (key, cmd) in FIELDS {
-        let raw = run(at, cfg, cmd).unwrap_or_default();
-        map.insert((*key).to_string(), clean_value(&raw, cmd));
+        let value = if *cmd == at_cmd::CGMR {
+            firmware_revision(at, cfg)
+        } else {
+            let raw = run(at, cfg, cmd).unwrap_or_default();
+            clean_value(&raw, cmd)
+        };
+        map.insert((*key).to_string(), value);
     }
 
     // 部分固件对 AT+CGSN 无响应，退回 +EGMREXT 读到的串号
@@ -61,6 +67,40 @@ pub fn info(at: &AtHandle, cfg: &Config) -> ModemInfo {
         sim_slot: map.remove("sim_slot").unwrap_or_default(),
         sms_center: map.remove("sms_center").unwrap_or_default(),
     }
+}
+
+/// CGMR 会使部分 FM350 固件泄漏文件描述符，每个 AT 会话只缓存成功读取的版本。
+fn firmware_revision(at: &AtHandle, cfg: &Config) -> String {
+    at.run(AtPriority::Normal, cfg, |port, _| {
+        if let Some(revision) = &port.firmware_revision {
+            return Ok(revision.clone());
+        }
+        let response = port.command(at_cmd::CGMR)?;
+        let revision = firmware_value(&response);
+        if !revision.is_empty() {
+            port.firmware_revision = Some(revision.clone());
+        }
+        Ok(revision)
+    })
+    .unwrap_or_default()
+}
+
+fn firmware_value(response: &str) -> String {
+    if !is_ok(response) {
+        return String::new();
+    }
+
+    // 迟到的其他命令响应可能出现在同一批数据中，不把它缓存为版本。
+    response
+        .lines()
+        .map(str::trim)
+        .filter(|line| match line.strip_prefix('+') {
+            Some(rest) => rest.trim_start().starts_with("CGMR:"),
+            None => true,
+        })
+        .map(|line| clean_value(line, at_cmd::CGMR))
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
 }
 
 /// 从原始响应中抽取人类可读的值：优先 `+XXX: value` 行，否则取首个非空非结果码行。
@@ -104,6 +144,86 @@ fn clean_value(resp: &str, cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn firmware_cache_is_shared_by_info_and_status_and_reset_on_reconnect() {
+        use serialport::SerialPort;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let attach = |answers: &'static [&'static str]| {
+            let (mut modem, slave) = serialport::TTYPort::pair().unwrap();
+            modem.set_timeout(Duration::from_secs(8)).unwrap();
+            let cfg = Config {
+                at_port: slave.name().unwrap(),
+                at_timeout: 1,
+                ..Config::default()
+            };
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&reads);
+            let device = std::thread::spawn(move || {
+                let mut cmd = String::new();
+                let mut byte = [0];
+                while modem.read_exact(&mut byte).is_ok() {
+                    if byte[0] != b'\r' {
+                        cmd.push(byte[0] as char);
+                        continue;
+                    }
+                    let reply = match cmd.as_str() {
+                        at_cmd::CGMR => {
+                            let index = observed.fetch_add(1, Ordering::Relaxed);
+                            answers[index.min(answers.len() - 1)]
+                        }
+                        "AT+GTSENRDTEMP=0" => "\r\n+GTSENRDTEMP: 10,42000\r\nOK\r\n",
+                        _ => "\r\nOK\r\n",
+                    };
+                    modem.write_all(reply.as_bytes()).unwrap();
+                    cmd.clear();
+                }
+            });
+            (cfg, slave, reads, device)
+        };
+
+        let (cfg, slave, reads, device) = attach(&[
+            "\r\n+CME ERROR: phone failure\r\n",
+            "\r\n+GTZONERDMAXTEMP: 1,0\r\n81600.0000.00.29.23.30\r\nOK\r\n",
+            "\r\n+ CGMR: \"81600.0000.00.29.23.30\"\r\nOK\r\n",
+            "\r\n81600.0000.00.29.23.11\r\nOK\r\n",
+            "\r\n81600.0000.00.29.23.28\r\nOK\r\n",
+        ]);
+        let at = AtHandle::new();
+        assert!(info(&at, &cfg).firmware.is_empty());
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(info(&at, &cfg).firmware, "81600.0000.00.29.23.30");
+        for _ in 0..2 {
+            let status = crate::modem::status(&at, &cfg);
+            assert_eq!(status.info.firmware, "81600.0000.00.29.23.30");
+            assert_eq!(status.temperature.and_then(|temp| temp.modem), Some(42.0));
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        assert!(crate::modem::reboot(&at, &cfg).is_ok());
+        assert_eq!(info(&at, &cfg).firmware, "81600.0000.00.29.23.30");
+        assert_eq!(reads.load(Ordering::Relaxed), 3);
+        assert!(crate::modem::set_sim_slot(&at, &cfg, 1).is_ok());
+        assert_eq!(info(&at, &cfg).firmware, "81600.0000.00.29.23.11");
+        assert_eq!(reads.load(Ordering::Relaxed), 4);
+        assert!(crate::modem::set_usb_mode(&at, &cfg, 40).is_ok());
+        assert_eq!(info(&at, &cfg).firmware, "81600.0000.00.29.23.28");
+        assert_eq!(reads.load(Ordering::Relaxed), 5);
+        let (other, other_slave, other_reads, other_device) = attach(&[
+            "\r\n81600.0000.00.29.24.02\r\nOK\r\n",
+        ]);
+        assert_eq!(info(&at, &other).firmware, "81600.0000.00.29.24.02");
+        assert_eq!(other_reads.load(Ordering::Relaxed), 1);
+        at.close();
+        drop(slave);
+        drop(other_slave);
+        device.join().unwrap();
+        other_device.join().unwrap();
+    }
 
     #[test]
     fn prefixed_values_are_extracted() {
