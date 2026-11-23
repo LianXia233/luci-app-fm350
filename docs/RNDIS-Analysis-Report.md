@@ -624,8 +624,10 @@ done
 
 ### A.1 取证范围与方法
 
-对 Release `firmware-29.23.24n_F31_mod` 的线刷包内全部 20 个文件做魔数识别与
-字符串取证；`root.squashfs` 用 `unsquashfs` 解出 1887 个文件后单独扫描关键组件；
+对 Release `firmware-29.23.24n_F31_mod`（已下线；同一基线的原厂包见
+[`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)）
+的线刷包内全部 20 个文件做魔数识别与字符串取证；
+`root.squashfs` 用 `unsquashfs` 解出 1887 个文件后单独扫描关键组件；
 `modem.img` 用 `tools/md1rom.py` 解析 md1rom / MMM 容器（头部 `0x88168858`，
 2 个块：`FILE_INFO` + `MT6880_DTC_FM350` 主体 33,554,736 B）。
 

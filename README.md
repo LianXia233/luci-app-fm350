@@ -119,8 +119,10 @@ rm -rf /tmp/luci-modulecache/
 
 ### F31 29.23.24n 完整线刷包与 RNDIS 逆向分析
 
-除上述 F27 发布外，本项目还提供基于官方 `F31_29.23.24n` 的 **AP + MD 自愈完整线刷包**
-（Release tag `firmware-29.23.24n_F31_mod`）。该包包含 `Scatter.xml`、
+除上述 F27 发布外，本项目还提供基于官方 `F31_29.23.24n` 的**原厂完整线刷包**
+（Release tag [`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)）。
+此前的 **AP + MD 自愈修改包**（`firmware-29.23.24n_F31_mod`，含 atproxy 2.3.0）已下线；
+该修改包包含 `Scatter.xml`、
 `download_agent/`（DA / auth / flash.xml）及全部 15 个分区镜像，文件名与分区表逐一对应，
 可直接由 SP Flash Tool 加载；`DEV_OTA.img` 为 8 MiB 空白 YAFFS 分区镜像。
 modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
