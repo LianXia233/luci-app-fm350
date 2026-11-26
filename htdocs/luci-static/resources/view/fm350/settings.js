@@ -1410,51 +1410,33 @@ return view.extend({
 		return m.render().then(function(mapNode) {
 			var sections = mapNode.querySelectorAll('.cbi-section');
 
-			// Section 0: 守护进程设置
-			if (sections[0]) {
-				var leg0 = sections[0].querySelector('.cbi-section-legend');
-				if (leg0) {
-					var icon0 = E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS.cogs() ]);
-					leg0.insertBefore(icon0, leg0.firstChild);
-				}
-			}
+			// 按标题文本定位 section，不使用硬编码索引：新增或调整 section 会让
+			// 后续索引整体后移，曾导致「IPv6 接口」误用 IMEI 的高危卡片样式
+			// （红色顶边 + 盾牌图标），而真正的 IMEI 卡片反而丢了危险提示。
+			var sectionStyles = [
+				[ '守护进程设置', 'cogs', null ],
+				[ '蜂窝接口与网关', 'serial', null ],
+				[ '强制 DNS', 'radioMode', null ],
+				[ 'IPv6 接口', 'radioMode', null ],
+				[ 'AT 串口管理', 'serial', null ],
+				[ '模组控制指令', 'usbMode', null ],
+				[ 'IMEI / 设备识别码维护', 'shieldDanger', 'fm350-danger-card' ],
+				[ '模组硬件诊断信息', 'diagnostic', null ]
+			];
 
-			// Section 1: AT 串口管理
-			if (sections[1]) {
-				var leg1 = sections[1].querySelector('.cbi-section-legend');
-				if (leg1) {
-					var icon1 = E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS.serial() ]);
-					leg1.insertBefore(icon1, leg1.firstChild);
+			sectionStyles.forEach(function(spec) {
+				var title = spec[0], iconName = spec[1], extraClass = spec[2];
+				for (var i = 0; i < sections.length; i++) {
+					var leg = sections[i].querySelector('.cbi-section-legend');
+					if (!leg || leg.textContent.indexOf(title) < 0)
+						continue;
+					if (extraClass)
+						sections[i].classList.add(extraClass);
+					if (SVG_ICONS[iconName])
+						leg.insertBefore(E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS[iconName]() ]), leg.firstChild);
+					break;
 				}
-			}
-
-			// Section 2: 模组控制指令
-			if (sections[2]) {
-				var leg2 = sections[2].querySelector('.cbi-section-legend');
-				if (leg2) {
-					var icon2 = E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS.radioMode() ]);
-					leg2.insertBefore(icon2, leg2.firstChild);
-				}
-			}
-
-			// Section 3: IMEI 维护 (高危卡片样式注入)
-			if (sections[3]) {
-				sections[3].classList.add('fm350-danger-card');
-				var leg3 = sections[3].querySelector('.cbi-section-legend');
-				if (leg3) {
-					var icon3 = E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS.shieldDanger() ]);
-					leg3.insertBefore(icon3, leg3.firstChild);
-				}
-			}
-
-			// Section 4: 模组硬件诊断信息
-			if (sections[4]) {
-				var leg4 = sections[4].querySelector('.cbi-section-legend');
-				if (leg4) {
-					var icon4 = E('span', { 'class': 'fm350-legend-icon' }, [ SVG_ICONS.diagnostic() ]);
-					leg4.insertBefore(icon4, leg4.firstChild);
-				}
-			}
+			});
 
 			// 冷复位危险行视觉隔离
 			var rebootAnchor = mapNode.querySelector('[id$="-_reboot"]');
