@@ -1,0 +1,561 @@
+/*
+ * luci-app-fm350 —— vantage 主题兼容层
+ *
+ * 仅在 vantage 主题（html 内含 .vt-shell）生效；非 vantage 主题零命中。
+ * 注入顺序：mt5700.css → global.css → dialog.css → 本文件。页面 JS 在 render()
+ * 时还会追加 <style id="fm350-theme-glass-styles"> 等注入层，它们晚于本文件，
+ * 因此 #view 内组件规则统一带 `html:has(.vt-shell) #view` 前缀；挂在
+ * #modal_overlay 上的弹窗用 `html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask)`
+ * 作用域（必要时 !important）提高特异性，保证注入层不会反超。
+ * 只调整外观：不改 DOM、E() 调用、事件、RPC、LuCI 页面逻辑与 z-index 层级。
+ */
+
+/* ==========================================================================
+   1. 令牌桥接
+   把插件的 --fm-ui-* 中性令牌映射到 vantage 公开的 --v-* / --* 令牌，
+   不在组件里复制调色板。html:has(.vt-shell):root 的特异性高于 status.js /
+   at.js 注入的 :root，暗色由 vantage 的 html[data-darkmode="true"] 自动切换。
+   ========================================================================== */
+html:has(.vt-shell):root {
+	/* 中性令牌：文本、描边、表面，暗色由 vantage 的 data-darkmode 自动切换 */
+	--fm-ui-bg: var(--v-bg, var(--bg, #e9ecef));
+	--fm-ui-surface: var(--v-surface, var(--s1, #f8f9fa));
+	--fm-ui-surface-alt: var(--v-surface-2, var(--s2, #fff));
+	--fm-ui-text: var(--v-text, var(--text, #14171a));
+	--fm-ui-text-2: var(--v-text-2, var(--text-2, #4a515a));
+	--fm-ui-text-3: var(--v-text-3, var(--text-3, #5f666f));
+	--fm-ui-line: var(--v-line, var(--line, #d6dade));
+	--fm-ui-line-2: var(--v-line-2, var(--line-2, #c1c7ce));
+	/* --v-accent 是填充色：亮橄榄 / 暗青柠；--v-accent-ink 才是它上面的文字色
+	   （亮 #fff / 暗 #141a00）。--v-accent-fill-ink 与组件无关，不要用它。 */
+	--fm-ui-accent: var(--v-accent, var(--accent-text, #4b6600));
+	--fm-ui-accent-fill: var(--v-accent, var(--accent, #c8f031));
+	--fm-ui-accent-ink: var(--v-accent-ink, #ffffff);
+	--fm-ui-ok: var(--v-ok, var(--ok, #0b7f6c));
+	--fm-ui-info: var(--v-info, var(--info, #1c64c4));
+	--fm-ui-warn: var(--v-warn, var(--warn, #9a5b00));
+	--fm-ui-err: var(--v-err, var(--err, #c42b2b));
+	--fm-ui-ok-soft: var(--v-ok-soft, var(--ok-soft, rgba(11, 127, 108, .11)));
+	--fm-ui-info-soft: var(--v-info-soft, var(--info-soft, rgba(28, 100, 196, .1)));
+	--fm-ui-warn-soft: var(--v-warn-soft, var(--warn-soft, rgba(214, 138, 0, .15)));
+	--fm-ui-err-soft: var(--v-err-soft, var(--err-soft, rgba(196, 43, 43, .1)));
+	--fm-ui-soft: var(--v-accent-soft, var(--accent-soft, rgba(122, 163, 0, .13)));
+	--fm-ui-ctl-h: var(--v-ctl-h, var(--ctl-h, 36px));
+	/* 卡片阴影只用 vantage 的浅阴影，不用 --shadow-pop（那是浮层菜单的大阴影） */
+	--fm-ui-shadow: var(--v-shadow, 0 1px 2px rgba(20, 23, 26, .06), 0 1px 0 rgba(20, 23, 26, .03));
+	--fm-ui-shadow-raise: var(--v-shadow-raise, 0 6px 16px rgba(20, 23, 26, .08));
+	--fm-ui-radius: var(--v-r, var(--r, 6px));
+
+	/* 覆盖 status.js / at.js 注入的真实 --fm-* 变量；vantage 用实色表面，不做毛玻璃 */
+	--fm-glass-bg: var(--fm-ui-surface);
+	--fm-glass-bg-hover: var(--fm-ui-surface-alt);
+	--fm-glass-border: var(--fm-ui-line);
+	--fm-glass-shadow: var(--fm-ui-shadow);
+	--fm-glass-blur: none;
+	--fm-primary: var(--v-accent, var(--accent-text, #4b6600));
+	/* hover 比主色略深，且只在未聚焦时生效，避免悬停已聚焦按钮时丢焦点环 */
+	--fm-primary-hover: color-mix(in srgb, var(--v-accent, #4b6600) 90%, var(--v-text, #14171a));
+	--fm-primary-gradient: none;
+	--fm-on-primary: var(--v-accent-ink, #ffffff);
+	--fm-primary-soft: var(--v-accent-soft, rgba(122, 163, 0, .13));
+	--fm-info: var(--v-info, #1c64c4);
+	--fm-text-main: var(--fm-ui-text);
+	--fm-text-muted: var(--fm-ui-text-2);
+	--fm-temp-cool: var(--fm-ui-ok);
+	--fm-temp-normal: var(--fm-ui-info);
+	--fm-temp-warm: var(--fm-ui-warn);
+	--fm-temp-hot: var(--fm-ui-err);
+
+	/* at.css 侧真实变量：毛玻璃令牌归零，仅弹层可用 pop 阴影 */
+	--at-text: var(--v-text, var(--text, #14171a));
+	--at-text-secondary: var(--v-text-2, var(--text-2, #4a515a));
+	--at-bg-glass: var(--v-surface-2, var(--s2, #fff));
+	--at-bg-glass-hover: var(--v-surface-3, var(--s3, #eef0f3));
+	--at-bg-subtle: var(--v-surface, var(--s1, #f8f9fa));
+	--at-border-glass: var(--v-line-2, var(--line-2, #c1c7ce));
+	--at-border-subtle: var(--v-line, var(--line, #d6dade));
+	--at-shadow-sm: var(--fm-ui-shadow);
+	--at-shadow-md: var(--fm-ui-shadow-raise);
+	--at-shadow-lg: var(--v-shadow-pop, var(--shadow-pop, 0 12px 32px rgba(20, 23, 26, .16)));
+	--at-shadow-inset: none;
+	--at-blur: 0px;
+	--at-saturate: 100%;
+	--at-radius: var(--v-r-xl, var(--r-xl, 12px));
+
+	/* mt5700.css 里这三条是 !important，compat 侧必须同权重声明才能生效 */
+	--mt5700-card-bg: var(--v-surface-2, var(--s2, #fff)) !important;
+	--mt5700-card-bg-hover: var(--v-surface-3, var(--s3, #eef0f3)) !important;
+	--mt5700-radius-xl: var(--v-r-lg, var(--r-lg, 8px)) !important;
+
+	/* 弹窗文字令牌层 */
+	--mt5700-modal-ink: var(--v-text, var(--text, #14171a));
+	--mt5700-modal-ink-soft: var(--v-text-2, var(--text-2, #4a515a));
+	--mt5700-modal-ink-hint: var(--v-text-3, var(--text-3, #5f666f));
+	--mt5700-modal-ghost-ink: var(--v-text-2, var(--text-2, #4a515a));
+	--mt5700-modal-link-ink: var(--v-accent-text, var(--accent-text, #4b6600));
+	--mt5700-modal-placeholder: var(--v-text-3, var(--text-3, #5f666f));
+}
+
+/* ==========================================================================
+   2. 背景与层叠隔离
+   插件自带的三角网格立绘层在 vantage 上与主题背景重复，直接摘掉；
+   只处理装饰层，绝不动 #maincontent 的 position / z-index。
+   ========================================================================== */
+html:has(.vt-shell) #mt5700-global-bg { display: none !important; }
+html:has(.vt-shell) .mt5700-app::before { background: none !important; }
+
+/* 变量替换不够：status.js / at.css / dialog.css 还写死了 blur，显式关掉。
+   插件弹窗实际挂在 body 下的 .mt5700-modal-mask / .at-modal-mask，不在 #view。 */
+html:has(.vt-shell) #view .fm350-loading-hint,
+html:has(.vt-shell) #view .fm350-at-hero,
+html:has(.vt-shell) :is(#modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.at-modal, .modal, .fm350-net2-modal) {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+/* dialog.css:21 给遮罩层自身也写了 blur(12px)!important，必须单独关掉 */
+html:has(.vt-shell) :is(#modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.cbi-modal, .modal-overlay, .modal-backdrop, .mt5700-modal-mask, .at-modal-mask, .at-modal, .modal, .fm350-net2-modal),
+html:has(.vt-shell) :is(body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) {
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+/* ==========================================================================
+   3. 组件视觉收口
+   ========================================================================== */
+html:has(.vt-shell) #view .fm350-dashboard,
+html:has(.vt-shell) #view .fm350-hero,
+html:has(.vt-shell) #view .fm350-glass-card,
+html:has(.vt-shell) #view .fm350-thermal-dashboard,
+html:has(.vt-shell) #view .fm350-sensor-card,
+html:has(.vt-shell) #view .fm350-table-card,
+html:has(.vt-shell) #view .fm350-footer-note,
+html:has(.vt-shell) #view .fm350-loading-hint {
+	background: var(--fm-ui-surface) !important;
+	border: 1px solid var(--fm-ui-line) !important;
+	border-radius: 6px !important;
+	box-shadow: var(--fm-ui-shadow) !important;
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+
+/* 内距阶梯：普通卡 >720 为 16×20、≤720 为 12×14（见断点段）；
+   传感器瓦片是全页唯一的紧凑例外：>720 8×10、≤720 7×9。 */
+html:has(.vt-shell) #view :is(.fm350-hero, .fm350-glass-card,
+	.fm350-thermal-dashboard, .fm350-table-card) {
+	padding: 16px 20px !important;
+}
+html:has(.vt-shell) #view .fm350-sensor-card { padding: 8px 10px !important; }
+
+/* 卡片 hover 只换表面色，不做位移、不加第二圈阴影 */
+html:has(.vt-shell) #view :is(.fm350-glass-card, .fm350-sensor-card, .fm350-table-card):hover {
+	background: var(--fm-ui-surface-alt) !important;
+	border-color: var(--fm-ui-line-2) !important;
+	box-shadow: var(--fm-ui-shadow) !important;
+	transform: none !important;
+}
+
+/* 峰值卡：实色 soft 底 + 左侧 2px err 条，替换原来的白红渐变与顶部彩条 */
+html:has(.vt-shell) #view .fm350-sensor-card.fm350-is-peak {
+	background: var(--fm-ui-err-soft) !important;
+	border-color: var(--fm-ui-line) !important;
+	border-left: 2px solid var(--fm-ui-err) !important;
+	box-shadow: var(--fm-ui-shadow) !important;
+}
+html:has(.vt-shell) #view .fm350-sensor-card.fm350-is-peak::before {
+	background: none !important;
+	box-shadow: none !important;
+}
+
+/* 说明 / 标题 / 键名等次级文字走 text-2、text-3 */
+html:has(.vt-shell) #view :is(.fm350-hero-desc, .fm350-card-title, .fm350-card-sub,
+	.fm350-section-title, .fm350-thermal-main-label, .fm350-thermal-metric-k,
+	.fm350-table-key, .fm350-footer-summary, .fm350-footer-body, .fm350-loading-hint) {
+	color: var(--fm-ui-text-2) !important;
+}
+html:has(.vt-shell) #view :is(.fm350-sensor-id, .fm350-sensor-code) {
+	color: var(--fm-ui-text-3) !important;
+	font-size: var(--v-fs-micro) !important; /* 10.5px，元信息下限 */
+}
+/* 说明与药丸标签在手机上也不得低于 12px */
+html:has(.vt-shell) #view :is(.fm350-card-sub, .fm350-pill-tag) {
+	font-size: var(--v-fs-sm) !important;
+}
+
+/* 主数值 / 温度 / KPI 走主文字色，等宽数字避免刷新时数字跳动 */
+html:has(.vt-shell) #view :is(.fm350-hero-info h2, .fm350-card-value,
+	.fm350-thermal-main-val, .fm350-thermal-metric-v, .fm350-sensor-val,
+	.fm350-table-val) {
+	color: var(--fm-ui-text) !important;
+	font-variant-numeric: tabular-nums !important;
+}
+
+/* 标题不再全大写、不拉字距（vantage 的标题规范） */
+html:has(.vt-shell) #view :is(.fm350-card-title, .fm350-thermal-main-label) {
+	text-transform: none !important;
+	letter-spacing: 0 !important;
+}
+
+/* 语义色：文字 + soft 底 + 原有文字标签，颜色不是唯一编码 */
+html:has(.vt-shell) #view :is(.fm350-tag-good, .fm350-tag-ok,
+	.fm350-tag-mid, .fm350-tag-bad) {
+	font-weight: 600 !important;
+}
+html:has(.vt-shell) #view .fm350-tag-good {
+	background: var(--fm-ui-ok-soft) !important; color: var(--fm-ui-ok) !important;
+}
+html:has(.vt-shell) #view .fm350-tag-ok {
+	background: var(--fm-ui-info-soft) !important; color: var(--fm-ui-info) !important;
+}
+html:has(.vt-shell) #view .fm350-tag-mid {
+	background: var(--fm-ui-warn-soft) !important; color: var(--fm-ui-warn) !important;
+}
+html:has(.vt-shell) #view .fm350-tag-bad {
+	background: var(--fm-ui-err-soft) !important; color: var(--fm-ui-err) !important;
+}
+/* 状态灯只用背景色区分，圆点/文字双编码由原 DOM 保留 */
+html:has(.vt-shell) #view .fm350-dot-up { background: var(--fm-ui-ok) !important; }
+html:has(.vt-shell) #view .fm350-dot-warn { background: var(--fm-ui-warn) !important; }
+html:has(.vt-shell) #view .fm350-dot-down { background: var(--fm-ui-err) !important; }
+
+/* 温度徽标：保留 level-* 类名区分档位，颜色改走语义令牌 */
+html:has(.vt-shell) #view .fm350-thermo-badge {
+	background: var(--fm-ui-err-soft) !important;
+	color: var(--fm-ui-err) !important;
+	box-shadow: none !important;
+}
+html:has(.vt-shell) #view .fm350-thermo-badge.level-cool {
+	background: var(--fm-ui-ok-soft) !important; color: var(--fm-ui-ok) !important;
+}
+html:has(.vt-shell) #view .fm350-thermo-badge.level-normal {
+	background: var(--fm-ui-info-soft) !important; color: var(--fm-ui-info) !important;
+}
+html:has(.vt-shell) #view .fm350-thermo-badge.level-warm {
+	background: var(--fm-ui-warn-soft) !important; color: var(--fm-ui-warn) !important;
+}
+html:has(.vt-shell) #view .fm350-thermo-badge.level-hot {
+	background: var(--fm-ui-err-soft) !important; color: var(--fm-ui-err) !important;
+}
+
+/* 温度条填充：实心语义色，保留原有渐变类名以免改变形状/档位含义 */
+html:has(.vt-shell) #view :is(.fill-cool, .fm350-bar-on.fm350-bar-lvl-5) { background: var(--fm-ui-ok) !important; }
+html:has(.vt-shell) #view :is(.fill-normal, .fm350-bar-on.fm350-bar-lvl-4) { background: var(--fm-ui-info) !important; }
+html:has(.vt-shell) #view :is(.fill-warm, .fm350-bar-on.fm350-bar-lvl-2,
+	.fm350-bar-on.fm350-bar-lvl-3) { background: var(--fm-ui-warn) !important; }
+html:has(.vt-shell) #view :is(.fill-hot, .fm350-bar-on.fm350-bar-lvl-1) { background: var(--fm-ui-err) !important; }
+html:has(.vt-shell) #view .fm350-bar { background: var(--fm-ui-line-2) !important; }
+
+/* 状态灯：核心 + ping 两层形状保留，只换颜色 */
+html:has(.vt-shell) #view .fm350-indicator-core { background: var(--fm-ui-line-2) !important; }
+html:has(.vt-shell) #view .fm350-indicator-ping { background: var(--fm-ui-info-soft) !important; }
+html:has(.vt-shell) #view .fm350-is-up .fm350-indicator-core { background: var(--fm-ui-ok) !important; }
+html:has(.vt-shell) #view .fm350-is-up .fm350-indicator-ping { background: var(--fm-ui-ok) !important; }
+html:has(.vt-shell) #view .fm350-is-down .fm350-indicator-core { background: var(--fm-ui-err) !important; }
+
+html:has(.vt-shell) #view .fm350-peak-badge {
+	background: var(--fm-ui-err) !important;
+	color: var(--err-ink, #fff) !important;
+	box-shadow: none !important;
+	border-radius: var(--fm-ui-radius) !important;
+}
+
+/* 刷新按钮：注入层带大量 !important，这里用 #view 前缀逐条压回 vantage 观感。
+   亮色橄榄底 + 白字、暗色青柠底 + 深墨字，绝不保留插件蓝青渐变或写死 #fff。 */
+html:has(.vt-shell) #view .fm350-refresh-btn {
+	background: var(--fm-primary) !important;
+	color: var(--fm-on-primary) !important;
+	border: 1px solid var(--fm-primary) !important;
+	border-radius: var(--fm-ui-radius) !important;
+	min-height: var(--fm-ui-ctl-h) !important;
+	padding: 6px 12px !important;
+	font-size: var(--v-fs-base) !important;
+	font-weight: var(--v-fw-semibold) !important;
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	gap: 6px !important;
+	box-shadow: var(--v-shadow) !important;
+	transition: background .12s ease !important;
+}
+html:has(.vt-shell) #view .fm350-refresh-btn:hover:not(:focus) {
+	background: var(--fm-primary-hover) !important;
+	color: var(--fm-on-primary) !important;
+	filter: none !important;
+	transform: none !important;
+	box-shadow: var(--v-shadow-raise) !important;
+}
+
+/* ==========================================================================
+   4. 表格：只作用于插件表格，不全局改 table，也不引入 vantage 的 .table 类
+   ========================================================================== */
+html:has(.vt-shell) #view :is(.fm350-table-card table, .fm350-table) {
+	width: 100%;
+	border-collapse: collapse;
+	table-layout: fixed;
+}
+html:has(.vt-shell) #view :is(.fm350-table-card th, .fm350-table-card td,
+	.fm350-table th, .fm350-table td) {
+	padding: 8px 12px;
+	font-size: var(--v-fs-base);
+	border-color: var(--fm-ui-line);
+}
+html:has(.vt-shell) #view :is(.fm350-table-card .fm350-table-key,
+	.fm350-table .fm350-table-key, .fm350-table th.fm350-col-key) {
+	width: 32% !important;
+	padding: 8px 12px !important;
+	font-size: var(--v-fs-sm) !important;
+}
+html:has(.vt-shell) #view :is(.fm350-table-card .fm350-table-val,
+	.fm350-table .fm350-table-val) {
+	padding: 8px 12px !important;
+	font-size: var(--v-fs-sm) !important;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+html:has(.vt-shell) #view .fm350-table-card tr { border-bottom-color: var(--fm-ui-line); }
+html:has(.vt-shell) #view .fm350-table-card tr:hover { background: var(--fm-ui-surface-alt) !important; }
+
+/* ==========================================================================
+   5. 表单与控件：解除 vantage .vt-main 的 360px 字段宽度限制
+   ========================================================================== */
+html:has(.vt-shell) #view .fm350-input { max-width: 560px !important; }
+html:has(.vt-shell) #view .fm350-input-num { width: 220px !important; }
+html:has(.vt-shell) #view .fm350-input-msg { max-width: 520px !important; }
+html:has(.vt-shell) #view .at-field-control :is(input, select, textarea) { max-width: 440px !important; }
+html:has(.vt-shell) #view :is(.fm350-input, .fm350-input-num, .fm350-input-msg,
+	.at-field-control :is(input, select, textarea)) {
+	box-sizing: border-box;
+	min-height: var(--ctl-h);
+}
+
+/* 暗色表单控件底色：mt5700.css 用全套 !important 写死深蓝紫底，
+   只能同权重覆盖。只用 background-color 长写，绝不用 background 简写——
+   简写会清掉 select 的下拉箭头 background-image。checkbox/radio/button 类
+   与只读域排除，交给 vantage 原生控件样式。 */
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(input, select, textarea):not(
+	[type="checkbox"], [type="radio"], [type="button"],
+	[type="submit"], [type="reset"], [readonly]
+) {
+	background-color: var(--v-surface-2) !important;
+	color: var(--v-text) !important;
+	border-color: var(--v-line-2) !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(input, textarea)::placeholder {
+	color: var(--v-text-3) !important;
+	opacity: 1 !important;
+}
+
+/* 焦点拆两层：:focus 给 vantage 单环 + soft halo（压掉插件紫晕 !important），
+   :focus-visible 再给键盘描边。checkbox/radio 不套 box-shadow 双环。 */
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(input, select, textarea):not(
+	[type="checkbox"], [type="radio"], [type="button"],
+	[type="submit"], [type="reset"], [readonly]
+):focus,
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) .fm350-refresh-btn:focus {
+	border-color: var(--v-focus) !important;
+	box-shadow: 0 0 0 1px var(--v-focus), 0 0 0 4px var(--v-accent-soft) !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(input, select, textarea, button):focus-visible {
+	outline: 2px solid var(--v-focus) !important;
+	outline-offset: 2px !important;
+}
+
+/* 只修两处紫色箭头；新内核的 base-select 自带 :open 信号色箭头，不能压死 */
+@supports not (appearance: base-select) {
+	html:has(.vt-shell) #view .mt5700-logselect select,
+	html:has(.vt-shell) :is(#modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) select {
+		background-image:
+			linear-gradient(45deg, transparent 50%, var(--v-text-3) 50%),
+			linear-gradient(135deg, var(--v-text-3) 50%, transparent 50%) !important;
+		background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50% !important;
+		background-size: 5px 5px, 5px 5px !important;
+		background-repeat: no-repeat !important;
+	}
+}
+
+/* 按钮三级：主/次/危险，作用域同时覆盖 #view 与 #modal_overlay */
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.mt5700-btn-primary,
+	.cbi-button-action, .cbi-button-apply, .at-btn-primary, .fm350-refresh-btn) {
+	background: var(--fm-primary) !important;
+	color: var(--fm-on-primary) !important;
+	box-shadow: var(--v-shadow) !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.mt5700-btn-primary,
+	.cbi-button-action, .cbi-button-apply, .at-btn-primary, .fm350-refresh-btn):hover:not(:disabled):not(:focus) {
+	background: var(--fm-primary-hover, color-mix(in srgb, var(--v-accent) 90%, var(--v-text))) !important;
+	box-shadow: var(--v-shadow-raise) !important;
+	transform: none !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.mt5700-btn-secondary,
+	.cbi-button-neutral, .cbi-button-reset,
+	.at-btn:not(.at-btn-primary):not(.at-btn-danger)) {
+	background: var(--v-surface-3) !important;
+	color: var(--v-text) !important;
+	border: 1px solid var(--v-line-2) !important;
+	box-shadow: none !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) .mt5700-btn-ghost {
+	background: transparent !important;
+	color: var(--v-text) !important;
+	border: 1px dashed var(--v-line-2) !important;
+	box-shadow: none !important;
+}
+html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.mt5700-btn-danger,
+	.cbi-button-remove, .at-btn-danger) {
+	background: var(--v-err) !important;
+	color: var(--err-ink, #fff) !important;
+	box-shadow: none !important;
+}
+
+/* ==========================================================================
+   6. 触控与断点
+   ========================================================================== */
+@media (pointer: coarse) {
+	html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(button, .btn, .cbi-button,
+		.at-btn, .mt5700-btn, .fm350-refresh-btn):not(:disabled) {
+		min-height: 44px !important;
+		min-width: 44px !important;
+	}
+	html:has(.vt-shell) #view :is(input:not([type="hidden"]), select, textarea,
+		.fm350-chip-btn, .mt-tab-btn, .mt5700-logtab, [role="tab"]) {
+		min-height: 44px;
+		min-width: 44px;
+	}
+	/* 16px 是 iOS 防缩放下限，721–768 触屏也继续命中，不许回拨 */
+	html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(input:not([type="hidden"]),
+		select, textarea) {
+		font-size: var(--v-fs-lg) !important;
+	}
+	html:has(.vt-shell) #view :is([role="tablist"], .mt-tab-header, .mt5700-logtabs, .fm350-chip-list) {
+		overflow-x: auto;
+		scroll-snap-type: x proximity;
+		-webkit-overflow-scrolling: touch;
+	}
+	html:has(.vt-shell) #view :is(.mt-tab-btn, .mt5700-logtab, .fm350-chip-btn, [role="tab"]) {
+		scroll-snap-align: start;
+	}
+	/* 开关已有 ::before/::after，直接复用 ::after 扩出 44×44 点击区，不新增 DOM */
+	html:has(.vt-shell) #view .mt5700-switch { min-height: 44px; }
+	html:has(.vt-shell) #view .mt5700-switch input[type="checkbox"]::after,
+	html:has(.vt-shell) #view .mt5700-switch input[type="checkbox"]:checked::after {
+		content: "" !important;
+		display: block !important;
+		position: absolute !important;
+		left: 0 !important;
+		top: -10px !important;
+		width: 44px !important;
+		height: 44px !important;
+		background: transparent !important;
+		border: 0 !important;
+		box-shadow: none !important;
+	}
+}
+
+@media (max-width: 720px) {
+	html:has(.vt-shell) #view :is(.fm350-input, .fm350-input-num, .fm350-input-msg,
+		.at-field-control :is(input, select, textarea)) {
+		width: 100% !important;
+		max-width: 100% !important;
+	}
+	html:has(.vt-shell) #view :is(.fm350-dashboard, .fm350-hero, .fm350-glass-card,
+		.fm350-thermal-dashboard, .fm350-table-card) {
+		padding: 12px 14px !important;
+		gap: 8px !important;
+	}
+	/* 传感器瓦片的唯一例外：紧凑内距保留 7×9，保证 2 列仍放得下长名字 */
+	html:has(.vt-shell) #view .fm350-sensor-card {
+		padding: 7px 9px !important;
+		gap: 8px !important;
+	}
+	html:has(.vt-shell) #view .fm350-sensors-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+		gap: 8px !important;
+	}
+	html:has(.vt-shell) #view :is(.fm350-table-card .fm350-table-key,
+		.fm350-table .fm350-table-key) { width: 38% !important; }
+	html:has(.vt-shell) #view .fm350-hero { flex-direction: column !important; }
+	html:has(.vt-shell) #view :is(.fm350-refresh-btn, .fm350-at-run-btn,
+		.fm350-hero-action :is(button, .at-btn, .mt5700-btn)) {
+		width: 100% !important;
+		justify-content: center !important;
+	}
+	/* 弹窗挂在 body 上，不在 #view 内，因此这里只保留 vantage 门控 */
+	html:has(.vt-shell) :is(#modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.at-modal, .mt5700-modal, .modal, .fm350-net2-modal) {
+		max-height: 85dvh !important;
+		padding-bottom: calc(16px + env(safe-area-inset-bottom)) !important;
+	}
+	html:has(.vt-shell) :is(#modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(.at-modal-actions, .mt5700-modal-actions, .modal-actions) {
+		flex-direction: column-reverse !important;
+	}
+}
+
+@media (max-width: 480px) {
+	html:has(.vt-shell) #view .fm350-sensors-grid { gap: 6px !important; }
+}
+
+@media (max-width: 340px) {
+	html:has(.vt-shell) #view .fm350-sensors-grid { grid-template-columns: 1fr !important; }
+}
+
+/* 721–768 冲突带：vantage 从 721px 起按宽屏排布，插件在 768px 以下仍按窄屏排布。
+   这里只做高权重回拨，不删除插件原规则，避免在 721–768 之间来回抖动。 */
+@media (min-width: 721px) and (max-width: 768px) {
+	/* 普通卡栅格与传感器瓦片必须拆开：23 路瓦片有自己的紧凑例外 */
+	html:has(.vt-shell) #view .fm350-grid:not(.fm350-sensors-grid),
+	html:has(.vt-shell) #view .fm350-grid-wide {
+		grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+		gap: 10px !important;
+	}
+	html:has(.vt-shell) #view .fm350-sensors-grid {
+		grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+	}
+	html:has(.vt-shell) #view .fm350-sensor-card { padding: 8px 10px !important; }
+	html:has(.vt-shell) #view .fm350-sensor-code { display: block !important; }
+	/* 该带内只抬标签/值的字号，输入框 16px 由 coarse 段负责，不在这里改 */
+	html:has(.vt-shell) #view :is(.fm350-table-key, .fm350-table-val,
+		.mt5700-form-grid .mt5700-label) { font-size: var(--v-fs-base) !important; }
+	html:has(.vt-shell) #view :is(.fm350-hero, .mt5700-hero-card) {
+		flex-direction: row !important;
+	}
+	html:has(.vt-shell) #view .fm350-table-card { overflow: visible !important; }
+	html:has(.vt-shell) #view .fm350-table-card table,
+	html:has(.vt-shell) #view .fm350-table { table-layout: auto !important; }
+	html:has(.vt-shell) #view .mt5700-form-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+	}
+	html:has(.vt-shell) #view .mt5700-btn { min-height: 36px !important; }
+}
+
+/* 回拨段的 36px 只针对鼠标；750px 触屏仍须 44px，放在回拨之后压回 */
+@media (pointer: coarse) {
+	html:has(.vt-shell) :is(#view, #modal_overlay, body > .mt5700-modal-mask, body > .at-modal-mask, body > .fm350-net2-mask) :is(button, .btn, .cbi-button,
+		.at-btn, .mt5700-btn, .fm350-refresh-btn):not(:disabled) {
+		min-height: 44px !important;
+		min-width: 44px !important;
+	}
+}
+
+/* ==========================================================================
+   7. reduced-motion
+   插件注入层与 vantage 全局 *.001ms 规则都会压掉动效偏好，这里统一收口；
+   仅保留加载旋转与 vantage 自身的 .spinning::before 慢转。
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+	html:has(.vt-shell) #view [class*="fm350-"],
+	html:has(.vt-shell) #view [class*="fm350-"]::before,
+	html:has(.vt-shell) #view [class*="fm350-"]::after {
+		animation: none !important;
+		transition: none !important;
+	}
+	html:has(.vt-shell) #view .fm350-loading-spin {
+		animation: fm350-loading-rotate .9s linear infinite !important;
+		animation-duration: .9s !important;
+		animation-iteration-count: infinite !important;
+	}
+	html:has(.vt-shell) #view .spinning::before {
+		animation-duration: 1.6s !important;
+		animation-iteration-count: infinite !important;
+	}
+}
+
+/* 最后兜底：settings.js 依赖 hidden 属性切换分组显隐，任何断点都不许覆盖 */
+html:has(.vt-shell) #view [hidden] { display: none !important; }

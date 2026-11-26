@@ -33,6 +33,18 @@ else if (!document.getElementById('fm350-dialog-css')) {
 	__dl.href = '/luci-static/resources/fm350/css/dialog.css?v=' + DIALOG_CSS_VERSION;
 	document.head.appendChild(__dl);
 }
+// vantage 主题兼容层：只在 vantage 主题命中的纯 CSS 修订，注入顺序在 dialog.css 之后。
+// 独立版本号：以后只调兼容样式时不必连带刷新体积更大的 mt5700.css。
+var VANTAGE_COMPAT_CSS_VERSION = '1.0.0';
+if (window.AtTheme) window.AtTheme.injectCss('/luci-static/resources/fm350/css/vantage-compat.css?v=' + VANTAGE_COMPAT_CSS_VERSION);
+else if (!document.getElementById('fm350-vantage-compat-css')) {
+	var __vc = document.createElement('link');
+	__vc.id = 'fm350-vantage-compat-css';
+	__vc.rel = 'stylesheet';
+	__vc.type = 'text/css';
+	__vc.href = '/luci-static/resources/fm350/css/vantage-compat.css?v=' + VANTAGE_COMPAT_CSS_VERSION;
+	document.head.appendChild(__vc);
+}
 
 /*
  * 插件全局背景：三角网格铺底（网格明暗由 CSS html.at-dark 切换），两个角色每次
