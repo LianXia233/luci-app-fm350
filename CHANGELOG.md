@@ -2,6 +2,12 @@
 
 本项目遵循语义化版本号。
 
+## 固件 Release 调整 (2026-11-27)
+
+- 下线 `firmware-29.23.24n_F31_official`（F31 原版），由 `firmware-29.24.02_F32_official`（F32 原版，RW-OTA）替代
+- 新增 `firmware-29.24.02_F32_patched`（F32 修改版：USB/adb 三层修复、`fibocom_modem_at_app` 两处 FD 泄漏修复、`fm350-guard` / `fm350-diag`）
+- 文档：新增 `docs/RELEASE_NOTES_F32.md`，README 固件章节改为 F27 / F32 双线对照
+
 ## 1.2.0-r9 (2026-11-27)
 
 设置页卡片标识修正，功能与接口不变。
@@ -121,7 +127,7 @@
   新配置默认值与校验。
 
 > 公网数据面最终仍需刷入 atproxy 2.3.0 修改固件（原 `firmware-29.23.24n_F31_mod`
-> 已下线；原厂包见 [`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)）。
+> 已下线；原厂包见 `firmware-29.23.24n_F31_official`（已下线））。
 > 本版保证的是「没刷配套固件时插件不会躺平」，不是替代模组内部绑定。
 
 ## 1.2.0-r4 (2026-11-04)
@@ -149,7 +155,7 @@ down/up 一次：该刷新来自 `daemon/dial.rs` → `V6Watch::maintain()`，
   `uses:` 行并拦截已知的 node20 主版本，防止后续改回旧引用。
 
 > 公网数据面仍需刷入 atproxy 2.3.0 修改固件（原 `firmware-29.23.24n_F31_mod`
-> 已下线；原厂包见 [`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)）。
+> 已下线；原厂包见 `firmware-29.23.24n_F31_official`（已下线））。
 > 插件侧无法代替模组内部完成 RNDIS / PDN 绑定。
 
 ## 1.2.0-r3 (2026-11-04)
@@ -229,7 +235,7 @@ down/up 一次：该刷新来自 `daemon/dial.rs` → `V6Watch::maintain()`，
 - **固件交付**：`firmware-29.23.24n_F31_mod` Release 替换为完整线刷包（15 个分区镜像 +
   `Scatter.xml` + `download_agent/`），移除 `F31_29.23.24n_MOD_AP.zip`，`SHA256SUMS` 同步重算。
   **该 Release 已下线**，原厂完整线刷包见
-  [`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)。
+  `firmware-29.23.24n_F31_official`（已下线）。
 - **MD 域全镜像逆向**：对线刷包 20 个镜像 + AP rootfs 1887 个文件做字符串取证，
   确认绑定逻辑只在 `modem.img`；`docs/RNDIS-Analysis-Report.md` 新增附录
   （`+EMBIND` URC 语义、D2RM 异步状态机、AP 侧普通/framework 双 AT 通道、

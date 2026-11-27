@@ -139,7 +139,7 @@ L2P 实例名。外部 AT 经 USB ACM → atcid → MIPC 到达 MD，缺少「�
 | atproxy | v2：仅 EMBIND 首绑（20 s）+ 120 s 保活 | 2.2.0：另含 AT 网关（硬性 >=25 ms 间隔、优先级队列）、自动拨号、APN 候选重试 |
 | APN | **不下发 CGDCONT**，原厂 APN 库保持原样 | 补齐国内四大运营商 `ia` APN，IMS cid 收窄为 20 |
 | `dipc_config` 自愈 / 禁用 PCIE | 无 | `mdcfg` + `pcieoff`（强制 `dual_ipc_mode:4`） |
-| Release | [firmware-29.24.02_F27](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.24.02_F27) | [firmware-29.23.24n_F31_official](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)（修改包 `firmware-29.23.24n_F31_mod` 已下线） |
+| Release | [firmware-29.24.02_F27](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.24.02_F27) | [firmware-29.24.02_F32_official](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.24.02_F32_official)（F31 原版与 `F31_mod` 均已下线） |
 
 **版本高低怎么理解**：按点分数值 `29.24.02 > 29.23.24`，但 F31 的 modem 与 DA
 构建时间晚约 14 个月 —— 这是两条并行发布分支，版本号不共享同一条递增序列，

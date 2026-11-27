@@ -135,15 +135,18 @@ rm -rf /tmp/luci-modulecache/
 
 未刷修改固件的设备上，本插件功能完全可用（EIF 增强为可选，见下文「EIF 兜底加速」）。
 
-### F31 29.23.24n 完整线刷包与 RNDIS 逆向分析
+### F32 原版完整线刷包与 RNDIS 逆向分析
 
-除上述 F27 发布外，本项目还提供基于官方 `F31_29.23.24n` 的**原厂完整线刷包**
-（Release tag [`firmware-29.23.24n_F31_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.23.24n_F31_official)）。
-此前的 **AP + MD 自愈修改包**（`firmware-29.23.24n_F31_mod`，含 atproxy 2.3.0）已下线；
-该修改包包含 `Scatter.xml`、
-`download_agent/`（DA / auth / flash.xml）及全部 15 个分区镜像，文件名与分区表逐一对应，
-可直接由 SP Flash Tool 加载；`DEV_OTA.img` 为 8 MiB 空白 YAFFS 分区镜像。
-modem 侧版本为 `81600.0000.00.29.23.24`，AP 侧内核为 4.19.205。
+本项目同时提供基于官方 `RW-OTA_29.24.02_F32` 的**原厂完整线刷包**
+（Release tag [`firmware-29.24.02_F32_official`](https://github.com/LianXia233/luci-app-fm350/releases/tag/firmware-29.24.02_F32_official)），
+共 21 个文件，含 `Scatter.xml`、`Scatter_demo.xml`、`download_agent/`（DA / auth / flash.xml）与各分区镜像，
+可直接由 SP Flash Tool 加载。原 F31（`29.23.24n`）原版包与 `F31_mod` 修改包均已下线。
+
+`modem.img` 版本 `81600.0000.00.29.24.02`（与 F27 线逐字节相同），AP 侧内核 4.19.205（`r0-3398e6421`）。
+
+> 以下逆向分析基于 F31 / F27 线的镜像：`modem.img` 在 F27 与 F32 之间逐字节一致，
+> 涉及 MD 域的结论对 F32 同样成立；F32 特有的内核与 AP 侧变化见
+> [docs/RELEASE_NOTES_F32.md](docs/RELEASE_NOTES_F32.md)。
 
 完整的逆向分析（证据链、内核配置、md1rom 容器解析、APN 数据库审计）见
 **[docs/RNDIS-Analysis-Report.md](docs/RNDIS-Analysis-Report.md)**。核心结论：
