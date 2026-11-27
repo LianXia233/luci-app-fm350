@@ -93,9 +93,17 @@ rm -rf /tmp/luci-modulecache/
 
 ## 修改版固件（推荐搭配）
 
-本项目同步发布针对 FM350-GL 的**修改版固件**（基于官方 `no-OTA_29.24.02_F27` 包，
-修改目的为更适配本插件），完整发布说明（校验值、刷入步骤、NV 备份警告）见
-**[docs/RELEASE_NOTES_F27.md](docs/RELEASE_NOTES_F27.md)**。
+本项目同步发布针对 FM350-GL 的**修改版固件**，分两条独立固件线，按基线选择：
+
+| 固件线 | 基线 | 主要改动 | 发布说明 |
+| :--- | :--- | :--- | :--- |
+| **F27（no-OTA）** | 官方 `no-OTA_29.24.02_F27` | atproxy v2、`usb.init` ADB 补丁、dropbear SSH、LuCI 相关组件 | [docs/RELEASE_NOTES_F27.md](docs/RELEASE_NOTES_F27.md) |
+| **F32（RW-OTA，2026-11-27）** | 官方 `RW-OTA_29.24.02_F32` | USB/adb 三层修复、`fibocom_modem_at_app` 两处 FD 泄漏修复、`fm350-guard` / `fm350-diag` | [docs/RELEASE_NOTES_F32.md](docs/RELEASE_NOTES_F32.md) |
+
+> F32 线仅替换 AP 侧 `root.squashfs`，**不包含** atproxy、dropbear 与 LuCI 组件，AP 侧保持原厂功能集。
+> 需要 RNDIS 数据面绑定与 AP 域 shell 的设备请继续使用 F27 线，或等待 F32 线的后续合并版本。
+
+### F27（no-OTA 基线）
 
 修改仅限 AP 侧 `root.squashfs`，modem 侧（MOLY NR15）保持官方原版，共三个部件：
 
@@ -114,6 +122,16 @@ rm -rf /tmp/luci-modulecache/
 
 > [!NOTE]
 > 本固件含免认证 root ADB 与空密码 dropbear（USB 通道调试用途），模组 USB 口请勿接入不受信任的主机。
+
+### F32（RW-OTA 基线，2026-11-27 发布）
+
+基于官方 `RW-OTA_29.24.02_F32`，只替换 AP 侧 `root.squashfs`，**不含** atproxy / dropbear / LuCI。包含三类改动：
+
+1. **USB / adb**：`usb.init` 的 dipc 回退写序修正、functionfs 无条件补挂（解决 `/config/usb_gadget/g1` 已存在时跳过挂载导致的 adb offline）、`adbd_usb` 清理重拉；`start_usb.sh` 超时仍绑定并兜底。
+2. **`fibocom_modem_at_app` 两处 FD 泄漏**：运营商映射表匹配成功路径、`/etc/vendor_info` 读取路径均缺少 `fclose()`，高频 `AT+CGMR` 会累积 fd 直到 `EMFILE`；已在二进制层用 trampoline 修复，未搬移原有指令。
+3. **`fm350-guard` / `fm350-diag`**（Rust + Tokio，静态 musl）：USB/adbd/FD 自愈守护，以及基于自有帧协议 `FMG1`/`FMR1` 的 root 控制通道（Unix socket `0600`，可选 token，全部 `exec` 审计）。
+
+详见 **[docs/RELEASE_NOTES_F32.md](docs/RELEASE_NOTES_F32.md)**（含校验值、SP Flash Tool 步骤、已知限制与回滚）。
 
 未刷修改固件的设备上，本插件功能完全可用（EIF 增强为可选，见下文「EIF 兜底加速」）。
 
